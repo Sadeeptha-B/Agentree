@@ -330,6 +330,25 @@ write(`${RN}/${G3}.jsonl`, [
   asst(G3, "g3-a3", "g3-u3", 22, "msg_rng3", [text("Ask what they'll try first.")]),
 ]);
 
+// c--work-toolloop: the last prose is early, then a long tool loop (tool_use
+// replies and tool_result records, no new text), then a mode change written
+// much later. Activity is the newest tool record; the mode change is only a
+// file change.
+const TL = "50000000-0000-4000-8000-000000000003";
+const toolCall = (sid, uuid, parent, min, id, n) =>
+  asst(sid, uuid, parent, min, id, [{ type: "tool_use", id: `tu_${n}`, name: "Bash", input: { command: `step ${n}` } }]);
+const toolResult = (sid, uuid, parent, min, n) =>
+  user(sid, uuid, parent, min, "tl-1", [{ type: "tool_result", tool_use_id: `tu_${n}`, content: "ok" }]);
+write(`${CL}/c--work-toolloop/${TL}.jsonl`, [
+  user(TL, "tl-u1", null, 0, "tl-1", "Run the long job"),
+  asst(TL, "tl-a1", "tl-u1", 1, "msg_tl1", [text("Starting.")]),
+  toolCall(TL, "tl-a2", "tl-a1", 5, "msg_tl2", 2),
+  toolResult(TL, "tl-r2", "tl-a2", 6, 2),
+  toolCall(TL, "tl-a3", "tl-r2", 8, "msg_tl3", 3),
+  toolResult(TL, "tl-r3", "tl-a3", 9, 3),
+  { type: "permission-mode", permissionMode: "acceptEdits", sessionId: TL, timestamp: ts(300) },
+]);
+
 // ------------------------------------------------------------------ Codex
 //
 // CODEX_HOME holding one family of paginated pages:
@@ -509,6 +528,25 @@ const T11 = "01900000-0000-7000-8000-00000000000b";
   at(40, { type: "event_msg", payload: { type: "turn_aborted", turn_id: tid, reason: "interrupted" } });
   const [rest] = cxTurn(T11, turn(17), o, 41, "Replacement prompt", ["Working.", "Replacement answer."]);
   write(`${CODEX}/sessions/2026/10/07/rollout-2026-10-07T10-00-00-${T11}.jsonl`, [meta(T11), ...r, ...rest]);
+}
+
+// A thread the extension merely LOADED hours after its last turn: settings,
+// usage, task and response_item records, no item. It is not recent activity.
+const T12 = "01900000-0000-7000-8000-00000000000c";
+{
+  const [t12, o12] = cxTurn(T12, turn(18), 1, 50, "Old question", ["Checking.", "Old answer."]);
+  let o = o12;
+  const late = (rec) => ({ timestamp: ts(400), ordinal: o++, ...rec });
+  write(`${CODEX}/sessions/2026/10/08/rollout-2026-10-08T10-00-00-${T12}.jsonl`, [
+    meta(T12),
+    ...t12,
+    late({ type: "event_msg", payload: { type: "thread_settings_applied", turn_id: turn(19) } }),
+    late({ type: "event_msg", payload: { type: "task_started", turn_id: turn(19) } }),
+    late({ type: "response_item", payload: { type: "message", role: "developer", content: [] } }),
+    late({ type: "event_msg", payload: { type: "token_count", info: null } }),
+    late({ type: "token_usage_record", payload: { turn_id: turn(19), usage: { input_tokens: 9, output_tokens: 1 } } }),
+    late({ type: "event_msg", payload: { type: "task_complete", turn_id: turn(19) } }),
+  ]);
 }
 
 // Legacy (pre-paginated) rollout and a copy-prefix fork of it.

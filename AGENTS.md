@@ -665,9 +665,21 @@ The tree follows the transcripts on disk.
   A provider that regresses into duplicates must not reach the screen: two
   cards with one React key left stale cards above a filtered list.
 - No refresh button (the watcher keeps it live) and no "only branched" filter.
-- `updatedAt` is the newest timestamp on **any** record in any member. It
-  isn't mtime (bookkeeping rewrites move that) and it isn't the newest
-  displayed turn (which stands still through a long tool loop).
+- Two times per session and member, both from record timestamps (never
+  mtime, which bookkeeping rewrites move). The list sorts by `activeAt`.
+  - `activeAt`, last conversational activity. It isn't the newest
+    *displayed* turn, which stands still through a long tool loop; tool
+    records count. Claude: any `user`/`assistant` record (tool-only replies
+    and tool results included), `queued_command` attachments and
+    `compact_boundary`. Codex: any `item_started`/`item_completed` event,
+    of any item type (legacy: prose events and tool calls). Copilot:
+    `user.*`, `assistant.*`, `tool.*`, `external_tool.*`, `subagent.*`
+    events. **Verified:** the Codex extension re-stamps threads it merely
+    loads with `thread_settings_applied`, `task_*`, `token_count`,
+    `token_usage_record` and a `response_item`; five threads idle for days
+    looked minutes old when sorted by every record.
+  - `touchedAt`, the newest timestamp on **any** record ("last file
+    change"), shown in the card's tooltip.
 
 ## Not dying under load
 

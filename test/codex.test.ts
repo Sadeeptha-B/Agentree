@@ -22,6 +22,7 @@ const T7 = "01900000-0000-7000-8000-000000000007";
 const T8 = "01900000-0000-7000-8000-000000000008";
 const T9 = "01900000-0000-7000-8000-00000000000a";
 const T11 = "01900000-0000-7000-8000-00000000000b";
+const T12 = "01900000-0000-7000-8000-00000000000c";
 const G = "01900000-0000-7000-8000-000000000009";
 const L = "01800000-0000-7000-8000-000000000001";
 const turn = (n: number) => `01900000-0000-7000-8000-0000000a${String(n).padStart(4, "0")}`;
@@ -49,12 +50,18 @@ describe("Codex paginated rollouts", () => {
   it("lists families, hides guardian threads, names from session_index", () => {
     const list = listCodexSessions();
     const ids = list.map((s) => s.id).sort();
-    expect(ids).toEqual([L, T1, T4, T5, T8, T11].sort());
+    expect(ids).toEqual([L, T1, T4, T5, T8, T11, T12].sort());
     expect(ids).not.toContain(G);
     expect(ids).not.toContain(T7); // unparseable, so nothing to list
     const fam = list.find((s) => s.id === T1)!;
     expect(fam.title).toBe("X investigation");
     expect(fam.members).toBe(3); // T1, archived T3, T2
+  });
+
+  it("dates a thread by its last item, not by records written when it was merely loaded", () => {
+    const s = listCodexSessions().find((x) => x.id === T12)!;
+    expect(new Date(s.activeAt).toISOString()).toBe("2026-10-01T10:50:00.000Z");
+    expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T16:40:00.000Z");
   });
 
   it("builds forks AND prompt edits into one exact tree", () => {
