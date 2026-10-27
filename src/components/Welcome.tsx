@@ -88,8 +88,10 @@ function HealthRows({
 const RAIL_DIRS = 10;
 
 export function Welcome() {
-  const { sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen } =
-    useStore();
+  const {
+    sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen,
+    saveSettings,
+  } = useStore();
   const sortBy = settings?.settings.sortBy ?? "active";
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -209,6 +211,21 @@ export function Welcome() {
           <span className="muted small">
             {loading && sessions.length === 0 ? "scanning…" : `${visible.length} conversations`}
           </span>
+          {/* Which time orders the list is a setting; say which, here, and let
+              one click switch it — a remembered "last file change" otherwise
+              looks like the list ignoring activity. */}
+          <button
+            className="ghost sort-toggle small"
+            disabled={!settings}
+            title={
+              sortBy === "touched"
+                ? "Sorted by the last write to any of the session's files, bookkeeping included. Click to sort by the last message or tool activity."
+                : "Sorted by the last message or tool activity. Click to sort by the last change to the session's files."
+            }
+            onClick={() => void saveSettings({ sortBy: sortBy === "touched" ? "active" : "touched" })}
+          >
+            by {sortBy === "touched" ? "last file change" : "last activity"} ⇅
+          </button>
         </div>
 
         <HealthRows

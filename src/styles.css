@@ -520,3 +520,4 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 .settings-path input:focus { outline: none; border-color: var(--accent); }
 .settings-path input:disabled { opacity: 0.6; }
 .settings-file code { font-family: var(--mono); word-break: break-all; }
+.sort-toggle { white-space: nowrap; padding: 2px 8px; }
