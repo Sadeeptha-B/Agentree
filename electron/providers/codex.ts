@@ -1,35 +1,63 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { childIndex, countBranchPoints } from "../../shared/render.ts";
 import type {
   ForkResult,
+  MemberInfo,
+  ProviderHealth,
   SessionDetail,
   SessionId,
   SessionMeta,
   TurnNode,
   UsageSnapshot,
 } from "../../shared/types.ts";
-import { mergeSameRoleRuns } from "../transcripts.ts";
+import { HealthScan, minorVersion } from "../health.ts";
 import { readMeta } from "../meta.ts";
+import { codexArchived, codexIndex, codexSessions } from "../paths.ts";
+import { resumeCommand } from "../shell.ts";
+import { mergeSameRoleRuns } from "../transcripts.ts";
+import { forkThread } from "./codex-appserver.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
-export const SESSIONS = path.join(os.homedir(), ".codex", "sessions");
-
 /**
- * Codex rollout: `rollout-<stamp>-<uuid>.jsonl` under Y/M/D directories.
+ * Codex rollouts, paginated format (codex-cli ≥ ~0.151, 2026-09 on).
  *
- * The DISPLAY stream is the `event_msg` records — `user_message` and
- * `agent_message` carry clean prose. The `response_item` records duplicate the
- * conversation as raw API items, including the harness plumbing Codex injects
- * as `role: "developer"` / `role: "user"` messages (`<permissions
- * instructions>`, `<environment_context>`, `<user_instructions>`, AGENTS.md
- * dumps). Parsing event_msgs sidesteps all of it; response_items are read only
- * for tool-call names and reasoning summaries.
+ * A thread's history is a chain of PAGE files:
+ *
+ *   sessions/Y/M/D/rollout-<stamp>-<threadId>.jsonl[.zst]            first page
+ *   sessions/Y/M/D/rollout-<stamp>-<threadId>_<pageId>.jsonl[.zst]   later pages
+ *
+ * Every non-first page starts with a `session_meta` whose `history_base`
+ * `{thread_id: <pageId>, end_ordinal_exclusive}` says "my history is that
+ * page's history, cut before this ordinal, then my own records". Ordinals are
+ * global sequence numbers that continue across pages. A prompt edit
+ * (`turn_trigger: "edit_user_message"`) starts a new page cut before the
+ * edited turn; a fork (VS Code "fork from here", `thread/fork`) starts a new
+ * THREAD whose first page is cut after the chosen turn, and also records
+ * `forked_from_id`. Verified on 24 cuts: every one lands on a turn boundary.
+ *
+ * So the pages form an exact tree with no matching or inference: a page's
+ * first turn hangs off the last turn of its base before the cut. Turn ids
+ * (UUIDv7) are shared by reference, never copied. This is strictly more than
+ * `codex app-server` shows — `thread/turns/list` returns only a thread's
+ * active path, hiding every prompt-edit branch — which is why the tree is
+ * built from the files and the app-server is used only to fork.
+ *
+ * Older pages are zstd-compressed; bases may live in `archived_sessions/`
+ * (an archived thread can be the root of live forks). Guardian-review and
+ * subagent threads are Codex's own plumbing and are hidden.
+ *
+ * Pre-paginated ("legacy") rollouts — `event_msg` `user_message` /
+ * `agent_message`, forks as verbatim copied prefixes — are still read, and
+ * their families stitched by content.
  */
+
+// ------------------------------------------------------------------ records
+
 interface RawRecord {
   timestamp?: string;
+  ordinal?: number;
   type?: string;
   payload?: {
     type?: string;
@@ -38,149 +66,371 @@ interface RawRecord {
     cwd?: string;
     forked_from_id?: string;
     thread_source?: unknown;
-    // event_msg
+    source?: unknown;
+    cli_version?: string;
+    originator?: string;
+    history_mode?: string;
+    history_base?: { thread_id?: string; end_ordinal_exclusive?: number };
+    // event_msg / token_usage_record
+    turn_id?: string;
+    item?: CodexItem;
     message?: string;
-    info?: {
-      last_token_usage?: Record<string, number>;
-    };
-    // response_item
+    info?: { last_token_usage?: Record<string, number> };
+    usage?: Record<string, number>;
+    // turn_context
+    model?: string;
+    // response_item (legacy)
     name?: string;
     summary?: { type?: string; text?: string }[];
   };
 }
 
-interface Header {
-  id: string;
-  cwd: string;
-  forkedFrom: string | null;
-  /** Subagent threads are Codex's sidechains; they get no listing of their own. */
-  subagent: boolean;
+interface CodexItem {
+  type?: string;
+  id?: string;
+  content?: { type?: string; text?: string }[];
+  phase?: string;
+  summary_text?: string[];
+  server?: string;
+  tool?: string;
+  kind?: string;
 }
 
-function readHeader(file: string): Header | null {
-  // The session_meta line embeds the FULL base instructions prompt, so "the
-  // first line" is routinely 30–100 KB. Read in growing chunks until a newline
-  // appears rather than assuming any fixed prefix holds it.
-  let firstLine: string | null = null;
+const KNOWN_RECORDS = new Set([
+  "session_meta",
+  "event_msg",
+  "response_item",
+  "token_usage_record",
+  "turn_context",
+  "world_state",
+  "compacted",
+]);
+const KNOWN_EVENTS = new Set([
+  "item_completed",
+  "item_started",
+  "task_started",
+  "task_complete",
+  "token_count",
+  "thread_settings_applied",
+  "turn_aborted",
+  "context_compacted",
+]);
+const KNOWN_ITEMS = new Set([
+  "UserMessage",
+  "AgentMessage",
+  "Reasoning",
+  "CommandExecution",
+  "FileChange",
+  "McpToolCall",
+  "WebSearch",
+  "Extension",
+  "ContextCompaction",
+  "Plan",
+  "ImageView",
+  "HookPrompt",
+]);
+
+/** `zlib.zstdDecompressSync` is Node ≥ 22.15 / 23.8; feature-detected, never assumed. */
+const zstd = (zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer }).zstdDecompressSync;
+
+function readText(file: string): string | null {
   try {
-    const fd = fs.openSync(file, "r");
-    try {
-      // Accumulate raw bytes and decode once: a per-chunk decode could tear a
-      // multibyte character at a chunk boundary and corrupt the JSON.
-      const parts: Buffer[] = [];
-      let pos = 0;
-      let total = 0;
-      while (total < 4 * 1024 * 1024) {
-        const chunk = Buffer.alloc(65536);
-        const n = fs.readSync(fd, chunk, 0, chunk.length, pos);
-        if (n === 0) break;
-        pos += n;
-        total += n;
-        parts.push(chunk.subarray(0, n));
-        if (chunk.subarray(0, n).includes(0x0a)) break;
-      }
-      const acc = Buffer.concat(parts).toString("utf8");
-      const nl = acc.indexOf("\n");
-      firstLine = nl >= 0 ? acc.slice(0, nl) : acc;
-    } finally {
-      fs.closeSync(fd);
-    }
+    const buf = fs.readFileSync(file);
+    if (!file.endsWith(".zst")) return buf.toString("utf8");
+    if (!zstd) return null;
+    return zstd(buf).toString("utf8");
   } catch {
     return null;
   }
-  try {
-    return readHeaderFromLine(firstLine);
-  } catch {
-    return null;
+}
+
+/**
+ * VS Code wraps the prompt in its editor context:
+ *   "# Context from my IDE setup:\n\n## Active file: …\n## Open tabs: …\n## My request:\n<prompt>"
+ * (also "# Files mentioned by the user:"). Keep the prompt, drop the context.
+ */
+function cleanUserText(s: string): string {
+  const t = s.trim();
+  if (/^# (Context from my IDE setup|Files mentioned by the user):/.test(t)) {
+    const m = /\n## My request(?: for Codex)?:\s*\n([\s\S]*)$/.exec(t);
+    if (m) return m[1].trim();
   }
+  return t.replace(CODEX_WRAP, "").trim();
 }
 
-// ------------------------------------------------------------------ index
-
-/** sessionId -> file, with headers, rebuilt cheaply (header cache by mtime). */
-const headers = new Map<string, { mtimeMs: number; header: Header | null }>();
-
-function scanFiles(): { file: string; header: Header }[] {
-  if (!fs.existsSync(SESSIONS)) return [];
-  const out: { file: string; header: Header }[] = [];
-  const walk = (dir: string, depth: number) => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        if (depth < 3) walk(p, depth + 1);
-      } else if (e.name.endsWith(".jsonl")) {
-        let mtimeMs = 0;
-        try {
-          mtimeMs = fs.statSync(p).mtimeMs;
-        } catch {
-          continue;
-        }
-        const hit = headers.get(p);
-        const header =
-          hit && hit.mtimeMs === mtimeMs ? hit.header : readHeader(p);
-        if (!hit || hit.mtimeMs !== mtimeMs) headers.set(p, { mtimeMs, header });
-        if (header) out.push({ file: p, header });
-      }
-    }
-  };
-  walk(SESSIONS, 0);
-  return out;
-}
-
-export function locateCodex(sessionId: SessionId): string | null {
-  if (!/^[a-zA-Z0-9-]{8,64}$/.test(sessionId)) return null;
-  for (const { file, header } of scanFiles()) {
-    if (header.id === sessionId) return file;
-  }
-  return null;
-}
-
-// ------------------------------------------------------------------ parsing
-
-interface ParsedRollout {
-  header: Header;
-  /** Linear turns; node ids are `<sessionId>#<n>`, stable under append. */
-  nodes: TurnNode[];
-  /** For each turn, the index of the LAST raw line belonging to it. */
-  endLine: number[];
-  touchedAt: number;
-}
-
-/** Codex plumbing occasionally embedded in user_message events. */
+/** Codex plumbing occasionally embedded in legacy user_message events. */
 const CODEX_WRAP =
   /<(user_instructions|environment_context|permissions instructions|turn-aborted)>[\s\S]*?<\/\1>/g;
 
-function parseRollout(file: string): ParsedRollout | null {
-  let raw: string;
+function toolName(it: CodexItem): string | null {
+  switch (it.type) {
+    case "CommandExecution":
+      return "shell";
+    case "FileChange":
+      return "apply_patch";
+    case "McpToolCall":
+      return it.server && it.tool ? `${it.server}.${it.tool}` : "mcp";
+    case "WebSearch":
+      return "web_search";
+    case "Extension":
+      return it.kind ?? "extension";
+    case "ImageView":
+      return "view_image";
+    case "Plan":
+      return "update_plan";
+    default:
+      return null;
+  }
+}
+
+/** Codex counts cached tokens inside input_tokens; Agentree stores the Anthropic split. */
+function toUsage(u: Record<string, number>): UsageSnapshot {
+  const cached = u.cached_input_tokens ?? 0;
+  return {
+    input_tokens: Math.max(0, (u.input_tokens ?? 0) - cached),
+    output_tokens: u.output_tokens ?? 0,
+    cache_creation_input_tokens: u.cache_write_input_tokens ?? 0,
+    cache_read_input_tokens: cached,
+  };
+}
+
+const addUsage = (a: UsageSnapshot | undefined, b: UsageSnapshot): UsageSnapshot => ({
+  input_tokens: (a?.input_tokens ?? 0) + b.input_tokens,
+  output_tokens: (a?.output_tokens ?? 0) + b.output_tokens,
+  cache_creation_input_tokens: (a?.cache_creation_input_tokens ?? 0) + b.cache_creation_input_tokens,
+  cache_read_input_tokens: (a?.cache_read_input_tokens ?? 0) + b.cache_read_input_tokens,
+});
+
+// ------------------------------------------------------------------ pages
+
+type Source = "user" | "hidden";
+
+interface Turn {
+  id: string;
+  firstOrdinal: number;
+  /** Own nodes, chained among themselves; nodes[0].parentId is set by the tree. */
+  nodes: TurnNode[];
+}
+
+interface Page {
+  pageId: string;
+  threadId: string;
+  file: string;
+  archived: boolean;
+  cwd: string;
+  forkedFrom: string | null;
+  base: { pageId: string; end: number } | null;
+  source: Source;
+  version?: string;
+  /** Pre-paginated rollout: linear nodes, families stitched by content. */
+  legacy: boolean;
+  turns: Turn[];
+  lastOrdinal: number;
+  touchedAt: number;
+  firstUserText: string;
+  unknownTypes: Record<string, number>;
+}
+
+const FILE_RE =
+  /^rollout-.*?-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))?\.jsonl(?:\.zst)?$/;
+
+function sourceOf(meta: NonNullable<RawRecord["payload"]>): Source {
+  const ts = meta.thread_source;
+  if (ts === "guardian_review" || ts === "subagent") return "hidden";
+  if (typeof ts === "object" && ts !== null) return "hidden"; // {subagent: …}
+  const src = meta.source;
+  if (typeof src === "object" && src !== null && "subagent" in src) return "hidden";
+  return "user";
+}
+
+function parsePage(file: string, archived: boolean): Page | null {
+  const m = FILE_RE.exec(path.basename(file));
+  if (!m) return null;
+  const text = readText(file);
+  if (text === null) return null;
+  const lines = text.split("\n");
+  let head: RawRecord;
   try {
-    raw = fs.readFileSync(file, "utf8");
+    head = JSON.parse(lines[0]) as RawRecord;
   } catch {
     return null;
   }
-  const lines = raw.split("\n");
-  const first = lines[0];
-  let header: Header | null = null;
-  try {
-    header = readHeaderFromLine(first);
-  } catch {
-    /* fall through */
-  }
-  if (!header) return null;
+  const meta = head.payload;
+  if (head.type !== "session_meta" || !meta?.id) return null;
 
-  const sid = header.id;
+  const hb = meta.history_base;
+  const page: Page = {
+    pageId: m[2] ?? m[1],
+    threadId: meta.id,
+    file,
+    archived,
+    cwd: meta.cwd ?? "",
+    forkedFrom: meta.forked_from_id ?? null,
+    base:
+      hb?.thread_id && typeof hb.end_ordinal_exclusive === "number"
+        ? { pageId: hb.thread_id, end: hb.end_ordinal_exclusive }
+        : null,
+    source: sourceOf(meta),
+    version: meta.cli_version,
+    legacy: meta.history_mode !== "paginated",
+    turns: [],
+    lastOrdinal: 0,
+    touchedAt: 0,
+    firstUserText: "",
+    unknownTypes: {},
+  };
+
+  const records: RawRecord[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    try {
+      records.push(JSON.parse(lines[i]) as RawRecord);
+    } catch {
+      /* torn tail of a live session */
+    }
+  }
+  if (page.legacy && !records.some((r) => r.payload?.type === "item_completed")) {
+    parseLegacy(page, records);
+  } else {
+    page.legacy = false;
+    parsePaginated(page, records);
+  }
+  page.firstUserText = page.turns.flatMap((t) => t.nodes).find((n) => n.role === "user")?.text ?? "";
+  return page;
+}
+
+function parsePaginated(page: Page, records: RawRecord[]): void {
+  const bump = (k: string) => (page.unknownTypes[k] = (page.unknownTypes[k] ?? 0) + 1);
+
+  interface Builder {
+    turn: Turn;
+    cur: TurnNode | null;
+    tools: string[];
+    thinking: string[];
+    lastAssistant: TurnNode | null;
+    users: number;
+  }
+  const turns = new Map<string, Builder>();
+  let model: string | undefined;
+
+  const builder = (turnId: string, ordinal: number): Builder => {
+    let b = turns.get(turnId);
+    if (!b) {
+      b = {
+        turn: { id: turnId, firstOrdinal: ordinal, nodes: [] },
+        cur: null,
+        tools: [],
+        thinking: [],
+        lastAssistant: null,
+        users: 0,
+      };
+      turns.set(turnId, b);
+    }
+    return b;
+  };
+
+  const push = (b: Builder, n: TurnNode) => {
+    const prev = b.turn.nodes[b.turn.nodes.length - 1];
+    n.parentId = prev ? prev.id : null;
+    b.turn.nodes.push(n);
+    b.cur = n;
+  };
+
+  for (const r of records) {
+    const ts = r.timestamp ? Date.parse(r.timestamp) : 0;
+    if (ts > page.touchedAt) page.touchedAt = ts;
+    const ord = r.ordinal ?? 0;
+    if (ord > page.lastOrdinal) page.lastOrdinal = ord;
+    if (r.type && !KNOWN_RECORDS.has(r.type)) bump(r.type);
+    const p = r.payload;
+    if (!p) continue;
+
+    if (r.type === "turn_context" && p.model) model = p.model;
+    if (r.type === "event_msg" && p.type && !KNOWN_EVENTS.has(p.type)) bump(`event_msg/${p.type}`);
+    if (!p.turn_id) continue;
+    const b = builder(p.turn_id, ord);
+
+    if (r.type === "token_usage_record" && p.usage) {
+      const u = toUsage(p.usage);
+      const target = b.lastAssistant;
+      if (target) {
+        target.usage = addUsage(target.usage, u);
+        target.lastUsage = u;
+      }
+      continue;
+    }
+    if (r.type !== "event_msg" || p.type !== "item_completed" || !p.item) continue;
+
+    const it = p.item;
+    if (it.type && !KNOWN_ITEMS.has(it.type)) bump(`item/${it.type}`);
+    const nodeId = `${b.turn.id}:${it.id ?? b.turn.nodes.length}`;
+    const base = {
+      lastRawId: b.turn.id,
+      sourceSessionId: page.threadId,
+      timestamp: ts,
+    };
+
+    if (it.type === "UserMessage") {
+      const parts = it.content ?? [];
+      let text = cleanUserText(parts.filter((c) => c.type === "text").map((c) => c.text ?? "").join(""));
+      const media = parts.filter((c) => c.type !== "text").length;
+      if (!text && media) text = media > 1 ? `[${media} attachments]` : "[image]";
+      if (!text) continue;
+      push(b, {
+        ...base,
+        id: nodeId,
+        parentId: null,
+        role: "user",
+        text,
+        // A second prompt inside one turn was typed while Codex was working
+        // ("steering"); it rides the same turn, so it can't anchor a fork alone.
+        midTurn: b.users++ > 0 || undefined,
+      });
+    } else if (it.type === "AgentMessage") {
+      const text = (it.content ?? []).map((c) => c.text ?? "").join("").trim();
+      if (!text) continue;
+      if (b.cur?.role === "assistant") {
+        // Commentary and final answer of one reply are one node, like Claude's
+        // agent-loop merge.
+        b.cur.text += `\n\n${text}`;
+      } else {
+        push(b, { ...base, id: nodeId, parentId: null, role: "assistant", text, model });
+      }
+      const n = b.cur!;
+      if (b.tools.length) n.toolUses = [...(n.toolUses ?? []), ...b.tools];
+      if (b.thinking.length) n.thinking = [n.thinking, ...b.thinking].filter(Boolean).join("\n\n");
+      b.tools = [];
+      b.thinking = [];
+      b.lastAssistant = n;
+    } else if (it.type === "Reasoning") {
+      const t = (it.summary_text ?? []).filter(Boolean).join("\n\n");
+      if (t) b.thinking.push(t);
+    } else {
+      const name = toolName(it);
+      if (name) b.tools.push(name);
+    }
+  }
+
+  // Tools after a turn's last prose still belong to that reply.
+  for (const b of turns.values()) {
+    if (b.lastAssistant && b.tools.length) {
+      b.lastAssistant.toolUses = [...(b.lastAssistant.toolUses ?? []), ...b.tools];
+    }
+  }
+  page.turns = [...turns.values()]
+    .map((b) => b.turn)
+    .filter((t) => t.nodes.length > 0)
+    .sort((a, c) => a.firstOrdinal - c.firstOrdinal);
+}
+
+/** The pre-paginated format: one linear stream of event_msg prose. */
+function parseLegacy(page: Page, records: RawRecord[]): void {
+  const sid = page.threadId;
   const nodes: TurnNode[] = [];
-  const endLine: number[] = [];
-  let touchedAt = 0;
   let pendingTools: string[] = [];
   let pendingThinking = "";
 
-  const push = (role: TurnNode["role"], text: string, ts: number, i: number) => {
+  const push = (role: TurnNode["role"], text: string, ts: number) => {
     const n = nodes.length;
     nodes.push({
       id: `${sid}#${n}`,
@@ -188,56 +438,31 @@ function parseRollout(file: string): ParsedRollout | null {
       role,
       text,
       timestamp: ts,
+      sourceSessionId: sid,
       thinking: role === "assistant" && pendingThinking ? pendingThinking : undefined,
       toolUses: role === "assistant" && pendingTools.length ? pendingTools : undefined,
     });
-    endLine.push(i);
     if (role === "assistant") {
       pendingTools = [];
       pendingThinking = "";
     }
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    let rec: RawRecord;
-    try {
-      rec = JSON.parse(line) as RawRecord;
-    } catch {
-      continue; // torn tail of a live session
-    }
+  for (const rec of records) {
     const ts = rec.timestamp ? Date.parse(rec.timestamp) : 0;
-    if (ts > touchedAt) touchedAt = ts;
+    if (ts > page.touchedAt) page.touchedAt = ts;
     const p = rec.payload;
     if (!p) continue;
-
     if (rec.type === "event_msg") {
       if (p.type === "user_message" && typeof p.message === "string") {
-        const text = p.message.replace(CODEX_WRAP, "").trim();
-        if (text) push("user", text, ts, i);
+        const text = cleanUserText(p.message);
+        if (text) push("user", text, ts);
       } else if (p.type === "agent_message" && typeof p.message === "string") {
-        if (p.message.trim()) push("assistant", p.message.trim(), ts, i);
+        if (p.message.trim()) push("assistant", p.message.trim(), ts);
       } else if (p.type === "token_count") {
         const u = p.info?.last_token_usage;
         const last = nodes[nodes.length - 1];
-        if (u && last && last.role === "assistant") {
-          const cached = u.cached_input_tokens ?? 0;
-          const usage: UsageSnapshot = {
-            // Codex's input_tokens INCLUDES the cached part; Agentree's
-            // (Anthropic-shaped) input_tokens is the uncached remainder.
-            input_tokens: Math.max(0, (u.input_tokens ?? 0) - cached),
-            output_tokens: u.output_tokens ?? 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cached,
-          };
-          last.usage = usage;
-          last.lastUsage = usage;
-          endLine[endLine.length - 1] = i;
-        }
-      } else if (nodes.length) {
-        // task_complete and friends extend the turn they close.
-        if (p.type === "task_complete") endLine[endLine.length - 1] = i;
+        if (u && last && last.role === "assistant") last.usage = last.lastUsage = toUsage(u);
       }
     } else if (rec.type === "response_item") {
       if ((p.type === "function_call" || p.type === "custom_tool_call") && p.name) {
@@ -248,258 +473,395 @@ function parseRollout(file: string): ParsedRollout | null {
       }
     }
   }
-
-  return { header, nodes, endLine, touchedAt };
+  // Legacy rollouts can't be forked at a turn through the API (no turn ids),
+  // so the whole stream is one pseudo-turn.
+  page.turns = nodes.length ? [{ id: `${sid}#legacy`, firstOrdinal: 0, nodes }] : [];
 }
 
-function readHeaderFromLine(line: string): Header | null {
-  const rec = JSON.parse(line) as RawRecord;
-  if (rec.type !== "session_meta" || !rec.payload?.id) return null;
-  const src = rec.payload.thread_source;
-  return {
-    id: rec.payload.id,
-    cwd: rec.payload.cwd ?? "",
-    forkedFrom: rec.payload.forked_from_id ?? null,
-    subagent: src === "subagent" || (typeof src === "object" && src !== null),
+// ------------------------------------------------------------------ scan
+
+/** Full-parse cache by file identity. Pages are small; the tree needs all of them. */
+const pages = new Map<string, { mtimeMs: number; size: number; page: Page | null }>();
+
+interface Scan {
+  pages: Page[];
+  byPage: Map<string, Page>;
+  health: HealthScan;
+}
+
+function scanPages(): Scan {
+  const health = new HealthScan("codex", codexSessions());
+  if (!zstd) health.error("This Node runtime has no zstd support; compressed .jsonl.zst rollouts can't be read.");
+  const out: Page[] = [];
+  const seen = new Set<string>();
+
+  const visit = (file: string, archived: boolean) => {
+    seen.add(file);
+    health.file();
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      return;
+    }
+    const hit = pages.get(file);
+    const page =
+      hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size ? hit.page : parsePage(file, archived);
+    if (!hit || hit.mtimeMs !== st.mtimeMs || hit.size !== st.size) {
+      pages.set(file, { mtimeMs: st.mtimeMs, size: st.size, page });
+    }
+    if (!page) return;
+    health.version(page.version ? `codex-cli ${minorVersion(page.version)}` : undefined);
+    if (page.source === "hidden") {
+      health.skipped();
+      return;
+    }
+    health.unknown(page.unknownTypes);
+    // A page with no turns is still a valid link in the tree (e.g. an edit
+    // that was abandoned before any reply); it parsed, it just says nothing.
+    health.parsed();
+    out.push(page);
   };
+
+  const walk = (dir: string, depth: number, archived: boolean) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (depth < 3) walk(p, depth + 1, archived);
+      } else if (/\.jsonl(\.zst)?$/.test(e.name)) {
+        visit(p, archived);
+      }
+    }
+  };
+  walk(codexSessions(), 0, false);
+  walk(codexArchived(), 0, true);
+  for (const key of pages.keys()) if (!seen.has(key)) pages.delete(key);
+
+  const byPage = new Map(out.map((p) => [p.pageId, p]));
+  for (const p of out) {
+    if (p.base && !byPage.has(p.base.pageId)) {
+      health.warn("Some rollout pages continue a page that is no longer on disk; they are drawn as separate roots.");
+    }
+  }
+  return { pages: out, byPage, health };
 }
 
-/** Full-parse cache, keyed by file identity — same shape as the Claude one. */
-const parses = new Map<string, { mtimeMs: number; size: number; parsed: ParsedRollout }>();
-
-function parsed(file: string): ParsedRollout | null {
-  let stat: fs.Stats;
+/** `session_index.jsonl`: `{id, thread_name}` lines, last one per id wins. */
+let indexCache: { mtimeMs: number; names: Map<string, string> } | null = null;
+function threadNames(): Map<string, string> {
+  const file = codexIndex();
+  let st: fs.Stats;
   try {
-    stat = fs.statSync(file);
+    st = fs.statSync(file);
   } catch {
-    return null;
+    return new Map();
   }
-  const hit = parses.get(file);
-  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit.parsed;
-  const p = parseRollout(file);
-  if (p) parses.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, parsed: p });
-  else parses.delete(file);
-  return p;
+  if (indexCache && indexCache.mtimeMs === st.mtimeMs) return indexCache.names;
+  const names = new Map<string, string>();
+  for (const line of (readText(file) ?? "").split("\n")) {
+    try {
+      const o = JSON.parse(line) as { id?: string; thread_name?: string };
+      if (o.id && o.thread_name) names.set(o.id, o.thread_name);
+    } catch {
+      /* skip */
+    }
+  }
+  indexCache = { mtimeMs: st.mtimeMs, names };
+  return names;
 }
 
 // ------------------------------------------------------------------ families
 
 interface Family {
-  rootId: string;
-  /** All member session ids, root included. */
-  members: { file: string; header: Header }[];
+  rootThread: string;
+  pages: Page[];
+}
+
+/** Connected components over page bases, thread membership and fork lineage. */
+function families(scan: Scan): Family[] {
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    while (parent.has(x) && parent.get(x) !== x) x = parent.get(x)!;
+    return x;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  const threadKey = (t: string) => `t:${t}`;
+  for (const p of scan.pages) {
+    union(p.pageId, threadKey(p.threadId));
+    if (p.base && scan.byPage.has(p.base.pageId)) union(p.pageId, p.base.pageId);
+    if (p.legacy && p.forkedFrom) union(threadKey(p.threadId), threadKey(p.forkedFrom));
+  }
+  const groups = new Map<string, Page[]>();
+  for (const p of scan.pages) {
+    const r = find(p.pageId);
+    const g = groups.get(r);
+    if (g) g.push(p);
+    else groups.set(r, [p]);
+  }
+  return [...groups.values()].map((ps) => {
+    // The root page: no base on disk, earliest first.
+    const roots = ps
+      .filter((p) => !p.base || !scan.byPage.has(p.base.pageId))
+      .filter((p) => !p.legacy || !p.forkedFrom || !ps.some((q) => q.threadId === p.forkedFrom));
+    const root = (roots.length ? roots : ps).sort((a, b) => a.pageId.localeCompare(b.pageId))[0];
+    return { rootThread: root.threadId, pages: ps };
+  });
 }
 
 /**
- * Group rollouts by fork lineage. `forked_from_id` points at the parent; the
- * family root is the transitive top. A fork whose ancestor was deleted becomes
- * its own root — its transcript is self-contained (copied prefix), so nothing
- * is lost.
+ * The last own turn of `page` before ordinal `cut`, else recurse into its
+ * base. Returns the tree node a page continuing at `cut` hangs off.
  */
-function families(): Map<string, Family> {
-  const all = scanFiles().filter((f) => !f.header.subagent);
-  const byId = new Map(all.map((f) => [f.header.id, f]));
-
-  const rootOf = (id: string): string => {
-    const seen = new Set<string>();
-    let cur = id;
-    for (;;) {
-      const f = byId.get(cur);
-      if (!f || !f.header.forkedFrom || !byId.has(f.header.forkedFrom) || seen.has(cur)) return cur;
-      seen.add(cur);
-      cur = f.header.forkedFrom;
-    }
-  };
-
-  const out = new Map<string, Family>();
-  for (const f of all) {
-    const root = rootOf(f.header.id);
-    const fam = out.get(root) ?? { rootId: root, members: [] };
-    fam.members.push(f);
-    out.set(root, fam);
+function tailBefore(scan: Scan, page: Page, cut: number, seen = new Set<string>()): TurnNode | null {
+  if (seen.has(page.pageId)) return null;
+  seen.add(page.pageId);
+  for (let i = page.turns.length - 1; i >= 0; i--) {
+    const t = page.turns[i];
+    if (t.firstOrdinal < cut) return t.nodes[t.nodes.length - 1];
   }
-  return out;
+  if (!page.base) return null;
+  const base = scan.byPage.get(page.base.pageId);
+  return base ? tailBefore(scan, base, Math.min(cut, page.base.end), seen) : null;
 }
 
-function stitched(fam: Family): TurnNode[] {
-  const members: FamilyMember[] = [];
-  for (const m of fam.members) {
-    const p = parsed(m.file);
-    if (!p) continue;
-    members.push({
-      sessionId: m.header.id,
-      parentSessionId: m.header.id === fam.rootId ? null : m.header.forkedFrom,
-      nodes: p.nodes,
+/** Build the family tree: page-graph links for paginated pages, stitching for legacy. */
+function buildTree(scan: Scan, fam: Family): TurnNode[] {
+  const out: TurnNode[] = [];
+  const legacy: FamilyMember[] = [];
+  /** Turns already placed. A turn never spans pages in practice; if one ever
+   * did, its first placement wins rather than duplicating node ids. */
+  const placed = new Map<string, Turn>();
+
+  // Base pages before the pages continuing them, so a fork's parent exists.
+  for (const page of [...fam.pages].sort((a, b) => a.pageId.localeCompare(b.pageId))) {
+    if (page.legacy) {
+      legacy.push({
+        sessionId: page.threadId,
+        parentSessionId: page.forkedFrom,
+        nodes: page.turns.flatMap((t) => t.nodes),
+      });
+      continue;
+    }
+    const base = page.base ? scan.byPage.get(page.base.pageId) : undefined;
+    let prev: TurnNode | null = base && page.base ? tailBefore(scan, base, page.base.end) : null;
+    // A branch, not a mere continuation: a fork into another thread, or a cut
+    // that drops some of the base page's own records (a prompt edit).
+    const branches =
+      !!base && !!page.base && (base.threadId !== page.threadId || page.base.end <= base.lastOrdinal);
+    page.turns.forEach((t, i) => {
+      const dup = placed.get(t.id);
+      if (dup) {
+        prev = dup.nodes[dup.nodes.length - 1];
+        return;
+      }
+      placed.set(t.id, t);
+      t.nodes.forEach((n, j) => {
+        out.push({
+          ...n,
+          parentId: j === 0 ? prev?.id ?? null : n.parentId,
+          crossSession: (i === 0 && j === 0 && branches && prev !== null) || undefined,
+        });
+      });
+      prev = t.nodes[t.nodes.length - 1];
     });
   }
-  return mergeSameRoleRuns(stitchFamily(members));
+  if (legacy.length) out.push(...stitchFamily(legacy));
+  return mergeSameRoleRuns(out);
 }
 
-const resumeCmd = (id: string, cwd: string) => {
-  const resume = `codex resume ${id}`;
-  return cwd ? `cd ${JSON.stringify(cwd)} && ${resume}` : resume;
-};
+/** Pages grouped by thread, with that thread's newest ("current") page. */
+function threadsOf(fam: Family): Map<string, Page[]> {
+  const t = new Map<string, Page[]>();
+  for (const p of fam.pages) {
+    const arr = t.get(p.threadId);
+    if (arr) arr.push(p);
+    else t.set(p.threadId, [p]);
+  }
+  // Page ids are UUIDv7 — lexical order is creation order.
+  for (const arr of t.values()) arr.sort((a, b) => a.pageId.localeCompare(b.pageId));
+  return t;
+}
+
+export const codexResumeArgv = (id: string) => ["codex", "resume", id];
+const resumeCmd = (id: string, cwd: string) => resumeCommand(cwd, codexResumeArgv(id));
+
+function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; members: MemberInfo[] } {
+  const names = threadNames();
+  const threads = threadsOf(fam);
+  const members: MemberInfo[] = [...threads.entries()].map(([id, ps]) => ({
+    id,
+    title: (names.get(id) ?? ps.find((p) => p.firstUserText)?.firstUserText ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 90) || "Untitled",
+    parentId: ps.find((p) => p.forkedFrom)?.forkedFrom ?? null,
+    cwd: ps[0].cwd,
+    resumeCommand: resumeCmd(id, ps[0].cwd),
+    updatedAt: Math.max(...ps.map((p) => p.touchedAt)),
+    archived: ps.every((p) => p.archived) || undefined,
+  }));
+  members.sort((a, b) => (a.id === fam.rootThread ? -1 : b.id === fam.rootThread ? 1 : a.id.localeCompare(b.id)));
+  const root = members[0];
+  const all = nodes ?? [];
+  return {
+    meta: {
+      id: fam.rootThread,
+      provider: "codex",
+      cwd: root.cwd,
+      project: root.cwd ? root.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "codex" : "codex",
+      title: root.title,
+      updatedAt: Math.max(...members.map((m) => m.updatedAt)),
+      nodeCount: all.length,
+      branchPoints: countBranchPoints(childIndex(all)),
+      resumeCommand: root.resumeCommand,
+      members: members.length,
+      entrypoint: "codex",
+    },
+    members,
+  };
+}
 
 // ------------------------------------------------------------------ API
 
+let lastHealth: ProviderHealth | null = null;
+export const codexHealth = (): ProviderHealth =>
+  lastHealth ?? new HealthScan("codex", codexSessions()).done();
+
+/** Family-meta cache: one entry per family, keyed by its pages' file identities. */
+const metas = new Map<string, SessionMeta>();
+
 export function listCodexSessions(): SessionMeta[] {
+  const scan = scanPages();
   const out: SessionMeta[] = [];
-  for (const fam of families().values()) {
-    const rootFile = fam.members.find((m) => m.header.id === fam.rootId);
-    if (!rootFile) continue;
-    const rootParsed = parsed(rootFile.file);
-    if (!rootParsed || rootParsed.nodes.length === 0) continue;
-
-    // Always via stitched(): it copies nodes before the merge mutates them,
-    // protecting the parse cache. (A single-member family stitches to itself.)
-    const nodes = stitched(fam);
-    let updatedAt = 0;
-    for (const m of fam.members) {
-      const p = parsed(m.file);
-      if (p && p.touchedAt > updatedAt) updatedAt = p.touchedAt;
+  const live = new Set<string>();
+  for (const fam of families(scan)) {
+    // Only conversations the user can still see: an all-archived family stays
+    // reachable as the base of live forks, but gets no entry of its own.
+    if (fam.pages.every((p) => p.archived)) continue;
+    if (!fam.pages.some((p) => p.turns.length)) continue;
+    const sig = fam.pages
+      .map((p) => {
+        const c = pages.get(p.file);
+        return `${p.file}:${c?.mtimeMs}:${c?.size}`;
+      })
+      .sort()
+      .join("|");
+    live.add(sig);
+    let meta = metas.get(sig);
+    if (!meta) {
+      meta = describe(fam, buildTree(scan, fam)).meta;
+      metas.set(sig, meta);
     }
-
-    const firstUser = rootParsed.nodes.find((n) => n.role === "user");
-    out.push({
-      id: fam.rootId,
-      provider: "codex",
-      cwd: rootParsed.header.cwd,
-      project: rootParsed.header.cwd ? path.basename(rootParsed.header.cwd) : "codex",
-      title: (firstUser?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90) || "Untitled",
-      updatedAt,
-      nodeCount: nodes.length,
-      branchPoints: countBranchPoints(childIndex(nodes)),
-      resumeCommand: resumeCmd(fam.rootId, rootParsed.header.cwd),
-    });
+    out.push(meta);
   }
+  for (const k of metas.keys()) if (!live.has(k)) metas.delete(k);
+  scan.health.listed(out.length);
+  lastHealth = scan.health.done();
   return out;
 }
 
-export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
-  const fams = families();
-  // Loading a child fork opens its whole family, rooted where the tree roots.
-  const fam =
-    fams.get(sessionId) ??
-    [...fams.values()].find((f) => f.members.some((m) => m.header.id === sessionId));
-  if (!fam) return null;
-  const rootFile = fam.members.find((m) => m.header.id === fam.rootId);
-  const rootParsed = rootFile ? parsed(rootFile.file) : null;
-  if (!rootParsed) return null;
+function familyOf(scan: Scan, threadId: string): Family | undefined {
+  return families(scan).find((f) => f.pages.some((p) => p.threadId === threadId));
+}
 
-  const nodes = stitched(fam);
-  // Sidecar annotations live under each contributing session's id; a node id
-  // is `<sid>#<n>`, so read every member's meta.
-  for (const m of fam.members) {
-    const meta = readMeta(m.header.id);
+export function locateCodex(sessionId: SessionId): string | null {
+  if (!/^[a-zA-Z0-9-]{8,64}$/.test(sessionId)) return null;
+  for (const { page } of pages.values()) if (page?.threadId === sessionId) return page.file;
+  // Cold cache (first call before any listing): scan once.
+  return scanPages().pages.find((p) => p.threadId === sessionId)?.file ?? null;
+}
+
+export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
+  const scan = scanPages();
+  const fam = familyOf(scan, sessionId);
+  if (!fam) return null;
+  const nodes = buildTree(scan, fam);
+  const { meta, members } = describe(fam, nodes);
+  // Annotations: written under the family root's id; read every member's so a
+  // re-rooted family keeps them.
+  for (const m of members) {
+    const mm = readMeta(m.id);
     for (const n of nodes) {
-      const mm = meta[n.id] ?? n.absorbedIds?.map((id) => meta[id]).find(Boolean);
-      if (mm) Object.assign(n, mm);
+      const a = mm[n.id] ?? n.absorbedIds?.map((id) => mm[id]).find(Boolean);
+      if (a) Object.assign(n, a);
     }
   }
-
-  let updatedAt = 0;
-  for (const m of fam.members) {
-    const p = parsed(m.file);
-    if (p && p.touchedAt > updatedAt) updatedAt = p.touchedAt;
-  }
-  const firstUser = rootParsed.nodes.find((n) => n.role === "user");
-
-  return {
-    meta: {
-      id: fam.rootId,
-      provider: "codex",
-      cwd: rootParsed.header.cwd,
-      project: rootParsed.header.cwd ? path.basename(rootParsed.header.cwd) : "codex",
-      title: (firstUser?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90) || "Untitled",
-      updatedAt,
-      nodeCount: nodes.length,
-      branchPoints: countBranchPoints(childIndex(nodes)),
-      resumeCommand: resumeCmd(fam.rootId, rootParsed.header.cwd),
-    },
-    nodes,
-  };
+  return { meta, nodes, members };
 }
 
 // ------------------------------------------------------------------ fork
 
-/** RFC 9562 UUIDv7 — Codex session ids are v7, so forks sort correctly by id. */
-function uuidv7(): string {
-  const b = crypto.randomBytes(16);
-  const t = Date.now();
-  b[0] = (t / 2 ** 40) & 0xff;
-  b[1] = (t / 2 ** 32) & 0xff;
-  b[2] = (t / 2 ** 24) & 0xff;
-  b[3] = (t / 2 ** 16) & 0xff;
-  b[4] = (t / 2 ** 8) & 0xff;
-  b[5] = t & 0xff;
-  b[6] = (b[6] & 0x0f) | 0x70;
-  b[8] = (b[8] & 0x3f) | 0x80;
-  const h = b.toString("hex");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+/**
+ * Is `turn` (on `owner`) part of its thread's CURRENT history? Walk from the
+ * thread's newest page down its bases, narrowing the cut at each step: a page
+ * that a later prompt edit cut short is still a base, but its turns past the
+ * cut are no longer in the thread.
+ */
+function onCurrentHistory(scan: Scan, fam: Family, owner: Page, turn: Turn): boolean {
+  const thread = threadsOf(fam).get(owner.threadId) ?? [];
+  let cut = Infinity;
+  const seen = new Set<string>();
+  for (let p = thread[thread.length - 1]; p && !seen.has(p.pageId); ) {
+    seen.add(p.pageId);
+    if (p.pageId === owner.pageId) return turn.firstOrdinal < cut;
+    if (!p.base || p.threadId !== owner.threadId) return false;
+    cut = Math.min(cut, p.base.end);
+    p = scan.byPage.get(p.base.pageId)!;
+  }
+  return false;
 }
 
 /**
- * Fork a Codex session after a chosen turn.
+ * Fork a Codex thread through a chosen turn (inclusive), via the app-server's
+ * `thread/fork` — the same call the Codex VS Code extension makes, so the new
+ * thread is a first-class Codex thread with real lineage (`forked_from_id`,
+ * `history_base`). Agentree writes nothing itself.
  *
- * Codex has no `--resume-session-at`; its own `codex fork` command forks only
- * at the tip. But its fork FORMAT is exactly reproducible: a new rollout whose
- * lines are a copy of the parent's up to the cut, with a fresh `session_meta`
- * carrying `forked_from_id`. Writing that file is non-destructive (the parent
- * transcript is never touched) and native tooling understands the result —
- * `codex resume <new-id>` picks it up, and the lineage marker is the same one
- * `codex fork` writes.
- *
- * The node id encodes the owning session and turn index (`<sid>#<n>`): in a
- * stitched tree, forking from a turn inside a fork's suffix must cut THAT
- * fork's rollout, not the root's.
+ * The thread to fork is the one whose CURRENT history contains the turn. A
+ * turn that survives only on an abandoned prompt-edit page isn't in any
+ * thread's current history, so that page's file is passed instead (the API's
+ * fork-by-path).
  */
-export function forkCodexAt(nodeId: string): ForkResult {
-  const m = /^(.+)#(\d+)$/.exec(nodeId);
-  if (!m) return { ok: false, error: "That turn does not map to a Codex transcript record." };
-  const [, sid, idxStr] = m;
-  const file = locateCodex(sid);
-  if (!file) return { ok: false, error: "That session's rollout is no longer on disk." };
-  const p = parsed(file);
-  const idx = Number(idxStr);
-  if (!p || idx >= p.nodes.length) {
-    return { ok: false, error: "That turn is not in this transcript." };
+export async function forkCodexAt(familyId: SessionId, nodeId: string): Promise<ForkResult> {
+  const scan = scanPages();
+  const fam = familyOf(scan, familyId);
+  const node = fam ? buildTree(scan, fam).find((n) => n.id === nodeId) : undefined;
+  if (!fam || !node) return { ok: false, error: "That turn is not in this conversation any more." };
+  const turnId = node.lastRawId;
+  if (!turnId || turnId.endsWith("#legacy")) {
+    return { ok: false, error: "This rollout predates Codex's paginated format; its turns have no ids to fork at." };
   }
 
-  const cut = p.endLine[idx];
-  const lines = fs.readFileSync(file, "utf8").split("\n");
-  const head = JSON.parse(lines[0]) as RawRecord & { payload: Record<string, unknown> };
+  const owner = fam.pages.find((p) => p.turns.some((t) => t.id === turnId));
+  const turn = owner?.turns.find((t) => t.id === turnId);
+  if (!owner || !turn) return { ok: false, error: "That turn's rollout page is no longer on disk." };
+  const onCurrent = onCurrentHistory(scan, fam, owner, turn);
 
-  const newId = uuidv7();
-  const now = new Date();
-  const iso = now.toISOString();
-  head.timestamp = iso;
-  head.payload.id = newId;
-  if ("session_id" in head.payload) head.payload.session_id = newId;
-  head.payload.timestamp = iso;
-  head.payload.forked_from_id = sid;
-
-  // Codex names rollouts in LOCAL time (both the Y/M/D directory and the
-  // filename stamp). Deriving the stamp from the UTC iso put forks an hour off
-  // their real creation time — and near midnight, in the wrong day's folder.
-  const two = (n: number) => String(n).padStart(2, "0");
-  const day = [String(now.getFullYear()), two(now.getMonth() + 1), two(now.getDate())];
-  const stamp = `${day.join("-")}T${two(now.getHours())}-${two(now.getMinutes())}-${two(now.getSeconds())}`;
-  const dir = path.join(SESSIONS, ...day);
-  const out = path.join(dir, `rollout-${stamp}-${newId}.jsonl`);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const body = [JSON.stringify(head), ...lines.slice(1, cut + 1)].join("\n") + "\n";
-    fs.writeFileSync(out, body, { flag: "wx" }); // never clobber
-  } catch (e) {
-    return { ok: false, error: `Could not write the forked rollout: ${String(e)}` };
-  }
-
-  const cwd = p.header.cwd;
+  const res = await forkThread({
+    threadId: owner.threadId,
+    lastTurnId: turnId,
+    path: onCurrent ? undefined : owner.file,
+  });
+  if (!res.ok) return res;
+  const cwd = res.cwd || owner.cwd;
   return {
     ok: true,
-    id: newId,
+    id: res.threadId,
     cwd,
-    command: cwd ? `cd ${JSON.stringify(cwd)} && codex resume ${newId}` : `codex resume ${newId}`,
-    note: "Codex has no resume-at flag, so the fork is a new session (prefix copied, forked_from_id set). Agentree draws the family as one tree.",
+    command: resumeCmd(res.threadId, cwd),
+    open: { provider: "codex", sessionId: res.threadId, cwd },
+    note: onCurrent
+      ? undefined
+      : "This turn was on a prompt-edit branch; the fork was taken from that branch's own page.",
   };
 }

@@ -7,6 +7,7 @@ export const CH = {
   getSession: "sessions:get",
   patchNode: "sessions:patchNode",
   forkAt: "sessions:forkAt",
+  providerHealth: "providers:health",
 
   // Watching is a subscription, so it needs a main→renderer direction too.
   watchStart: "watch:start",

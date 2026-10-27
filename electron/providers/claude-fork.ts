@@ -1,0 +1,167 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import type { ForkResult, SessionId, TurnNode } from "../../shared/types.ts";
+import { recordLineage } from "../lineage.ts";
+import { resumeCommand } from "../shell.ts";
+import {
+  claudeResumeArgv,
+  INJECTED_PREFIX,
+  loadSession,
+  locate,
+  parseFile,
+  readRecords,
+  type RawRecord,
+} from "../transcripts.ts";
+
+/**
+ * Fork a Claude Code session after a chosen turn, as a NEW transcript.
+ *
+ * The format is the one the Claude Code VS Code extension writes for its own
+ * "Fork conversation" (read from its `forkSession`, extension 2.1.310), so the
+ * extension and the CLI resume the result like any fork they made themselves:
+ *
+ *  - the records on the parent chain ending at the anchor, in order, minus
+ *    `progress` records;
+ *  - every record gets a fresh uuid; parentUuid points at the previous copied
+ *    record; `sessionId` is the new id; timestamps are kept, except the last
+ *    record's, which becomes "now";
+ *  - a trailing `custom-title` "<title> (fork)".
+ *
+ * Plus one field the extension doesn't write but the Agent SDK's
+ * `forkSession` does: `forkedFrom: {sessionId, messageUuid}` on every copied
+ * record — explicit lineage, so the family stitches without inference. The
+ * lineage sidecar gets the same link, belt and braces.
+ *
+ * Non-destructive: the parent transcript is never touched, and the new file
+ * is created with `wx` so nothing can be overwritten. File-history snapshots
+ * (the extension's code-rewind state) are deliberately not copied: they are
+ * rebuilt from deltas Agentree doesn't model, and a stale snapshot would make
+ * "rewind code" in the fork restore the wrong files.
+ *
+ * Why not the earlier designs — an appended `last-prompt` pin plus
+ * `--resume-session-at`: it wrote into the user's real transcript, relied on
+ * undocumented reducer behaviour, needed a POSIX shell, and couldn't be
+ * driven from the VS Code chat panel at all.
+ */
+export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
+  const family = loadSession(familyId);
+  const node = family?.nodes.find((n) => n.id === nodeId);
+  if (!family || !node) return { ok: false, error: "That turn is not in this conversation any more." };
+
+  const refusal = refuse(node);
+  if (refusal) return { ok: false, error: refusal };
+
+  const sourceId = node.sourceSessionId ?? familyId;
+  const loc = locate(sourceId);
+  if (!loc) return { ok: false, error: "That turn's transcript is no longer on disk." };
+  const anchor = node.lastRawId ?? node.id;
+
+  const records = readRecords(loc.file);
+  if (!records) return { ok: false, error: "Could not read the transcript." };
+
+  // Later records with the same uuid win (the CLI rewrites a few in place).
+  const byUuid = new Map<string, RawRecord>();
+  for (const r of records) if (r.uuid) byUuid.set(r.uuid, r);
+  if (!byUuid.has(anchor)) return { ok: false, error: "The fork point's record is missing from the transcript." };
+
+  // The physical parent chain — parentUuid only. A compact boundary has a null
+  // parentUuid, so the copy starts there, exactly the history the CLI loads.
+  const chain: RawRecord[] = [];
+  const seen = new Set<string>();
+  for (let cur = byUuid.get(anchor); cur && !seen.has(cur.uuid!); ) {
+    seen.add(cur.uuid!);
+    chain.push(cur);
+    cur = cur.parentUuid ? byUuid.get(cur.parentUuid) : undefined;
+  }
+  chain.reverse();
+  const copied = chain.filter((r) => r.type !== "progress");
+  if (!copied.some((r) => r.type === "user" || r.type === "assistant")) {
+    return { ok: false, error: "There is nothing to fork before this turn." };
+  }
+
+  const newId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const forkedFrom = { sessionId: sourceId, messageUuid: anchor };
+  let prev: string | null = null;
+  const lines: string[] = [];
+  copied.forEach((r, i) => {
+    const uuid = crypto.randomUUID();
+    const out: Record<string, unknown> = {
+      ...r,
+      uuid,
+      parentUuid: prev,
+      sessionId: newId,
+      timestamp: i === copied.length - 1 ? now : r.timestamp,
+      forkedFrom,
+    };
+    delete out.sessionKind;
+    lines.push(JSON.stringify(out));
+    prev = uuid;
+  });
+  const title = `${parseFile(loc.file).title || "Forked session"} (fork)`;
+  lines.push(JSON.stringify({ type: "custom-title", sessionId: newId, customTitle: title }));
+
+  const file = path.join(path.dirname(loc.file), `${newId}.jsonl`);
+  try {
+    fs.writeFileSync(file, lines.join("\n") + "\n", { flag: "wx" });
+  } catch (e) {
+    return { ok: false, error: `Could not write the fork: ${String(e)}` };
+  }
+  try {
+    recordLineage(newId, sourceId);
+  } catch {
+    /* the copied records carry forkedFrom; the sidecar is only a backup */
+  }
+
+  return {
+    ok: true,
+    id: newId,
+    cwd: loc.cwd,
+    command: resumeCommand(loc.cwd, claudeResumeArgv(newId)),
+    open: { provider: "claude", sessionId: newId, cwd: loc.cwd },
+    note: crossesInjected(node, family.nodes)
+      ? "Heads up: this prefix includes a message delivered mid-turn (hollow node). Claude Code wrote no record for it, so the fork does NOT contain that instruction."
+      : undefined,
+  };
+}
+
+function refuse(node: TurnNode): string | null {
+  if (node.injected || (node.lastRawId ?? node.id).startsWith(INJECTED_PREFIX)) {
+    // Reconstructed from the message queue — there is no record to fork at.
+    return "This turn was delivered mid-turn and has no transcript record.";
+  }
+  if (node.midTurn) {
+    // A queued_command attachment is a real record, but the resume loader
+    // indexes only messages. The message is not lost: any fork below keeps it.
+    return "This mid-turn message can't anchor a fork itself. Fork the turn after it — forks that pass this point keep the message.";
+  }
+  if (node.preCompact) {
+    return "This turn predates the session's last /compact. Claude Code only loads messages after the compaction, so a fork here would not contain it.";
+  }
+  return null;
+}
+
+/**
+ * A queue-op-reconstructed interjection (old transcripts; hollow nodes with
+ * synthetic "queued:" ids) reached the model but was written to no record, so
+ * a fork whose prefix crosses one silently loses that instruction. Nothing can
+ * restore it; the honest fix is to say so. Attachment-backed mid-turn messages
+ * ARE copied, so they aren't warned about.
+ */
+function crossesInjected(node: TurnNode, nodes: TurnNode[]): boolean {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const seen = new Set<string>();
+  for (let cur: TurnNode | undefined = node; cur && !seen.has(cur.id); ) {
+    seen.add(cur.id);
+    if (
+      cur.injected ||
+      cur.id.startsWith(INJECTED_PREFIX) ||
+      cur.absorbedIds?.some((id) => id.startsWith(INJECTED_PREFIX))
+    ) {
+      return true;
+    }
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return false;
+}
