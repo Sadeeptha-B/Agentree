@@ -79,6 +79,10 @@ from `vscode-ext/dist`, so re-run `npm run build:vscode` after each change.
 
 ### Everyday use
 
+New to Agentree? The **[user guide](docs/user-guide.md)** walks through the
+ideas and the workflows that matter, with examples. What follows is the
+short version.
+
 1. Run **Agentree: Open Conversation Trees** from the Command Palette
    (Ctrl/Cmd+Shift+P).
 2. **Welcome screen:** pick a conversation. The left rail filters by project
