@@ -1,5 +1,11 @@
 # Review handoff: Agentree modernization (branch `modernize`, 2026-10-27)
 
+> **Status:** reviewed. The findings and their resolution are in
+> [review-findings.md](review-findings.md); several [assumption]s below are
+> now settled there (e.g. fork-by-`path` does not work on codex-cli 0.164,
+> and the "first message id" family key was replaced). This file is kept as
+> the record of what was handed to the reviewer; AGENTS.md is current.
+
 This document is for an agent reviewing work done on Agentree in one long
 session. It covers:
 
