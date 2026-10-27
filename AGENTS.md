@@ -504,9 +504,14 @@ health row, not treated as errors.
 - **`entrypoint`** (`claude-vscode` | `cli`) is shown in the panel.
 - The project-dir slug keeps the drive letter's case as written
   (`c--Users-…` and `C--Users-…` both occur). The cwd inside the transcript is
-  authoritative, and it's the **last** one a `user`/`assistant` record
-  carries: a moved repo keeps one session id, and the session continues
-  (and resumes) in the new folder. Codex likewise takes the newest page's
+  authoritative, but it is the *shell's* cwd: it follows every `cd` the
+  agent runs (verified: sessions filed under `…\src` and
+  `…\artifacts\…\checks` when the last cwd was taken). So `sessionCwd()`
+  takes the last conversation-record cwd that the project folder's name
+  encodes (Claude's slug: every non-alphanumeric becomes `-`): a moved repo
+  continues in a new folder named after its new directory, and the session
+  resumes there. Without a match it takes the last cwd that isn't merely
+  inside, or above, the one before it. Codex likewise takes the newest page's
   last `turn_context.cwd`. One folder is recorded as `c:\…`, `C:\…` and
   `/c/…` (Git Bash), with or without a trailing separator, so paths are
   compared by `cwdKey()` (shared/render.ts) and displayed as recorded.
