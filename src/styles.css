@@ -481,6 +481,11 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 
 /* The session the selected turn belongs to, inside a family tree. */
 .member-block .member-title { font-weight: 600; margin: 2px 0 6px; }
+/* Shared history: which of the sessions holding it to open or resume. */
+.member-block .member-pick {
+  display: block; width: 100%; margin: 2px 0 6px; padding: 3px 6px; font-weight: 600;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+}
 .fork-badge {
   display: inline-block; padding: 0 6px; margin-left: 6px; border-radius: 999px;
   font-size: 10.5px; border: 1px dashed var(--muted); color: var(--muted);

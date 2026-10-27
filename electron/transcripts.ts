@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { childIndex, countBranchPoints, cwdKey, forkSummaries, heldTip, holdsCopy } from "../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, cwdKey, forkSummaries } from "../shared/render.ts";
 import type {
   MemberInfo,
   NodeId,
@@ -15,7 +15,8 @@ import { readLineage } from "./lineage.ts";
 import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
 import { RESUME_ARGV, resumeCommand } from "./shell.ts";
-import { assignStableIds, digest, overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
+import { assignStableIds, digest, foldedDigest } from "./identity.ts";
+import { overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
   const parts = dirName.split("-").filter(Boolean);
@@ -300,6 +301,13 @@ function textOf(content: unknown): {
  * never collapsed — a branch below the run simply re-parents onto the head. Nor
  * does a run cross from one session into another: a fork's first turn must
  * stay its own node, or the fork point (and its resume target) disappears.
+ *
+ * Nor across a session's END: a run only continues into a part held by
+ * exactly the sessions that held the part before it (`copyHolders`). A quiet
+ * fork copied through one reply but not the parent's next one; folding the
+ * two would draw that fork's endpoint with text it never had, and make its
+ * copy of the first reply look like a copy of both. So whoever holds a copy
+ * of any part of a merged node holds all of it.
  */
 export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
   const kids = new Map<string, TurnNode[]>();
@@ -326,6 +334,7 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       // Nor across the harness's own turns (Codex): a fork cuts only between
       // them, so a node spanning two could never be forked after all it shows.
       if (cs[0].turnId !== head.turnId) break;
+      if (!sameHolders(cur, cs[0])) break;
       cur = cs[0];
       parts.push(cur);
       absorbed.add(cur.id);
@@ -371,6 +380,7 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       stopReason: last.stopReason ?? null,
       absorbedIds: parts.slice(1).flatMap((p) => [p.id, ...(p.absorbedIds ?? [])]),
       stableIds: parts.flatMap((p) => p.stableIds ?? []),
+      legacyIds: parts.some((p) => p.legacyIds?.length) ? parts.flatMap((p) => p.legacyIds ?? []) : undefined,
       occurrences: parts.some((p) => p.occurrences?.length)
         ? parts.flatMap((p) => p.occurrences ?? [])
         : undefined,
@@ -398,6 +408,12 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
   return out;
 }
 
+function sameHolders(a: TurnNode, b: TurnNode): boolean {
+  const x = copyHolders(a);
+  const y = copyHolders(b);
+  return x.length === y.length && x.every((s) => y.includes(s));
+}
+
 interface Interjection {
   text: string;
   timestamp?: string;
@@ -411,10 +427,13 @@ interface Interjection {
 export const INJECTED_PREFIX = "queued:";
 
 /**
- * Whole-text identity, for matching an interjection against a real record. Not
- * an opening gist: messages that share a long preamble are still different.
+ * Whole-text comparison for matching a queued message against a real record
+ * in the SAME file. Not an opening gist: messages that share a long preamble
+ * are still different. Whitespace is folded because the queue entry is the
+ * text as typed and the record the text as delivered; this is a dedup within
+ * one transcript, never an identity (those are exact, see identity.ts).
  */
-const gist = digest;
+const gist = foldedDigest;
 
 /**
  * Give the user's mid-turn interjections a place in the tree.
@@ -509,7 +528,7 @@ export interface Parsed {
    * which branches mid-run, and its fork, which doesn't).
    */
   nodes: TurnNode[];
-  /** Stitch evidence per node id: `m:<message.id>` / `u:<promptId>|<gist>`. */
+  /** Stitch evidence per node id: `m:<message.id>` / `u:<promptId>|<digest>`. */
   keys: Map<NodeId, string>;
   /**
    * Every assistant API message id in the file. The API mints one per
@@ -677,7 +696,7 @@ function sessionCwd(cwds: string[], dirName: string | undefined): string {
 
 /**
  * Project one session's records — one file's, or the union of several
- * copies of the same session (`unionRecords`) — into the node list.
+ * copies of the same session (`logicalRecords`) — into the node list.
  * `dirName` is the project folder they're filed in (see `sessionCwd`).
  */
 export function parseRecords(
@@ -896,6 +915,8 @@ export function parseRecords(
   // Pass 2: project the surviving turns.
   const nodes: TurnNode[] = [];
   const keys = new Map<NodeId, string>();
+  /** The same key under identity scheme 2 (whitespace-folded digest), for old annotations. */
+  const legacyKeys = new Map<NodeId, string>();
   const strongKeys = new Set<NodeId>();
   for (const { head, last, text, thinking, tools } of visible) {
     // Every record in a group repeats the same message-level usage, so take one
@@ -953,14 +974,20 @@ export function parseRecords(
     // record, so a fork ending on a prompt without a promptId (older
     // transcripts) would no longer match its own source. Stitching only
     // matches under an already matched parent, so without a promptId two
-    // prompts merge only if they are the same text in the same place.
+    // prompts merge only if they are the same text, whitespace and all, in
+    // the same place.
     const strong = head.type === "assistant" && !!head.message?.id;
     keys.set(id, strong ? `m:${head.message!.id}` : `u:${head.promptId ?? ""}|${digest(text)}`);
+    if (!strong) legacyKeys.set(id, `u:${head.promptId ?? ""}|${foldedDigest(text)}`);
     if (strong || head.promptId) strongKeys.add(id);
   }
   // Identity for annotations and selection: the key itself where it's unique
   // (a message id, a prompt id), else qualified by the parent's identity.
-  assignStableIds(nodes, (n) => ({ key: keys.get(n.id)!, strong: strongKeys.has(n.id) }));
+  assignStableIds(nodes, (n) => ({
+    key: keys.get(n.id)!,
+    strong: strongKeys.has(n.id),
+    legacyKey: legacyKeys.get(n.id),
+  }));
   // Conversation records that produced nothing is what a changed record shape
   // looks like — as opposed to a file of pure bookkeeping, which has none.
   const problem = nodes.length === 0 && records.some((r) => r.type === "user" || r.type === "assistant")
@@ -1154,7 +1181,7 @@ function summariseDir(dirName: string, seen?: Set<string>): FileSummary[] {
 interface SessionSummary extends FileSummary {
   /** Every physical copy, shadows included: they are watched and keyed on. */
   copies: FileSummary[];
-  /** The copies whose records are read, oldest activity first: one, unless they diverged. */
+  /** The copies whose conversation is read, oldest activity first: one, unless they diverged. */
   parse: FileSummary[];
 }
 
@@ -1176,83 +1203,122 @@ const contains = (big: Set<string>, small: Set<string>) => {
   return true;
 };
 
-/** Logical summaries of diverged copies, keyed by every copy's identity. */
-const unionSummaries = new Map<string, SessionSummary>();
+/** Logical summaries of sessions with several copies, keyed by every copy's identity. */
+const logicalSummaries = new Map<string, SessionSummary>();
 const copiesSig = (copies: FileSummary[]) => copies.map((c) => `${c.file}:${c.mtimeMs}:${c.size}`).sort().join("|");
 
 /**
  * Resolve one session id's copies into a logical session.
  *
- * Copies of ONE session share record uuids (it is the same transcript, grown
- * in different places), so containment is exact evidence: a copy whose uuids
- * are all in another copy is a SHADOW — every record it has is already read
- * there — and is not parsed. Picking a copy by recency or size instead would
- * silently drop a real branch when two copies share a prefix and then each
- * grew. Copies neither of which contains the other are read as the union of
- * their records (`unionRecords`), so both continuations are drawn.
+ * Two reductions, kept apart (`logicalRecords`). The CONVERSATION is
+ * deduplicated by record uuid: copies of ONE session share them (it is the
+ * same transcript, grown in different places), so a copy whose uuids are all
+ * in another copy is a SHADOW — every conversation record it has is already
+ * read there — and its conversation is not parsed. Picking a copy by recency
+ * or size instead would silently drop a real branch when two copies share a
+ * prefix and then each grew; copies neither of which contains the other are
+ * read as the union of their records, so both continuations are drawn.
+ * METADATA (titles, summaries) has no uuid, so containment says nothing about
+ * it: a shadow can hold a newer rename. It is read from every copy.
  */
 function resolveSource(copies: FileSummary[]): SessionSummary {
   if (copies.length === 1) return { ...copies[0], copies, parse: copies };
+  const sig = copiesSig(copies);
+  const hit = logicalSummaries.get(sig);
+  if (hit) return hit;
+
   const largestFirst = [...copies].sort((a, b) => uuidsOf(b).size - uuidsOf(a).size || b.activeAt - a.activeAt);
   const kept: FileSummary[] = [];
   for (const c of largestFirst) if (!kept.some((k) => contains(uuidsOf(k), uuidsOf(c)))) kept.push(c);
   const parse = kept.sort((a, b) => a.activeAt - b.activeAt);
-  // The session began when its oldest copy did: that orders it among forks.
-  const createdMs = Math.min(...copies.map((c) => c.createdMs));
-  if (parse.length === 1) return { ...parse[0], createdMs, copies, parse };
-
-  const sig = copiesSig(copies);
-  const hit = unionSummaries.get(sig);
-  if (hit) return hit;
   const primary = parse[parse.length - 1];
+  const summary = summaryOf(
+    parseRecords(primary.id, logicalRecords(parse, copies), primary.dirName),
+    primary.file,
+    primary.dirName,
+    primary,
+  );
   const s: SessionSummary = {
-    ...summaryOf(parseRecords(primary.id, unionRecords(parse), primary.dirName), primary.file, primary.dirName, primary),
-    createdMs,
+    ...summary,
+    // The session began when its oldest copy did: that orders it among forks.
+    createdMs: Math.min(...copies.map((c) => c.createdMs)),
+    // A shadow's bookkeeping can be newer than anything read for the tree.
+    touchedAt: Math.max(summary.touchedAt, ...copies.map((c) => c.touchedAt)),
     copies,
     parse,
   };
-  unionSummaries.set(sig, s);
+  logicalSummaries.set(sig, s);
   return s;
 }
 
 /**
- * The records of diverged copies of one session as one stream: the copy with
- * the oldest activity whole, then each other copy from its first record the
- * stream doesn't hold yet, minus the records it does. Every copy starts with
- * the shared prefix, so each keeps its own order; and the newest copy is read
- * last, so its titles and cwd win (last one wins in the parser). Copies share
- * uuids, so the union is exact — nothing is matched by content.
+ * Uuid-less records Agentree reads that have no place in the conversation:
+ * titles (the parser) and compaction summaries (the fork writer).
  */
-function unionRecords(parse: FileSummary[]): { records: RawRecord[]; bad: number } | null {
+const METADATA = new Set(["custom-title", "ai-title", "summary"]);
+
+/**
+ * One session's records from all of its copies, as one stream.
+ *
+ * Conversation: the read copy with the oldest activity whole, then each
+ * other read copy from its first record the stream doesn't hold yet, minus
+ * the records it does. Every copy starts with the shared prefix, so each
+ * keeps its own order. Copies share uuids, so this deduplicates without
+ * matching content — though a uuid two copies rewrote differently keeps the
+ * first copy's payload.
+ *
+ * Metadata (`METADATA`) follows, from EVERY copy — shadows and the part of a
+ * diverged copy before its first new uuid included — ordered by when each
+ * copy was last written (file mtime, then activity, then path), each in file
+ * order. Those records carry no timestamp, so the write order of the files
+ * holding them is the only order there is; the parser and the fork writer
+ * take the last, so the copy written last names the session.
+ */
+function logicalRecords(parse: FileSummary[], copies: FileSummary[]): { records: RawRecord[]; bad: number } | null {
+  const reads = new Map<FileSummary, { records: RawRecord[]; bad: number } | null>();
+  const read = (c: FileSummary) => {
+    if (!reads.has(c)) reads.set(c, readLines(c.file));
+    return reads.get(c)!;
+  };
+
   const records: RawRecord[] = [];
   const held = new Set<string>();
   let bad = 0;
   let any = false;
   for (const c of parse) {
-    const read = readLines(c.file);
-    if (!read) continue;
+    const r = read(c);
+    if (!r) continue;
     any = true;
-    bad += read.bad;
-    const from = records.length === 0 ? 0 : read.records.findIndex((r) => !!r.uuid && !held.has(r.uuid));
+    bad += r.bad;
+    const conversation = r.records.filter((x) => !(x.type && METADATA.has(x.type)));
+    const from = records.length === 0 ? 0 : conversation.findIndex((x) => !!x.uuid && !held.has(x.uuid));
     if (from < 0) continue;
-    for (const r of read.records.slice(from)) {
-      if (r.uuid && held.has(r.uuid)) continue;
-      records.push(r);
+    for (const x of conversation.slice(from)) {
+      if (x.uuid && held.has(x.uuid)) continue;
+      records.push(x);
     }
-    for (const r of records) if (r.uuid) held.add(r.uuid);
+    for (const x of records) if (x.uuid) held.add(x.uuid);
   }
-  return any ? { records, bad } : null;
+  if (!any) return null;
+
+  const byWrite = [...copies].sort(
+    (a, b) => a.mtimeMs - b.mtimeMs || a.activeAt - b.activeAt || a.file.localeCompare(b.file),
+  );
+  for (const c of byWrite) {
+    for (const x of read(c)?.records ?? []) if (x.type && METADATA.has(x.type)) records.push(x);
+  }
+  return { records, bad };
 }
 
 /** A logical session's records, as the parser reads them — the fork writer's input too. */
 export function readSourceRecords(s: SessionSummary): RawRecord[] | null {
-  return s.parse.length === 1 ? readRecords(s.parse[0].file) : (unionRecords(s.parse)?.records ?? null);
+  return s.copies.length === 1 ? readRecords(s.copies[0].file) : (logicalRecords(s.parse, s.copies)?.records ?? null);
 }
 
 function parseSource(s: SessionSummary): Parsed {
-  return s.parse.length === 1
-    ? parseFile(s.parse[0].file)
-    : parseRecords(s.id, unionRecords(s.parse), s.parse[s.parse.length - 1].dirName);
+  return s.copies.length === 1
+    ? parseFile(s.copies[0].file)
+    : parseRecords(s.id, logicalRecords(s.parse, s.copies), s.parse[s.parse.length - 1].dirName);
 }
 
 /**
@@ -1457,6 +1523,9 @@ function buildFamily(group: SessionSummary[]): Family {
   fm.sort((a, b) => (a.sessionId === rootId ? -1 : b.sessionId === rootId ? 1 : 0));
 
   const nodes = mergeSameRoleRuns(group.length > 1 ? stitchFamily(fm) : parsed.get(group[0].id)!.nodes.map((n) => ({ ...n })));
+  // A copied history's holders are its copies; the merge kept every part of
+  // a node held by the same sessions, so they hold all of it.
+  for (const n of nodes) n.heldBy = copyHolders(n);
   const members: MemberInfo[] = group.map((g) => ({
     id: g.id,
     title: g.title || "Untitled",
@@ -1468,8 +1537,8 @@ function buildFamily(group: SessionSummary[]): Family {
     touchedAt: g.touchedAt,
     entrypoint: g.entrypoint,
     files: g.copies.map((c) => c.file),
-    tipId: heldTip(nodes, holdsCopy(g.id)) ?? undefined,
   }));
+  assignTips(nodes, members);
   return { rootId, nodes, members };
 }
 
@@ -1565,8 +1634,8 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
   // Forget deleted transcripts, so the caches can't outgrow the directory.
   for (const key of summaries.keys()) if (!seen.has(key)) summaries.delete(key);
   for (const key of uuidCache.keys()) if (!seen.has(key)) uuidCache.delete(key);
-  const live = new Set(sources.filter((s) => s.parse.length > 1).map((s) => copiesSig(s.copies)));
-  for (const key of unionSummaries.keys()) if (!live.has(key)) unionSummaries.delete(key);
+  const live = new Set(sources.filter((s) => s.copies.length > 1).map((s) => copiesSig(s.copies)));
+  for (const key of logicalSummaries.keys()) if (!live.has(key)) logicalSummaries.delete(key);
   if (familyMetas.size > 500) familyMetas.clear();
 
   health.listed(out.length);

@@ -8,6 +8,7 @@ import type {
   ProviderHealth,
   ProviderId,
   SessionDetail,
+  SessionId,
   SessionMeta,
   SettingsPatch,
   SettingsState,
@@ -30,6 +31,14 @@ interface State {
   children: Map<string, TurnNode[]>;
 
   selected: NodeId | null;
+  /**
+   * The member session the user is looking through: the fork they opened the
+   * tree on, or picked on a shared turn. Open/resume act on it wherever the
+   * selected turn is in its history (`actionTarget`); elsewhere, on the
+   * turn's own session. Kept across selections and reloads while it is a
+   * member; cleared by opening the family without one.
+   */
+  focus: SessionId | null;
   /** Collapsed linear runs the user has clicked open. */
   expanded: Set<string>;
   compress: boolean;
@@ -54,7 +63,8 @@ interface State {
   refreshSessions: () => Promise<void>;
   /**
    * Open the family holding `id`. With `focus`, select that member session's
-   * own tip (`MemberInfo.tipId`) instead of the family's newest leaf.
+   * own tip (`MemberInfo.tipId`) instead of the family's newest leaf, and act
+   * on that member (`State.focus`).
    */
   openSession: (id: string, opts?: { focus?: string }) => Promise<void>;
   close: () => void;
@@ -138,6 +148,7 @@ export const useStore = create<State>((set, get) => ({
   children: new Map(),
 
   selected: null,
+  focus: null,
   expanded: new Set(),
   compress: true,
   following: true,
@@ -168,8 +179,10 @@ export const useStore = create<State>((set, get) => ({
   },
 
   saveSettings: async (patch) => {
+    if (patch.rememberView === false) cancelViewSave();
     try {
-      set({ settings: await api.setSettings(patch), settingsRev: get().settingsRev + 1 });
+      const settings = await writeSettings(patch);
+      set({ ...(settings ? { settings } : {}), settingsRev: get().settingsRev + 1 });
     } catch (e) {
       set({ error: String(e) });
       return;
@@ -207,13 +220,14 @@ export const useStore = create<State>((set, get) => ({
       const nodes = toNodeMap(session.nodes);
       const children = childIndex(session.nodes);
       const tip = newestLeaf(session.nodes, children);
-      const focused = opts?.focus ? session.members.find((m) => m.id === opts.focus)?.tipId : undefined;
-      const selected = focused && nodes.has(focused) ? focused : tip;
+      const focus = session.members.find((m) => m.id === opts?.focus) ?? null;
+      const selected = focus?.tipId && nodes.has(focus.tipId) ? focus.tipId : tip;
       set({
         session,
         nodes,
         children,
         selected,
+        focus: focus?.id ?? null,
         expanded: new Set(),
         // Follow the conversation only from its tip; a focused fork that
         // isn't the tip is a place the user asked to read.
@@ -234,6 +248,7 @@ export const useStore = create<State>((set, get) => ({
       nodes: new Map(),
       children: new Map(),
       selected: null,
+      focus: null,
       expanded: new Set(),
       error: null,
     });
@@ -257,12 +272,15 @@ export const useStore = create<State>((set, get) => ({
 
       // A family isn't one file: its root can be deleted while a fork
       // survives, and the provider then re-roots the family on that fork. So
-      // the view asks for its root, then for the selected turn's session, then
-      // for any other member it knew — the first that loads is the family now.
+      // the view asks for its root, then for the focused member and the
+      // selected turn's session, then for any other member it knew — the
+      // first that loads is the family now.
       const prevNodes = get().nodes;
       const selectedSource = get().selected ? prevNodes.get(get().selected!)?.sourceSessionId : undefined;
       const candidates = [
-        ...new Set([prev.meta.id, selectedSource, ...prev.members.map((m) => m.id)].filter(Boolean) as string[]),
+        ...new Set(
+          [prev.meta.id, get().focus, selectedSource, ...prev.members.map((m) => m.id)].filter(Boolean) as string[],
+        ),
       ];
       let session = null;
       for (const id of candidates) {
@@ -288,9 +306,12 @@ export const useStore = create<State>((set, get) => ({
       const kept = carry(get().selected, prevNodes, nodes);
       const selected = wasFollowing || !kept ? tip : kept;
 
+      // The focused member stays in focus while it is still in the family.
+      const focus = session.members.some((m) => m.id === get().focus) ? get().focus : null;
+
       // `expanded` is intentionally preserved: chain ids are keyed on their
       // first node, so an opened run stays open as turns are appended below it.
-      set({ session, nodes, children, selected, error: null });
+      set({ session, nodes, children, selected, focus, error: null });
     }),
 
   toggleChain: (chainId) => {
@@ -321,19 +342,39 @@ export const useStore = create<State>((set, get) => ({
 }));
 
 /**
+ * Settings writes, in the order they were made. A response that comes back
+ * after a newer write was sent describes an older state, and is dropped.
+ */
+let settingsWrites = 0;
+async function writeSettings(patch: SettingsPatch): Promise<SettingsState | null> {
+  const mine = ++settingsWrites;
+  const settings = await api.setSettings(patch);
+  return mine === settingsWrites ? settings : null;
+}
+
+/**
  * Remembered view state: with the setting on, compress-chains and the list
  * filters are saved (debounced) whenever they change, and `boot` restores
- * them. Off, nothing is written.
+ * them. Off, nothing is written: turning it off cancels a pending save, a
+ * save that fires rechecks the setting, and the settings store keeps no view
+ * while it is off (whichever write lands last).
  */
 let viewTimer: ReturnType<typeof setTimeout> | null = null;
-useStore.subscribe((s, prev) => {
-  if (!s.settings?.settings.rememberView) return;
-  if (s.compress === prev.compress && s.cwdFilter === prev.cwdFilter && s.providerFilter === prev.providerFilter) return;
+function cancelViewSave() {
   if (viewTimer) clearTimeout(viewTimer);
+  viewTimer = null;
+}
+const remembering = () => !!useStore.getState().settings?.settings.rememberView;
+useStore.subscribe((s, prev) => {
+  if (!remembering()) return cancelViewSave();
+  if (s.compress === prev.compress && s.cwdFilter === prev.cwdFilter && s.providerFilter === prev.providerFilter) return;
+  cancelViewSave();
   viewTimer = setTimeout(() => {
+    viewTimer = null;
+    if (!remembering()) return;
     const { compress, cwdFilter, providerFilter } = useStore.getState();
-    api.setSettings({ view: { compress, cwdFilter, providerFilter } }).then(
-      (settings) => useStore.setState({ settings }),
+    writeSettings({ view: { compress, cwdFilter, providerFilter } }).then(
+      (settings) => settings && useStore.setState({ settings }),
       () => {
         /* not remembered this time; the view itself is unaffected */
       },

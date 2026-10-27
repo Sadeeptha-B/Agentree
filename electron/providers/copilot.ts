@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, forkSummaries } from "../../shared/render.ts";
 import type {
   ForkResult,
   MemberInfo,
@@ -17,7 +17,8 @@ import { HealthScan } from "../health.ts";
 import { readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
 import { RESUME_ARGV, resumeCommand } from "../shell.ts";
-import { assignStableIds, stitchFamily, textKey, type FamilyMember } from "./stitch.ts";
+import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
+import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
 
 /**
@@ -245,7 +246,7 @@ function stitched(fam: Family): TurnNode[] {
     // A fork rewrites event ids, so identity is the text chain — the same in
     // the copied prefix. (Copies: the parse is cached.)
     const nodes = p.nodes.map((n) => ({ ...n }));
-    assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false }));
+    assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, legacyKey: foldedTextKey(n) }));
     members.push({
       sessionId: m.ws.id,
       parentSessionId: m.ws.id === fam.rootId ? null : m.ws.forkedFrom,
@@ -349,8 +350,10 @@ export function loadCopilotSession(sessionId: SessionId): SessionDetail | null {
   if (!meta) return null;
 
   const nodes = stitched(fam);
+  for (const n of nodes) n.heldBy = copyHolders(n);
   applyAnnotations(nodes, fam.members.map((m) => m.ws.id));
-  const members = membersOf(fam).map((m) => ({ ...m, tipId: heldTip(nodes, holdsCopy(m.id)) ?? undefined }));
+  const members = membersOf(fam);
+  assignTips(nodes, members);
   return { meta, nodes, members };
 }
 
