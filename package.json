@@ -4,10 +4,13 @@
   "version": "0.2.0",
   "description": "Draws your coding-agent conversations — Claude Code and OpenAI Codex (CLI or VS Code), GitHub Copilot CLI — as trees, forks included",
   "license": "MIT",
-  "author": "Serban Cercelescu",
+  "author": "Sadeeptha Bandara",
+  "contributors": [
+    "Serban Cercelescu (original author, https://github.com/serban-cercelescu/Agentree)"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/serban-cercelescu/Agentree.git"
+    "url": "https://github.com/Sadeeptha-B/Agentree.git"
   },
   "type": "module",
   "bin": {

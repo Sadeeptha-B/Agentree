@@ -169,7 +169,7 @@ If it has, a banner offers `git pull` + `npm install` in your shell's syntax.
 An unpushed branch is never reported.
 
 `scripts/install.sh` (the one-line `curl | sh` installer) is POSIX-only and
-installs from the upstream repository. On Windows, use the steps above.
+installs from this fork. On Windows, use the steps above.
 
 ## Configuration
 
@@ -204,3 +204,9 @@ npm run fixtures     # regenerate the fixtures after changing make-fixtures.mjs
 
 [AGENTS.md](AGENTS.md) holds the design notes: how each harness stores
 conversations, and why the parsers and fork logic look the way they do.
+
+## Credits
+
+Agentree was created by [Serban Cercelescu](https://github.com/serban-cercelescu/Agentree).
+This fork modernizes it for today's Claude Code and Codex VS Code extensions.
+MIT licensed; see [LICENSE](LICENSE).
