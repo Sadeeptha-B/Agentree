@@ -11,6 +11,7 @@ import {
   locate,
   parseFile,
   readRecords,
+  resolveLineage,
   type RawRecord,
 } from "../transcripts.ts";
 
@@ -27,9 +28,10 @@ import {
  *    a fork of a compacted session carries its whole history;
  *  - every record gets a fresh uuid; parentUuid points at the previous copied
  *    record — except where the source's was null (a compact boundary), which
- *    stays null, so the CLI still resumes from the compaction summary.
- *    `logicalParentUuid` is left pointing into the source, as the extension
- *    leaves it; the parser resolves it by file order;
+ *    stays null, so the CLI still resumes from the compaction summary. Its
+ *    `logicalParentUuid` points at the copy of the pre-compact tip (the
+ *    extension leaves it pointing into the source; the parser copes with
+ *    both, by `resolveLineage`, the rule this walk shares);
  *  - a queued_command attachment's `source_uuid` is remapped onto the copy,
  *    and a `model_refusal_fallback` record is marked `neutralizedByFork`;
  *  - `sessionId` is the new id; timestamps are kept, except the last
@@ -79,14 +81,19 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
   for (const r of records) if (r.uuid) byUuid.set(r.uuid, r);
   if (!byUuid.has(anchor)) return { ok: false, error: "The fork point's record is missing from the transcript." };
 
-  // The logical chain: parentUuid, or across a compact boundary its
-  // logicalParentUuid — the extension's getTranscript(anchor, true).
+  // The logical chain — the extension's getTranscript(anchor, true) — by the
+  // SAME ancestry rule the parser draws with: across a compact boundary
+  // through logicalParentUuid, and when that reference is stale (this file is
+  // itself a fork) through the record written before the boundary. Walking
+  // raw fields instead stopped at a stale reference and dropped the whole
+  // pre-compact history from a fork of a fork.
+  const lineage = resolveLineage(records);
   const chain: RawRecord[] = [];
   const seen = new Set<string>();
   for (let cur = byUuid.get(anchor); cur && !seen.has(cur.uuid!); ) {
     seen.add(cur.uuid!);
     chain.push(cur);
-    const up = cur.parentUuid ?? cur.logicalParentUuid;
+    const up = lineage.get(cur.uuid!);
     cur = up ? byUuid.get(up) : undefined;
   }
   chain.reverse();
@@ -112,6 +119,11 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
         : {}),
       uuid,
       parentUuid: r.parentUuid ? prev : null,
+      // The boundary keeps its null parentUuid (so the CLI still resumes from
+      // the summary), and its logical link points at the COPY of the
+      // pre-compact tip. The extension leaves it pointing into the source
+      // file; repointing it keeps the copy self-contained for the next fork.
+      ...(r.logicalParentUuid && !r.parentUuid ? { logicalParentUuid: prev } : {}),
       sessionId: newId,
       timestamp: i === copied.length - 1 ? now : r.timestamp,
       forkedFrom,
