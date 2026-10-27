@@ -1,520 +1,551 @@
-# Agentree — design notes for agents working on this repo
+# Agentree: design notes for agents working on this repo
 
-Engineering notes on how Agentree parses, draws, and forks agent
-conversations — the transcript formats, the tree model, and the decisions
-behind them. Read this before touching the parsers or the fork logic: most
+Engineering notes on how Agentree parses, draws and forks agent
+conversations: the transcript formats, the tree model, and the decisions
+behind them. Read this before touching the parsers or the fork logic. Most
 of what looks odd in the code exists because of a transcript reality
-documented here. User-facing overview and installation live in
+documented here. The user-facing overview and install steps live in
 [README.md](README.md).
+
+Facts marked **verified** were observed on real data or by running the
+installed tool. Versions as of 2026-10: Claude Code extension 2.1.310 / CLI
+2.1.296, Codex extension `openai.chatgpt` 26.1021 / codex-cli 0.162, VS Code
+1.143 (Electron 43). The harnesses change their on-disk formats without notice.
+When that happens, the welcome screen's health row is the first place it shows
+(see "Fail loudly").
 
 ## Architecture
 
-Electron, with **no HTTP server**. The renderer has no Node access; everything
-crosses the contextBridge as a handful of typed IPC calls:
+Electron, with **no HTTP server**. The renderer has no Node access, and
+everything crosses the contextBridge as a handful of typed IPC calls:
 
 ```
-assets/                   logo.png (transparent), sized variants, logo.icns
-electron/main.ts          BrowserWindow + ipcMain handlers (filesystem lives here)
-electron/preload.ts       contextBridge → window.agentree, and nothing else
-electron/registry.ts      one surface over the three providers, routed by id
-electron/transcripts.ts   Claude Code provider: ~/.claude/projects → nodes
-electron/providers/codex.ts    Codex rollouts → nodes, fork-by-copy
-electron/providers/copilot.ts  Copilot event logs → nodes, fork-by-copy
-electron/providers/stitch.ts   fork families of linear sessions → one tree
-electron/lineage.ts       fork-parentage sidecar (~/.agentree/lineage.json)
-electron/meta.ts          sidecar annotation store
-shared/types.ts           node/session types + the IPC contract
-shared/render.ts          lineage walks, branch counting, token math
-src/tree-layout.ts        chain compression + tidy layout
-src/components/           TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome
-vscode-ext/               VS Code extension — same providers, same renderer
+assets/                        logo.png (transparent), sized variants, logo.icns
+electron/main.ts               BrowserWindow + ipcMain handlers (filesystem lives here)
+electron/preload.ts            contextBridge → window.agentree, and nothing else
+electron/registry.ts           Provider interface; routes by "who owns this id"; health
+electron/paths.ts              every root, lazily, honouring CLAUDE_CONFIG_DIR / CODEX_HOME / AGENTREE_HOME
+electron/shell.ts              resume commands in the host shell's syntax (PowerShell / POSIX)
+electron/health.ts             per-scan counters for the welcome screen's status rows
+electron/transcripts.ts        Claude Code provider: parse, fork families, list/load
+electron/providers/claude-fork.ts   Claude fork-at-turn (writes the extension's fork format)
+electron/providers/codex.ts         Codex provider: paginated page graph, legacy rollouts
+electron/providers/codex-appserver.ts  JSON-RPC client for `codex app-server` (thread/fork)
+electron/providers/copilot.ts       Copilot CLI event logs → nodes, fork-by-copy
+electron/providers/stitch.ts        key-based stitching of copy-forked sessions into one tree
+electron/lineage.ts            fork-parentage sidecar (~/.agentree/lineage.json)
+electron/meta.ts               sidecar annotation store (~/.agentree/meta/)
+electron/watch.ts              live view: fs.watch + stat polling
+shared/types.ts                node/session/health types + the IPC contract
+shared/render.ts               lineage walks, branch counting, token math
+src/tree-layout.ts             chain compression + tidy layout
+src/components/                TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome
+vscode-ext/                    VS Code extension: same providers, same renderer
+test/                          vitest suites + synthetic fixtures (test/fixtures/make-fixtures.mjs)
 ```
 
 `contextIsolation: true`, `nodeIntegration: false`. A viewer that reads your
 entire conversation history shouldn't also hand the page `require`.
 
-### VS Code extension
+### VS Code extension (the primary product)
 
-The Electron split maps one-to-one onto a VS Code extension, built from the
-SAME sources by `build-vscode.mjs` (`npm run build:vscode`): the extension
-host bundles `electron/registry.ts` + `watch.ts` + `meta.ts` (nothing below
-`main.ts`/`preload.ts` imports Electron — keep it that way), and the webview
-runs the unmodified renderer. `vscode-ext/src/shim.ts` implements the exact
-`window.agentree` surface over `postMessage`, loaded as a classic script
-before the module bundle because `src/api.ts` reads `window.agentree` at
-module-eval time. Host-side watchers are token-keyed like the ipcMain map and
-closed on panel dispose. The webview HTML links `index.css` by hand (there is
-no index.html for Vite to inject into), overrides the macOS traffic-light
-insets, and pins the theme vars to VS Code's `body.vscode-dark/-light`
-classes rather than the OS `prefers-color-scheme`. `onUpdateAvailable` is a
-no-op there — the extension updates through VS Code. Package with
-`npm run package` inside `vscode-ext/`; F5 from the repo root launches an
-extension-development host.
+The Electron split maps one-to-one onto a VS Code extension built from the
+SAME sources by `build-vscode.mjs` (`npm run build:vscode`):
 
-## Three harnesses, one tree model
+- The extension host bundles `electron/registry.ts`, `watch.ts` and `meta.ts`.
+  Nothing below `main.ts`/`preload.ts` imports Electron. Keep it that way.
+- The webview runs the unmodified renderer. `vscode-ext/src/shim.ts`
+  implements the exact `window.agentree` surface over `postMessage`. It is
+  loaded as a classic script before the module bundle, because `src/api.ts`
+  reads `window.agentree` at module-eval time.
+- `api.host` (`"vscode"` | `"electron"`) decides which actions the panel
+  offers. Only the extension host implements:
+  - `openNative`: Claude runs `claude-vscode.editor.open(sessionId)`, the
+    command the Claude extension's own `vscode://anthropic.claude-code/open?session=`
+    handler calls. Codex opens `${vscode.env.uriScheme}://openai.chatgpt/local/<threadId>`,
+    because the Codex extension's URI handler forwards the path to its webview
+    router, which routes threads at `/local/<id>`.
+  - `resumeInTerminal`: an integrated terminal in the session's cwd, running
+    the provider's resume argv.
+- Host-side watchers are token-keyed like the ipcMain map and closed on panel
+  dispose.
+- The webview HTML links `index.css` by hand (Vite has no index.html to inject
+  into), overrides the macOS traffic-light insets, and pins the theme vars to
+  VS Code's `body.vscode-dark/-light` classes instead of the OS
+  `prefers-color-scheme`.
+- `onUpdateAvailable` is a no-op there; the extension updates through VS Code.
 
-Everything downstream of parsing — layout, chains, annotations, the panel —
-sees only `TurnNode[]`. The providers' job is to make three very different
-stores produce that one shape. What each store actually is (all verified
-empirically, not from docs):
+Package with `npm run package` inside `vscode-ext/`. F5 from the repo root
+launches an extension-development host. `npm run typecheck` covers the
+extension too (`tsc -p vscode-ext`).
+
+## Harnesses, one tree model
+
+Everything downstream of parsing (layout, chains, annotations, the panel)
+sees only `TurnNode[]`. Each provider's job is to make a very different store
+produce that one shape:
 
 |                    | Claude Code | Codex | Copilot CLI |
 |--------------------|-------------|-------|-------------|
-| transcript         | JSONL, one record per content block | JSONL "rollout", `session_meta` + `response_item` + `event_msg` records | JSONL event log per session dir |
-| structure          | native DAG (`uuid`/`parentUuid`)    | linear, append-only | linear `id`/`parentId` event chain |
-| clean display text | must be cleaned (wrappers, ANSI)    | `event_msg` `user_message`/`agent_message` are already clean | `data.content` on `*.message` events is already clean |
-| plumbing to avoid  | `<system-reminder>`, command wrappers, task notifications | injected `role:"developer"`/`"user"` response_items (`<permissions instructions>`, `<environment_context>`…) | `transformedContent` (wraps the same text in `<current_datetime>` etc.) |
-| usage              | `message.usage` per record | `event_msg token_count` (input includes cached; converted) | not recorded per turn |
-| resume             | `claude --resume <id>` | `codex resume <id>` (appends to the SAME rollout) | `copilot --resume=<id>` (replays events.jsonl) |
-| fork after turn N  | explicit `last-prompt` pin appended by the command at resume time (+ `--resume-session-at` for print mode) | new rollout = copied prefix + fresh `session_meta` with `forked_from_id` | copy session dir, truncate events.jsonl, rewrite ids |
+| transcript         | JSONL, one record per content block | paginated JSONL pages, `.jsonl` or `.jsonl.zst` | JSONL event log per session dir |
+| structure          | native DAG (`uuid`/`parentUuid`) | page graph via `history_base` (exact tree) | linear `id`/`parentId` event chain |
+| a fork is          | a NEW file holding a copy of the active chain (no lineage field) | a NEW thread whose first page references the parent page | a copy-truncated session dir |
+| other branches     | rewinds inside one file | prompt edits: a new page of the same thread | none |
+| clean display text | must be cleaned (wrappers, ANSI, `ide_*`) | `item_completed` `UserMessage`/`AgentMessage`; strip the VS Code context preamble | `data.content` on `*.message` events |
+| plumbing to avoid  | `<system-reminder>`, `<ide_*>`, command wrappers, task notifications, `api-request-blob` | `response_item` messages (`role: developer`/`user` harness injections) | `transformedContent` |
+| usage              | `message.usage` per record | `token_usage_record` per response (input includes cached; converted) | not recorded per turn |
+| resume             | `claude --resume <id>` | `codex resume <id>` | `copilot --resume=<id>` |
+| fork after turn N  | Agentree writes the extension's fork format (`claude-fork.ts`) | `codex app-server` `thread/fork {threadId, lastTurnId}` | copy dir, truncate events.jsonl, rewrite ids |
+| open in VS Code    | `claude-vscode.editor.open(id)` | `vscode://openai.chatgpt/local/<id>` | — |
 
-### Forking where the harness has no resume-at flag
+**Invariant:** never modify a harness's transcripts or databases. Writes go
+only to new files in the harness's own fork format, through the harness's own
+API (`thread/fork`), or to Agentree's `~/.agentree/` sidecars.
 
-Claude Code can branch *inside* one transcript, so forking writes nothing.
-Codex and Copilot cannot — their sessions are linear files, and their CLIs
-resume only at the tip. But both can be forked by **copy-truncate**: write a
-new session whose transcript is the old one up to the chosen turn.
+## Codex: the page graph
 
-- **Codex** does this itself (`codex fork`, tip-only): the child rollout
-  carries a verbatim copy of the parent's records plus `forked_from_id` in its
-  `session_meta`. Agentree writes exactly that format at ANY turn, so
-  `codex resume <new-id>` — and codex's own tooling — accept the result.
-  Verified: a fork cut before a "PONG" exchange resumed knowing only "PING",
-  and a fork of a tool-using session recalled its tool results from the copied
-  `function_call_output` records.
-- **Copilot** resolves `--resume` purely from `~/.copilot/session-state/<id>/`;
-  no row in its central SQLite is needed. The copy must rewrite the
-  `sessionId` inside the copied `session.start` event — left stale, the
-  resumed CLI logs new turns under the PARENT's id in the central store
-  (observed before the rewrite was added). The central `session-store.db` is
-  copilot's derived mirror and is never touched.
+Verified on 276 rollouts / 24 cuts.
 
-Both forks are non-destructive: a new file/dir appears, nothing existing
-changes. The cut always lands on the turn's LAST raw record (`lastRawId`),
-same as Claude — merged turns span many records.
+```
+~/.codex/sessions/Y/M/D/rollout-<localStamp>-<threadId>.jsonl[.zst]            a thread's first page
+~/.codex/sessions/Y/M/D/rollout-<localStamp>-<threadId>_<pageId>.jsonl[.zst]   later pages
+~/.codex/archived_sessions/…                                                  same, archived
+~/.codex/session_index.jsonl                                                  {id, thread_name} lines, last wins
+```
 
-### Stitching fork families back into a tree
+- Every record has `timestamp`, `ordinal`, `type` and `payload`. **Ordinals are
+  global** and continue across pages.
+- A non-first page's `session_meta` carries
+  `history_base: {thread_id: <pageId>, end_ordinal_exclusive}`: "my history is
+  that page's history before this ordinal, then my own records".
+  - A **prompt edit** (`turn_trigger: "edit_user_message"`) starts a new page of
+    the same thread, cut before the edited turn.
+  - A **fork** starts a new thread whose first page is cut after the chosen
+    turn. It also records `forked_from_id` / `forked_from_ordinal_exclusive`.
+- **Every observed cut lands on a turn boundary**, and turn ids (UUIDv7) are
+  shared by reference, never copied. So the tree is exact, with no matching:
+  a page's first turn hangs off the last turn of its base with
+  `firstOrdinal < cut` (recursively through the base's own base).
+- Older pages are **zstd-compressed** (232 of 276 here). They are read with
+  `zlib.zstdDecompressSync`, which exists in Node ≥ 22.15 / 23.8 and VS Code's
+  Electron 43. It's feature-detected, and its absence is a health error.
+- **Archived threads can be bases of live forks** (verified: an archived
+  thread was the parent of two live ones), so `archived_sessions/` is always
+  scanned. A family whose every thread is archived gets no list entry.
+- A page whose base is no longer on disk becomes a separate root and raises a
+  health warning (one such page on the target machine).
+- `thread_source: "guardian_review"` (auto-review threads, the majority here)
+  and subagent sources are Codex's own plumbing, so they're hidden and counted as
+  "hidden" in health.
+- Display stream: `event_msg` → `item_completed` →
+  - `UserMessage` (`content[].text`). VS Code prefixes it with
+    `# Context from my IDE setup: … ## My request:\n`, so keep the part after
+    the heading. A second `UserMessage` inside one turn is steering typed
+    mid-turn and is marked `midTurn`.
+  - `AgentMessage` (`content[].text`, `phase` = `commentary` | `final_answer`).
+    All of a turn's prose folds into one assistant node.
+  - `Reasoning` (`summary_text`) becomes thinking. `CommandExecution`,
+    `FileChange`, `McpToolCall`, `WebSearch`, `Extension`, `ImageView` and
+    `Plan` become tool names.
+- Item ids are NOT unique (`item-1`, `item-2`, … repeat per turn), so node
+  ids are `<turnId>:<itemId>`. `lastRawId` is the turn id, i.e. the fork anchor.
+- The `session_meta` first line embeds the full base instructions (30–100 KB+).
+- Usage: `token_usage_record.payload.usage` per response is summed per turn,
+  and the last one is kept as `lastUsage`. `input_tokens` includes the cached
+  part, so it's stored as the Anthropic-shaped split.
+- **Why not app-server for reading:** `thread/turns/list` returns only a
+  thread's *active* path, so every prompt-edit branch is invisible.
+  `thread/list` takes ~6 s, returns duplicate rows, and doesn't populate
+  `forkedFromId` (only `thread/read` does). The raw page graph lists the same
+  103 interactive threads app-server does (cross-checked), plus the branches.
+- **Legacy rollouts** (pre-paginated, `event_msg` `user_message` /
+  `agent_message`, forks as verbatim copied prefixes) are still parsed and
+  stitched by content. They can't be forked through the API (no turn ids).
 
-A fork family (parent + copy-truncated children) *is* a tree, encoded as
-shared prefixes across files. `stitch.ts` rebuilds it: children are matched
-against their parent's chain turn-by-turn on (role, normalised text) — safe
-because the prefix is a byte copy — and their suffix hangs off the last shared
-turn. The welcome list shows one entry per family (the ⑂ badge counts the
-stitched branch points); opening any member opens the family.
+### Codex fork
 
-Parentage comes from `forked_from_id` for Codex (append-only, survives
-anything). For Copilot it lives in Agentree's own sidecar
-`~/.agentree/lineage.json`, because Copilot **regenerates workspace.yaml on
-every resume and silently drops unknown keys** — a `forked_from:` key written
-there was gone after one resume.
+`thread/fork {threadId, lastTurnId, excludeTurns: true}` through a
+short-lived `codex app-server` (newline JSON-RPC: `initialize` →
+`initialized` → request). Verified: the new thread has `forkedFromId` and
+exactly the prefix turns. The binary is the one bundled with the Codex VS Code
+extension (`~/.vscode/extensions/openai.chatgpt-*/bin/<plat>/codex(.exe)`,
+newest first), then PATH (a `.cmd` shim on Windows needs the shell). It's
+spawned without a shell, and stderr is ignored: an unrecognised `config.toml`
+key logs an ERROR line that is harmless.
 
-### Codex parsing notes
+The thread passed is the one whose *current* history contains the turn. That
+history is found by walking from the thread's newest page down its bases,
+narrowing the cut at each step. A turn that survives only on a page a later
+prompt edit cut away is forked by that page's file (`path` param) instead.
+Exact protocol types for the installed version come from
+`codex app-server generate-ts --out <dir>`.
 
-- The `session_meta` first line embeds the full base-instructions prompt —
-  routinely 30–100 KB. Anything that "reads the first line" must be prepared
-  to grow its buffer.
-- `event_msg` records are the display stream; `response_item` records are
-  read only for `function_call` names and reasoning summaries (the reasoning
-  itself ships encrypted).
-- Subagent threads (`thread_source: subagent`) are Codex's sidechains and get
-  no listing of their own.
-- Codex's `input_tokens` includes the cached part; Agentree stores the
-  Anthropic-shaped split (uncached remainder + `cache_read_input_tokens`).
+## Claude Code
 
-## The tree already exists
+### The tree already exists inside one transcript
 
 Claude Code writes one JSONL transcript per session, and every `user` /
 `assistant` record carries `uuid` and `parentUuid`. A node with two children
-*is* a branch — the CLI just has no way to show you one.
+*is* a branch (a rewind). The CLI just has no way to show you one.
 
-On this machine: **283 transcripts, 22 of them genuinely branched.**
+### …and across transcripts: VS Code "Fork conversation"
+
+Read from the extension's `forkSession` (2.1.310) and verified on 4 real pairs.
+The extension's fork:
+
+- writes a **new file** in the same project dir with a new `sessionId`;
+- contains the parent chain ending at the chosen message, minus `progress`
+  records, in order;
+- gives every record a **fresh uuid** (parentUuid re-linked) but **keeps
+  `message.id`, `promptId`, `requestId` and timestamps**, except that the last
+  copied record is re-stamped with the fork time;
+- appends `custom-title: "<title> (fork)"`;
+- writes **no lineage field**.
+
+So families are found by evidence the copy preserves. Every copy-fork starts
+with the same **first assistant `message.id`** as its source. The API mints
+that id once per response, so two independent sessions never share it, however
+similar their opening prompts. Explicit lineage (`forkedFrom` on SDK/Agentree
+forks, the lineage sidecar) also links families.
+
+Within a family, the parent is decided by:
+
+1. explicit lineage;
+2. otherwise the count of `(fork)` suffixes in the title, then file creation
+   time;
+3. among the earlier members, the one sharing the longest key prefix along the
+   member's active chain (a fork of a fork matches its direct parent best).
+
+### Stitching (`stitch.ts`)
+
+Structural, not positional. A child's node maps onto an existing tree node
+when both carry the same **match key** and hang off the same tree node (or
+are both roots). Matching can only extend down a path that matched so far, so
+the first unmatched node is the divergence point. Everything below it is the
+fork's own suffix, re-parented onto the last shared turn and marked
+`crossSession` (drawn dashed). Rewinds inside either file survive, and a
+parent that grew after the fork just keeps its extra turns.
+
+- Keys: Claude uses `m:<message.id>` for replies and `u:<promptId>|<text gist>`
+  for prompts. Legacy Codex and Copilot use role + text, which is safe there
+  because the prefix is a byte copy.
+- Stitching runs on **unmerged** per-message nodes. The same-role merge runs
+  after it, because a merge boundary can differ between a parent (which
+  branches mid-run) and its fork (which doesn't).
+- The merge never folds across sessions. A fork's first turn stays its own
+  node, and it is always structural in the layout (never buried in a chain).
+
+### Fork after a turn (`claude-fork.ts`)
+
+Agentree writes **the extension's own fork format** (above) plus
+`forkedFrom: {sessionId, messageUuid}` on every copied record (the Agent SDK's
+`forkSession` writes that field too), and records the link in the lineage
+sidecar. It walks the physical `parentUuid` chain from the turn's **last** raw
+record (`lastRawId`; a turn spans one record per content block). A compact
+boundary has a null `parentUuid`, so the copy starts there, which is exactly
+the history the CLI loads. It writes with `wx`, so nothing is overwritten.
+File-history snapshots aren't copied: they're rebuilt from deltas Agentree
+doesn't model, and a stale one would make "rewind code" restore the wrong
+files. The fork is opened in the Claude panel.
+
+Verified end-to-end: a fork taken after the first reply of a two-prompt session
+resumed with `claude -p --resume <new>`. It knew the first question and had
+never seen the second, and its new turn stitched in as a dashed branch of the
+right node.
+
+Refusals stay:
+
+- `preCompact` turns, because the CLI loads only messages after the last
+  `/compact`;
+- `injected` interjections, which have no record;
+- `midTurn` attachment nodes, which aren't message anchors (forks of later
+  turns keep them).
+
+The Agent SDK (`@anthropic-ai/claude-agent-sdk`) was deliberately not bundled.
+Its licence is "all rights reserved" and the repo is MIT, and its session
+functions are plain file operations whose output format is reproduced here.
+
+**Superseded designs, for history.** Each one failed in a way worth remembering:
+
+1. *Copy under a new id, no stitching*: every fork listed as an unrelated
+   conversation.
+2. *An explicit `last-prompt` pin appended at click time*: a still-open CLI
+   appends its own non-explicit pointer on exit and clears the pin.
+3. *`--resume-session-at` alone*: it is print-mode-only, and interactive resume
+   silently continued from the tip.
+4. *Pin + flag inside the emitted command* (`printf … >> transcript && claude …`):
+   it worked interactively, but it wrote into the user's real transcript,
+   depended on undocumented reducer behaviour, was POSIX-only, and couldn't be
+   driven from the VS Code chat panel. 3,011 `last-prompt` records on the
+   target machine, 0 explicit: the pin was never used there.
 
 ### One turn is many records
 
 Claude Code writes **one record per content block**. A reply with thinking +
 text + a tool call becomes three chained `assistant` records sharing one API
-`message.id`:
+`message.id`. `transcripts.ts` groups by `message.id` and emits one node per
+turn, merging the blocks. Some messages span 27 records.
 
-```
-uuid=d6150676  blocks=[thinking]  textLen=0
-uuid=c5c12fc1  blocks=[text]      textLen=155
-uuid=4680dc83  blocks=[tool_use]  textLen=0
-```
+### Record types
 
-Drawn naively that's three nodes per turn, two of them blank. `transcripts.ts`
-groups by `message.id` and emits one node per turn, merging the blocks. Some
-messages span 27 records.
+Seen on the target machine: `assistant`, `attachment`, `user`,
+`api-request-blob`, `bridge-session`, `last-prompt`, `atis-latch`,
+`ai-title`, `api-request`, `queue-operation`, `mode`, `file-history-delta`,
+`file-history-snapshot`, `custom-title`, `cost-state`, `pr-link`, `system`,
+`api-request-shape`, `frame-link`, `artifact-*`, `permission-mode`. Only
+`user`/`assistant` (plus `queued_command` attachments) become nodes.
+`api-request-blob` carries `message` content blocks but is **not** a turn.
+The two-pass lineage tolerates any type, and unknown ones are counted in the
+health row, not treated as errors.
+
+- **Title:** last `custom-title` > last `ai-title` (the CLI's generated title)
+  > first real prompt (computed before the same-role merge).
+- **`entrypoint`** (`claude-vscode` | `cli`) is shown in the panel.
+- The project-dir slug keeps the drive letter's case as written
+  (`c--Users-…` and `C--Users-…` both occur). The cwd inside the transcript is
+  authoritative.
 
 ### Plumbing is stripped, real markup is not
 
 Records carry ANSI escapes from captured command output and Claude Code's own
-wrapper markup (`<local-command-stdout>`, `<command-name>`, `<bash-input>`, the
-"Caveat:" preamble, `<system-reminder>`). Those are cleaned:
+wrapper markup. Those are cleaned:
 
-- **dropped entirely**: `local-command-caveat`, `system-reminder` — boilerplate
-  addressed to the model, never written or read by a person;
-- **unwrapped**: the rest keep their inner text, losing the tag.
+- **dropped entirely:** `local-command-caveat`, `system-reminder`, and the VS
+  Code extension's context blocks `ide_opened_file`, `ide_selection` and
+  `ide_diagnostics`. Left in, "The user opened the file … in the IDE" became
+  most sessions' titles;
+- **unwrapped:** the rest (`command-name`, `local-command-stdout`,
+  `bash-input`, …) keep their inner text and lose the tag.
 
 The tag list is a deliberately short **allow-list**, not "strip anything
-angle-bracketed". A census over the corpus found `<doc>` ×260, `<name>` ×90,
-`<email>` ×102 and dozens more — all genuine content inside code samples and
-quoted XML. A blanket strip would corrupt the very text it's meant to clean.
-Five prose mentions of `` `<system-reminder>` `` (inside backticks, discussing
-the tag) survive, correctly.
-
-A record that is *nothing but* wrappers is rebuilt from the trimmed inner
-values, because unwrapping in place strands the pretty-printer's indentation
-(`/model` followed by twelve spaces and `model`).
+angle-bracketed". A corpus census found `<doc>` ×260, `<name>` ×90,
+`<email>` ×102 and dozens more, all genuine content inside code samples and
+quoted XML. Prose mentions in backticks survive, correctly. A record that is
+*nothing but* wrappers is rebuilt from the trimmed inner values, because
+unwrapping in place strands the pretty-printer's indentation.
 
 ### Only turns that said something get a node
 
-A node must have text after the merge. That removes two large classes of noise
-which together outnumber the real turns in an agentic session:
-
-- `user` records that exist only to carry `tool_result` blocks back to the
-  model — transport, not conversation;
-- `assistant` turns whose entire content was a tool call or bare thinking.
-
-The filter runs **after** the merge, so a turn that is thinking + tool_use +
-one line of prose survives as that one line. Uncaptioned screenshots are
-labelled `[image]` rather than dropped (3 in 2116 user records, but silently
-losing one would be worse than a label).
-
-Dropping these does not cost branch structure: `resolveParent` re-links
-children to the nearest surviving ancestor, and the branched-session count was
-identical before and after (22).
+A node must have text after the merge. That removes `user` records that exist
+only to carry `tool_result` blocks, and `assistant` turns whose entire content
+was a tool call or bare thinking. The filter runs **after** the per-message
+merge. Uncaptioned screenshots are labelled `[image]`. `resolveParent`
+re-links children to the nearest surviving ancestor, so dropping these doesn't
+cost branch structure.
 
 ### Same-role runs fold into one turn
 
-A linear run of consecutive same-role nodes becomes one node:
-
-- **assistant** — with tool results gone, an agent loop is assistant →
-  assistant → assistant; separate API messages, but one reply to one prompt;
-- **user** — a slash command arrives as several records (command name, its
-  stdout, hook output) before the next assistant turn.
-
-Only merges where the parent has exactly one child, so branch points are never
-collapsed — a branch below a run just re-parents onto the head. Usage is
-**summed** here (each part is a distinct API call), which is the opposite of the
-per-block merge above, where every record repeats one message's usage and
-summing would multiply it. Absorbed ids are retained so sidecar annotations
-still resolve.
+A linear run of consecutive same-role nodes becomes one node: an agent loop
+(assistant → assistant → assistant), or a slash command's several user records.
+It only merges where the parent has exactly one child, never across sessions,
+and never into a fork's first turn. Usage is **summed** here, because each part
+is a distinct API call. That's the opposite of the per-block merge, where every
+record repeats one message's usage. Absorbed ids are retained so sidecar
+annotations still resolve.
 
 ### Most "branches" were an artifact
 
 Parallel tool calls produce a fake fork: the second `tool_use` block and the
-first tool's result both hang off the same record.
-
-```
-BRANCH at c36bdf9c  parent=assistant[tool_use]
-   child  assistant[tool_use]   ← next tool call of the SAME turn
-   child  user[tool_result]     ← result of the first one
-```
-
-Before coalescing turns and dropping tool results, one session counted **⑂9
-when only 1 was real**, and the corpus looked like 56 branched sessions rather
-than 22. Both fixes were needed: merging alone leaves the tool_result hanging
-off the merged node.
+first tool's result both hang off the same record. Merging turns AND dropping
+tool results were both needed to stop counting those (one session showed ⑂9
+when only 1 was real).
 
 ### Lineage gotcha
 
-Claude Code interleaves other record types — `attachment`, `system`,
-`file-history-snapshot`, `mode` — into the same parent chain. Filtering to
-displayable turns without **re-linking across the gaps** leaves most
-`parentUuid` pointers dangling and collapses a 378-node tree to about seven
-reachable nodes. `transcripts.ts` does two passes: build the full lineage from
+Claude Code interleaves other record types into the same parent chain.
+Filtering to displayable turns without **re-linking across the gaps** leaves
+most `parentUuid` pointers dangling, which collapsed a 378-node tree to about
+seven reachable nodes. So there are two passes: build the full lineage from
 every record that has a uuid, then resolve each kept node's parent to its
 nearest surviving ancestor.
 
+### Mid-turn messages (`/btw`), interjections and `/compact`
+
+A message sent while Claude is working is recorded as a uuid-less
+`queue-operation` pair and, on current CLIs, as a `queued_command`
+**attachment** with a real uuid at the delivery point. Task notifications ride
+the same queue and attachment type (`commandMode: "task-notification"`, null
+origin) and are dropped. Agentree prefers attachments (`origin.kind: "human"`)
+and falls back to queue-op reconstruction for old transcripts (deduped by
+content), splicing each one **into** the chain, never beside it: an
+interjection must not become a spurious branch point. Reconstructed ones
+(`queued:<sid>:<n>` ids) are drawn hollow and can't be forked from.
+
+`/compact` writes `system/compact_boundary` with `parentUuid: null` and the
+real predecessor in `logicalParentUuid`. The parser follows that field, or a
+compacted session shatters into a forest. The resume loader indexes only
+messages after the LAST boundary, so earlier turns are marked `preCompact`.
+The harness doesn't persist every piece of in-turn prose: if nothing was
+recorded between two mid-turn messages, they merge into one node, which is a
+faithful rendering of the file.
+
+## Copilot CLI
+
+Unchanged since July 2026 and untested on the target machine's current
+version. Forks are copy-truncated session dirs, with the copied
+`session.start`'s `sessionId` rewritten (left stale, the resumed CLI logs
+under the PARENT's id). Parentage lives in `~/.agentree/lineage.json`, because
+Copilot **regenerates workspace.yaml on every resume and drops unknown keys**.
+VS Code **Copilot Chat** (`%APPDATA%/Code/User/workspaceStorage/*/chatSessions/*.jsonl`,
+an op-log) is the next provider. See `docs/modernization-handoff.md` §3.3 for
+its format notes.
+
+## Fail loudly
+
+Every provider scan fills a `HealthScan`: files seen, hidden (guardian,
+subagent, empty), parsed, listed, format versions, and unknown record types
+(Claude: top-level `type`; Codex: top-level type, `event_msg` payload type and
+item type). The welcome screen shows one row per present provider. It warns
+when fewer than half of the candidate files parse, and lists unknown types
+behind a disclosure. A provider that throws doesn't take the others down
+(`registry.ts` guards each one), and its row says it crashed. This row would
+have flagged the 2026-09 Codex format change, which listed 0 sessions, on day
+one.
+
 ## Chains
 
-Conversation trees are caterpillars: one long spine with short stubs. Drawn
-node-per-circle they're a featureless vertical line thousands of pixels tall.
-So runs of single-child turns collapse into one **chain** with a count badge —
-click to expand the whole run, click again to collapse. Runs shorter than
-`MIN_CHAIN` (3) draw as plain nodes instead: a chain spans ~2 rows and hides
-its turns behind a pill, so a "⋯ 1" standing in for a single node saves nothing
-and costs a click.
-
-Effect on a real session: **89 turns → 5 drawn elements**, branch structure
-legible at a glance.
+Conversation trees are caterpillars: one long spine with short stubs. Runs of
+single-child turns collapse into one **chain** with a count badge, and a click
+expands or collapses the whole run. Runs shorter than `MIN_CHAIN` (3) draw as
+plain nodes. Effect on a real session: **89 turns → 5 drawn elements**.
 
 Four things this got wrong first, all fixed and worth not re-introducing:
 
-- **A chain must emit the node it terminates in.** Otherwise a collapsed run
-  ends in empty space, hiding exactly the leaf you want to inspect. Every
-  branch now visibly ends in a real, selectable node.
+- **A chain must emit the node it terminates in**, or a collapsed run ends in
+  empty space.
 - **Don't keep the whole selected path uncompressed.** In a caterpillar that's
-  nearly every node, so it defeats compression on exactly the shape compression
-  exists for. The path is shown by edge highlighting instead.
-- **Don't size a chain proportionally to the turns it hides.** A 200-turn run
-  becomes an 8000px line. The span is fixed (`CHAIN_ROWS`); the badge carries
-  the length.
+  nearly every node. The path is shown by edge highlighting instead.
+- **Don't size a chain proportionally** to the turns it hides. The span is
+  fixed (`CHAIN_ROWS`).
 - **`fit` must add the chain span to the measured height**, or the tail clips.
 
 ## Layout
 
-Tidy tree by **subtree extent**, not fixed columns. Each subtree is laid out in
-its own coordinate space and packed against its sibling with a fixed gap, then
-the parent is centred over its children and the subtree grown to envelop its own
-box. Because two subtrees never overlap, two nodes in the same row never can —
-which is what lets a labelled node be a variable-width box instead of a dot.
+The layout is a tidy tree by **subtree extent**, not fixed columns. Two
+subtrees never overlap, so two nodes in the same row never can either, which
+is what lets a labelled node be a variable-width box. Node width comes from
+`nodeWidth()`, deliberately generous because SVG can't measure text before
+rendering. Fuzzed over 300 random trees: zero overlaps.
 
-Node width comes from `nodeWidth()` in `tree-layout.ts` and is *deliberately
-generous*: SVG cannot measure text without rendering it, so a box is sized from
-its character count, and under-measuring puts a box on top of its neighbour.
-`TreeCanvas` draws the box using the same function, so the box drawn is exactly
-the box siblings were spaced around. Fuzzed over 300 random trees / 139k
-adjacent pairs: zero overlaps, zero out-of-bounds.
+Structural nodes are **roots, branch points, leaves, annotated turns, and a
+fork's first turn** (`crossSession`). Nothing else is structural.
 
-Structural nodes are **roots, branch points, leaves, and anything annotated** —
-nothing else. A branch's first child is deliberately *not* structural: keeping
-it drew a stray dot under every fork before compression could start.
+**Selection is styling, never geometry.** `isStructural()` ignores the
+selection, so clicking never re-lays out the tree. Auto-fit runs once per
+session (via a ref), so after the first frame the viewport belongs to the user.
 
-**Selection is styling, never geometry.** `isStructural()` deliberately ignores
-the selected node: making it structural would split a chain on every click,
-changing the tree's dimensions and making the whole diagram jump. For the same
-reason auto-fit runs once per session (via a ref, so a layout change can't
-re-trigger it) — after the first frame the viewport belongs to the user. Drag to
-pan, wheel to zoom (anchored at the cursor), `fit` to re-frame.
-
-## Getting back to the CLI
-
-Select any node; the panel gives you the session id plus ready-made commands:
-
-```
-cd "/Users/you/Quirky" && claude --resume 2a4fb7fd-5e5c-4f9d-be1e-dcf7a0b90f94
-```
-
-Sessions are stored per working directory, so `--resume` only finds one from
-its own cwd — hence the `cd`. A `--fork-session` variant is offered too.
-
-### Fork after a turn
-
-`⑂ fork after this turn` hands you a command that resumes the session *from the
-selected turn*:
-
-```
-cd "…" && printf '%s\n' '{"type":"last-prompt","leafUuid":"<uuid>","explicit":true,"sessionId":"<id>"}' \
-  >> "<transcript>" && claude --resume <sessionId> --resume-session-at <messageUuid>
-```
-
-Two mechanisms, belt and braces, because they cover different CLI entrypoints:
-
-- the appended record is `/rewind`'s **explicit `last-prompt` pin** — the only
-  thing *interactive* resume obeys. Verified on CLI 2.1.220: the TUI hydrates
-  the chain ending at the pinned uuid and the next exchange lands as a second
-  child of it. `"explicit": true` is load-bearing — a bare `leafUuid` pointer
-  is ignored and the resume lands on the tip (also verified).
-- `--resume-session-at` is the Agent SDK's `resumeSessionAt`, and the CLI's own
-  option table marks it **print-mode-only** ("use with --resume in print
-  mode"). Interactive mode silently ignores it. Kept because it makes the same
-  command correct under `-p`, and costs nothing interactively.
-
-This is the fourth design:
-
-1. **Copying the transcript under a new id** made every fork list as an
-   unrelated conversation (and cost a full file copy per fork).
-2. **Appending the pin at fork-click time** worked — but only if nothing wrote
-   after it. A session open in a CLI appends its own non-explicit pointer on
-   exit, and the loader's reducer lets any later record clear the pin. Users
-   fork while the session is open, then exit to go resume: the pin died in
-   exactly that gap, every time (observed as interleaved `explicit=True` /
-   `explicit=None` pairs in a real transcript).
-3. **The flag alone** looked correct because it WAS verified — in print mode.
-   Interactive hydration never reads it, so every interactive fork quietly
-   continued from the tip. (Bug report: "forking just continues the
-   conversation".) The CLI help's "in print mode" clause is the tell.
-4. **The pin, appended by the emitted command itself** immediately before the
-   resume (`printf … >> transcript && claude --resume …`). Design 2's failure
-   needed a writer to land between pin and resume; here that window is
-   milliseconds inside one `&&` chain. Agentree still writes nothing at
-   fork-click time — nothing happens until the user runs the command.
-
-The anchor is the turn's **last** raw record (`TurnNode.lastRawId`), not its
-`id`: a turn spans one record per content block, so anchoring on `id` would
-resume mid-reply. Verified end-to-end in the interactive TUI: resume at a
-mid-session assistant uuid → the model knows the prefix, has never seen the
-later turns, and its reply lands as a second child of the anchored node.
+Edges into a `crossSession` node are dashed (`.edge.cross`), and the legend
+explains them only when the tree has one.
 
 ## Live view
 
-The tree follows the transcript on disk. With a session open, `fs.watch` covers
-that file; on the welcome screen it covers the whole projects tree, so a
-conversation started in another terminal appears on its own.
+The tree follows the transcripts on disk.
 
-- The watch is on the *directory*, not the inode — a watch on a file goes deaf
+- A session watch covers the **directory holding its family**: the Claude
+  project dir, or the Codex/Copilot roots. A tree can grow through any
+  member, or through a brand-new fork file. The welcome screen watches every
+  root.
+- The watch is on the *directory*, not the inode. A watch on a file goes deaf
   the moment the file is replaced.
-- **Codex rollouts are watched by stat-polling, not fs.watch.** Codex's
-  appends are invisible to macOS FSEvents: with a recursive AND a flat watch
-  on the rollout's own directory, a live turn grew the file by kilobytes
-  (stat saw it within 200 ms) and neither watcher fired once in 60 s — while
-  an append to the same file from another process fired instantly. Codex's
-  writes surface to FSEvents only when it closes the file (exec mode delivers
-  everything in one burst at process exit — observed: zero events for 9 s,
-  then the whole rollout at exit). So the codex and copilot roots get a
-  1 s stat sweep (path+size+mtime over ~hundreds of transcripts, ~4 ms)
-  alongside the fs.watch, feeding the same debounce. Claude stays on pure
-  fs.watch — its writes fire FSEvents normally.
-- Writes are debounced 250 ms. The CLI appends one record per content block, so
-  one reply is a burst; without coalescing the file gets reparsed dozens of
-  times per turn.
-- Reload keeps your place: `expanded` survives, and the selection only follows
-  the new tip if it was *already* on the tip. Otherwise you are reading history,
-  and yanking the selection away as turns land would make the app unusable
-  during a live session.
-- Auto-fit is keyed on session id, so a live reload never moves the viewport.
-
-## Interjections
-
-A message typed while Claude is still working may never become a `user` record.
-It is written once as `{"type":"queue-operation","operation":"enqueue",…}` — no
-uuid, no parentUuid — and if it is then delivered *into* the running turn (queue
-op `remove`, as opposed to `dequeue`) no record is ever created. The model saw
-it; the transcript's DAG does not contain it. The tree was silently dropping
-whole instructions this way — 10 of them in this project's own session.
-
-`spliceInterjections()` reconstructs them and splices each **into** the chain,
-re-parenting the record that followed it. Hanging them off the side instead
-would turn every interjection into a spurious branch point — exactly the signal
-this app exists to show. The re-parent only happens if the following record
-still points where the interjection came after; otherwise the user rewound in
-between and inventing a link would misreport history.
-
-Deduplication is by content (normalised 80-char prefix), not by queue op:
-`remove` covers both "delivered mid-turn" and "user deleted it", so the presence
-of a real record is the only reliable evidence of which happened.
-
-These nodes are drawn **hollow** and cannot be forked from — they have no uuid,
-so there is no record to resume at.
+- Codex and Copilot roots (`sessions/` and `archived_sessions/`) are also
+  **stat-polled** every second. Codex appends were verified invisible to
+  macOS FSEvents until the file closes, and the poll costs ~4 ms. The filter
+  accepts `.jsonl`, `.jsonl.zst` and `.yaml`.
+- Writes are debounced 250 ms, because one reply is a burst of appends.
+- Reload keeps your place: `expanded` survives, and the selection follows the
+  new tip only if it was already on the tip.
 
 ## Welcome screen
 
-A directory rail on the left — "All conversations", then every working
-directory ranked by its most recent conversation — and one flat list on the
-right, newest interaction first. Not grouped by folder: grouping buried a
-conversation you touched ten minutes ago under a project you last opened in
-March. No refresh button (the watcher keeps the list live) and no
-"only branched" filter (the ⑂ badge carries that signal without hiding
-anything).
-
-Sessions renamed with `/rename` list under that name: the CLI appends a
-uuid-less `custom-title` record, and a name the user chose beats anything
-inferred from the first prompt. Last rename wins.
-
-`updatedAt` is the newest timestamp on **any** record — not mtime (which moves
-when the CLI rewrites bookkeeping for a session nobody is talking in), and not
-the newest *displayed* turn (which stands still through a long tool loop,
-making an actively-running session look minutes stale).
+- A directory rail ("All conversations", then directories ranked by most
+  recent conversation) and one flat list, newest interaction first, with one
+  entry per fork family.
+- Badges: `⑂ n` branch points, `N sessions` for a family.
+- Health rows sit above the list.
+- No refresh button (the watcher keeps it live) and no "only branched" filter.
+- `updatedAt` is the newest timestamp on **any** record in any member. It
+  isn't mtime (bookkeeping rewrites move that) and it isn't the newest
+  displayed turn (which stands still through a long tool loop).
 
 ## Not dying under load
 
 Two mechanisms, both born of a real incident (Electron at 100 GB RSS):
 
-- **Summary cache** (`summaries` in `transcripts.ts`): the welcome scan parses
-  every transcript — hundreds of files, hundreds of MB, ~950 ms and ~250 MB of
-  garbage per pass. Cached by (mtime, size), a repeat scan is ~2 ms. Only the
-  `SessionMeta` is cached, never the node arrays — keeping every session's
-  turns resident would trade a CPU problem for a worse memory one. Deleted
-  files are evicted on each scan.
-- **Back-pressure** (`gate()` in `store.ts`): a scan takes far longer than the
-  watcher's 250 ms debounce, so during an active conversation refreshes were
-  issued faster than they completed; every pending IPC promise retained a full
-  parse result and the renderer grew without bound. Now at most one refresh of
-  a kind is in flight; changes arriving mid-refresh coalesce into exactly one
-  follow-up pass — never a queue, never a missed update.
+- **Summary caches** keyed by (mtime, size). Claude caches per-file summaries
+  plus a family-meta cache keyed by every member's identity. Codex caches
+  page parses and family metas. Only metadata and small Codex pages are cached,
+  never Claude node arrays. Deleted files are evicted on each scan. Cold scan
+  over ~340 transcripts is ~2.7 s; a warm one is ~14 ms.
+- **Back-pressure** (`gate()` in `store.ts`): at most one refresh of a kind is
+  in flight, and changes arriving mid-refresh coalesce into exactly one
+  follow-up.
 
 ## Annotations
 
-Labels, dead-end marks, and stars live in a sidecar at
-`~/.agentree/meta/<sessionId>.json`, keyed by node uuid. Never written into
-the transcripts: those are your real work, the CLI may be mid-append on them,
-and our UI state shouldn't be indistinguishable from actual conversation
-content.
+Labels, dead-end marks and stars live in `~/.agentree/meta/<sessionId>.json`,
+keyed by node id, and never in the transcripts. A family's annotations are
+written under the family root's id and read from **every** member's file, so
+a family that gets re-rooted (a fork found later, a root deleted) keeps them.
+
+## Windows
+
+- Resume commands are emitted in the host shell's syntax by `shell.ts`:
+  `Set-Location -LiteralPath '<cwd>'; claude --resume <id>` on win32
+  (PowerShell 5.1 has no `&&`), and `cd '<cwd>' && …` elsewhere.
+- `npm run dev:app` is a Node launcher (`scripts/dev-app.mjs`), not
+  `VAR=value electron .`.
+- `bin/agentree.cjs` and `scripts/install.sh` are POSIX-only.
+- npm's allow-scripts policy can block Electron's binary download. Run
+  `npm approve-scripts electron` or `node node_modules/electron/install.js`.
+- With `core.autocrlf=true`, test fixtures are protected by
+  `test/fixtures/.gitattributes` (`-text`).
+
+## Tests
+
+`npm test` (vitest) runs over synthetic fixtures generated by
+`test/fixtures/make-fixtures.mjs`. Record shapes are copied from real
+transcripts with the content replaced; no user data is committed. The suites
+point providers at the fixtures through `CLAUDE_CONFIG_DIR` / `CODEX_HOME` /
+`AGENTREE_HOME`, and the Claude suite works on a temp copy because it forks.
+
+- **Claude:** ide-wrapper and api-request-blob handling, title precedence, an
+  extension fork pair stitched at the right turn next to a rewind, a
+  same-opening-prompt session that must not merge, and the fork writer's
+  output (format, lineage, fork-of-fork).
+- **Codex:** a `.zst` edit page, a fork through an archived thread, a
+  guardian thread, a missing base, the IDE wrapper, steering, legacy stitching,
+  and fork-target selection (by thread vs. by page file), with app-server
+  mocked.
+- **Shell quoting** on both platforms.
+
+When a harness changes format, add a fixture for the new shape before changing
+the parser.
 
 ## Notes
 
-- Overlays recolour nodes by **output tokens** or **cache-hit rate**, both from
-  the transcript's `message.usage`. Deliberately not a dollar figure: the
-  transcript records tokens, not pricing, and a Max subscription has no
-  per-token bill.
-- Session titles come from the first non-plumbing user turn, computed **before**
-  the same-role merge: a merged node can open with slash-command output and only
-  then reach the real question.
 - Assistant output renders as Markdown via a small hand-written renderer
-  (`src/markdown.tsx`) that emits React elements rather than an HTML string. No
-  `innerHTML`, so arbitrary transcript text needs no sanitiser; `javascript:`
-  and other non-http schemes never become links. It recurses, so its regex is
-  instantiated per call — a shared `/g` regex rewinds the outer cursor and hangs.
-- The app icon is generated from `logo.png` by `scripts/make-icon.py`, which
-  measures the rounded rectangle and rebuilds its boundary as an anti-aliased
-  alpha mask. A naive "delete black pixels" would punch holes in the dark tree
-  edges and node outlines of the artwork itself. Re-run it if `logo.png` changes.
-
-## Mid-turn messages (`/btw`) and `/compact`
-
-A message sent while Claude is working is recorded twice: as a uuid-less
-`queue-operation` pair, and — on current CLIs — as a `queued_command`
-**attachment** with a real uuid at the exact delivery point in the lineage.
-Task notifications ride the *same* queue and the same attachment type
-(`commandMode: "task-notification"`, null origin); naive splicing showed them
-as hollow "user" turns the user never typed, which was most of the observed
-"/btw weirdness".
-
-Agentree now prefers the attachment records (`origin.kind: "human"` only),
-falls back to queue-op reconstruction for old transcripts (deduped by
-content), and drops notifications from the tree entirely. Verified against
-the live CLI:
-
-- a fork of any turn **after** an attachment-backed mid-turn message retains
-  it — the resumed model can quote it back;
-- the attachment uuid itself is NOT a valid `--resume-session-at` anchor
-  ("No message found"), so those nodes explain themselves instead of forking;
-- old-style queue-op interjections have no record at all, so forks crossing
-  them still warn that the instruction is lost.
-
-`/compact` writes a `system/compact_boundary` record with `parentUuid: null`
-and the real predecessor in `logicalParentUuid` — without following that
-field a compacted session shatters into a forest. The resume loader only
-indexes messages after the LAST boundary, so forks of earlier turns fail;
-Agentree marks those turns `preCompact` and refuses with the reason.
-
-One more transcript reality: the harness does not persist every piece of
-in-turn assistant prose. If nothing was recorded between two mid-turn
-messages, they merge into one node — that is a faithful rendering of the
-file, not a parser bug.
+  (`src/markdown.tsx`) that emits React elements, never an HTML string, so no
+  sanitiser is needed. Non-http schemes never become links. It recurses, so
+  its regex is instantiated per call: a shared `/g` regex rewinds the outer
+  cursor and hangs.
+- Per-turn numbers (`context · prompt · % cached`) live in the panel. There are
+  no overlay modes: a legend in the canvas corner decodes everything the tree
+  encodes, and the tip breathes with a pulsed ring (static under
+  `prefers-reduced-motion`).
+- Marking a turn as a dead end dims it **and everything beneath it**.
+- The app icon is generated from `logo.png` by `scripts/make-icon.py`. Re-run
+  it if `logo.png` changes.
 
 ## Known gaps
 
-- Copilot sessions from before the `events.jsonl` format (older CLI versions)
-  are not listed — their turns live only in the central SQLite mirror.
-- Copilot records no per-turn token usage, so the context/prompt numbers stay
-  blank on those trees.
-- `listSessions` parses every transcript per call — 283 files is fine, but it
-  wants an mtime-keyed index beyond a thousand.
+- VS Code Copilot Chat isn't read yet (next phase; read-only, no fork API).
+- Copilot CLI sessions from before `events.jsonl` aren't listed, and Copilot
+  records no per-turn tokens.
+- Whether the Claude extension's `editor.open` finds a session whose cwd is
+  outside the open workspace is unverified. If it can't, use "resume in
+  terminal".
+- The Codex `vscode://openai.chatgpt/local/<id>` deep link is read from the
+  extension's source but not yet confirmed visually.
+- A Codex fork through app-server takes ~10 s (process startup + scan).
 - Subagent turns are dimmed but not given their own lane.
-- Not packaged — runs via `npm start`. `electron-builder` would produce a
-  `.app`/`.dmg`; not set up yet.
-
-## No overlay modes
-
-Earlier builds had role/cost/cache colour overlays behind toolbar chips. They
-were removed: a mode you must know to toggle, showing heat-ramp colours you
-must know how to read, is chrome — and the cache ramp ("hot = cold cache")
-confused even its author's user. What replaced them lives in the drawing
-itself:
-
-- a **legend** in the canvas corner decodes everything the tree encodes;
-- the conversation **tip** breathes with a pulsed ring (static under
-  `prefers-reduced-motion`), so "where is this session now" needs no mode;
-- per-turn numbers stay in the panel (`prompt · output · % cached`), where
-  they can carry units and words.
-
-
-## Dead ends cover their subtree
-
-Marking a turn as a dead end dims it **and everything beneath it** — an
-abandoned exploration is abandoned as a whole, so the mark means "nothing down
-here" rather than "not this one node". The ✕ still sits only on the marked
-turn; unmarking it revives the subtree. Collapsed chains inside a dead subtree
-dim too.
+- The Electron app isn't packaged (`npm start` only).
