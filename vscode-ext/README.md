@@ -5,7 +5,7 @@
 <h1 align="center">Agentree</h1>
 
 <p align="center">
-  See your coding-agent conversations as trees. Fork them anywhere.
+  See your coding-agent conversations as trees.
 </p>
 
 ---
@@ -15,24 +15,31 @@ and draws each conversation as an interactive tree: every prompt, reply and
 branch, across all your projects. Run **Agentree: Open Conversation Trees**
 from the Command Palette.
 
-When you "fork from a message" in the Claude Code or Codex chat panel, the fork
-becomes a separate session. Agentree stitches every such family back into one
-tree, with a dashed edge where each fork begins. Claude rewinds and Codex
-prompt edits show up as branches too.
+Forked sessions are joined by shared-history evidence into a family tree.
+Claude rewinds and Codex prompt edits also appear as branches. Search fork
+names, inspect a path, annotate turns and hand a session back to its agent.
 
 Requires VS Code 1.101 or newer (for the zstd support Codex's compressed
 history needs).
 
-| Agent | Reads | Fork after a turn |
+| Agent | History | Fork after a turn |
 |-------|-------|-------------------|
-| **Claude Code** (extension or CLI) | `~/.claude/projects` | new session in Claude Code's fork format, opened in the Claude Code panel |
-| **OpenAI Codex** (extension or CLI) | `~/.codex/sessions` (+ `archived_sessions`, `.jsonl.zst`) | `thread/fork` through `codex app-server` at the end of a whole turn, opened in the Codex panel |
-| **GitHub Copilot CLI** | `~/.copilot/session-state` | copy-truncated session (command only) |
+| **Claude Code** (extension or CLI) | JSONL conversations and copied forks | new session in Claude Code's fork format |
+| **OpenAI Codex** (extension or CLI) | Plain/compressed rollout pages, forks and prompt edits | official `thread/fork`, whole turns only |
+| **GitHub Copilot CLI** | Session event logs | copy-truncated session; resume command |
+
+VS Code Copilot Chat is not supported. The current modernization has
+[unresolved round 3 findings](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/archive/2026-10-modernize/review-findings-round-3.md),
+including distinct-prompt merging and quiet-fork endpoint/action defects.
+See the [guide's current limitations](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/user-guide.md#limitations-and-open-review).
 
 ## Use
 
-- **Welcome screen:** conversations newest first, a directory rail, search, and
-  one health row per agent (files seen / parsed / failed / listed).
+Install a built `.vsix` with **Extensions: Install from VSIX**, reload if
+prompted, then run **Agentree: Open Conversation Trees** from the Command Palette.
+
+- **Welcome screen:** agent/directory filters, fork-name search, activity sort
+  and health rows. The gear opens settings shared with the desktop app.
 - **Tree:** drag to pan, wheel to zoom, click a dotted `n` chain to expand it.
   Long-dashed edges enter a fork or an edited branch.
 - **Panel:** for the selected turn's session you get **open in Claude Code /
@@ -41,14 +48,24 @@ history needs).
   to continue any other branch), and star / label / dead-end annotations. A
   turn that can't be forked says why.
 
+On shared history, check the panel's Session before Open/Resume: focusing a
+quiet member currently does not preserve its action context. Native opening
+after a fork is configurable. The
+[user guide](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/user-guide.md)
+owns workflows, settings, paths and troubleshooting.
+
 ## Privacy
 
 Everything runs locally, with no network requests. Your transcripts are never
 modified: annotations go to `~/.agentree/`, a Claude fork creates a new file,
-and Codex makes Codex forks itself.
+Codex makes Codex forks itself, and Copilot forks copy a new session directory.
+Agentree sends no telemetry and needs no API keys of its own; the vendor agent
+you resume uses its own runtime/account.
 
 ## Build
 
-From the repository root: `npm install && npm run build:vscode`, then
-`npm run package` in `vscode-ext/`, and install the `.vsix` with
-`code --install-extension`.
+The [repository README](https://github.com/Sadeeptha-B/Agentree#using-it-in-vs-code)
+owns source installation. [AGENTS.md](https://github.com/Sadeeptha-B/Agentree/blob/main/AGENTS.md)
+has build/package and development-host instructions; the
+[design notes](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/design.md)
+explain the shared renderer/providers and runtime requirements.

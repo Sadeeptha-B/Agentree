@@ -7,7 +7,7 @@ import { forkThread } from "../electron/providers/codex-appserver.ts";
  * The real client against a fake `codex app-server` (test/fake-codex): the
  * spawn, the initialize handshake, the request, and the ways a server process
  * goes wrong. The fork's request shape against the REAL server was verified
- * by hand on codex-cli 0.164 (see AGENTS.md, "Codex fork"); this keeps the
+ * by hand on codex-cli 0.164 (see docs/design.md, "Codex fork"); this keeps the
  * client's own behaviour from regressing.
  */
 const dir = path.join(__dirname, "fake-codex");
