@@ -9,6 +9,8 @@ import type {
   ProviderId,
   SessionDetail,
   SessionMeta,
+  SettingsPatch,
+  SettingsState,
   TurnNode,
   UpdateInfo,
 } from "../shared/types.ts";
@@ -36,6 +38,17 @@ interface State {
   loading: boolean;
   /** Set once per launch if the main process found a newer build on GitHub. */
   update: UpdateInfo | null;
+
+  /** Agentree's settings, once loaded. */
+  settings: SettingsState | null;
+  /**
+   * Bumped by every settings change. Watches depend on it: their targets are
+   * resolved once, so a moved root needs a new watch, not just a new list.
+   */
+  settingsRev: number;
+  settingsOpen: boolean;
+  /** Change the settings, then refresh everything that depends on them. */
+  saveSettings: (patch: SettingsPatch) => Promise<void>;
 
   boot: () => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -133,11 +146,38 @@ export const useStore = create<State>((set, get) => ({
   loading: false,
   update: null,
 
+  settings: null,
+  settingsRev: 0,
+  settingsOpen: false,
+
   set: (partial) => set(partial),
 
   boot: async () => {
     api.onUpdateAvailable((update) => set({ update }));
+    try {
+      const settings = await api.getSettings();
+      const v = settings.settings.rememberView ? settings.settings.view : undefined;
+      set({
+        settings,
+        ...(v ? { compress: v.compress, cwdFilter: v.cwdFilter, providerFilter: v.providerFilter } : {}),
+      });
+    } catch {
+      /* defaults; the list still loads */
+    }
     await get().refreshSessions();
+  },
+
+  saveSettings: async (patch) => {
+    try {
+      set({ settings: await api.setSettings(patch), settingsRev: get().settingsRev + 1 });
+    } catch (e) {
+      set({ error: String(e) });
+      return;
+    }
+    // A setting can move a root or turn an agent off: the list re-scans, and
+    // an open tree reloads from wherever its sessions are now.
+    await get().refreshSessions();
+    if (get().session) await get().reloadSession();
   },
 
   refreshSessions: () =>
@@ -279,3 +319,24 @@ export const useStore = create<State>((set, get) => ({
     await get().patch(id, { status });
   },
 }));
+
+/**
+ * Remembered view state: with the setting on, compress-chains and the list
+ * filters are saved (debounced) whenever they change, and `boot` restores
+ * them. Off, nothing is written.
+ */
+let viewTimer: ReturnType<typeof setTimeout> | null = null;
+useStore.subscribe((s, prev) => {
+  if (!s.settings?.settings.rememberView) return;
+  if (s.compress === prev.compress && s.cwdFilter === prev.cwdFilter && s.providerFilter === prev.providerFilter) return;
+  if (viewTimer) clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => {
+    const { compress, cwdFilter, providerFilter } = useStore.getState();
+    api.setSettings({ view: { compress, cwdFilter, providerFilter } }).then(
+      (settings) => useStore.setState({ settings }),
+      () => {
+        /* not remembered this time; the view itself is unaffected */
+      },
+    );
+  }, 500);
+});

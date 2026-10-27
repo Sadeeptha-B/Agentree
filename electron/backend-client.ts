@@ -76,6 +76,8 @@ export function startBackend(workerFile: string): Backend {
     "forkAt",
     "providerHealth",
     "watchTargets",
+    "getSettings",
+    "setSettings",
   ] satisfies MethodName[]) {
     proxy[m] = (...args) => call(m, args);
   }

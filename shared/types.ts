@@ -173,6 +173,8 @@ export interface SessionMeta {
   forks?: ForkSummary[];
   /** Where the session was driven from, e.g. "claude-vscode" or "cli". */
   entrypoint?: string;
+  /** Every session of the family is archived (listed only when the settings ask for it). */
+  archived?: boolean;
 }
 
 /** A non-root member of a fork family, as the welcome list needs it. */
@@ -267,6 +269,72 @@ export interface ProviderHealth {
   error?: string;
 }
 
+// ---------------------------------------------------------------- settings
+
+/**
+ * Agentree's settings (`~/.agentree/settings.json`). A setting changes WHAT
+ * YOU SEE or WHERE DATA LIVES — never how a transcript is interpreted: a tree
+ * that depends on configuration the reader can't see is a bug nobody can
+ * reproduce.
+ */
+export interface Settings {
+  /** Sort (and date) the list by last conversational activity, or by last file change. */
+  sortBy: "active" | "touched";
+  /** Agents to scan at all. Off skips the scan; the list chips are only a filter. */
+  providers: Record<ProviderId, boolean>;
+  /** List Codex families whose every thread is archived (hidden by default). */
+  showArchivedCodex: boolean;
+  /** Keep compress-chains and the list filters across launches, in `view`. */
+  rememberView: boolean;
+  view?: ViewState;
+  /** Open a fresh fork in the harness's chat panel. Unset: yes in VS Code, no in the desktop app. */
+  openForkInChat?: boolean;
+  /** Data locations. The environment variable, when set, still wins. */
+  paths: SettingsPaths;
+  /** Desktop app only: check for a newer build at launch. */
+  updateCheck: boolean;
+}
+
+export interface ViewState {
+  compress: boolean;
+  cwdFilter: string;
+  providerFilter: ProviderId | "";
+}
+
+export interface SettingsPaths {
+  /** `CLAUDE_CONFIG_DIR`. */
+  claudeConfigDir?: string;
+  /** `CODEX_HOME`. */
+  codexHome?: string;
+  /** `COPILOT_HOME`. */
+  copilotHome?: string;
+  /** `AGENTREE_CODEX_BIN`. */
+  codexBin?: string;
+}
+
+/** A change to the settings. `null` clears an optional field (JSON drops `undefined`). */
+export interface SettingsPatch {
+  sortBy?: Settings["sortBy"];
+  providers?: Partial<Record<ProviderId, boolean>>;
+  showArchivedCodex?: boolean;
+  rememberView?: boolean;
+  view?: ViewState | null;
+  openForkInChat?: boolean | null;
+  paths?: { [K in keyof SettingsPaths]?: string | null };
+  updateCheck?: boolean;
+}
+
+/** The settings, plus what overrides them, for the settings panel. */
+export interface SettingsState {
+  settings: Settings;
+  /** Path settings an environment variable currently overrides, with its value. */
+  env: { [K in keyof SettingsPaths]?: string };
+  /** `AGENTREE_NO_UPDATE_CHECK` is set. */
+  updateCheckDisabledByEnv: boolean;
+  /** Where the settings live. */
+  file: string;
+}
+
 /** Result of the launch-time "is this the latest build?" check. */
 export interface UpdateInfo {
   /** Short commit sha (or version) of the running build. */
@@ -308,6 +376,9 @@ export interface AgentreeApi {
   readonly host: "electron" | "vscode";
   /** One row per provider, from the most recent scan. */
   providerHealth(): Promise<ProviderHealth[]>;
+  getSettings(): Promise<SettingsState>;
+  /** Apply a change and return the result. The caller refreshes what depends on it. */
+  setSettings(patch: SettingsPatch): Promise<SettingsState>;
   /** Open the session in its harness's VS Code extension (VS Code host only). */
   openNative(ref: SessionRef): Promise<ActionResult>;
   /** Run the harness's resume command in a new integrated terminal (VS Code host only). */

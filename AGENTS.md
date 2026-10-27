@@ -32,7 +32,8 @@ electron/backend.ts            the table of store calls the worker serves (list,
 electron/worker.ts             worker-thread entry serving backend.ts (bundled as worker.cjs)
 electron/backend-client.ts     host-side handle on the worker: async proxy, restart on crash
 electron/registry.ts           Provider interface; routes by "who owns this id"; health; annotate; watch targets
-electron/paths.ts              every root, lazily, honouring CLAUDE_CONFIG_DIR / CODEX_HOME / AGENTREE_HOME
+electron/paths.ts              every root, lazily: environment variable > settings > default
+electron/settings.ts           ~/.agentree/settings.json: validated per field, cached by stat
 electron/shell.ts              resume argv per harness + commands in the host shell's syntax (PowerShell / POSIX)
 electron/native.ts             vscode:// deep links into the Claude Code / Codex extensions
 electron/terminal.ts           desktop "resume in terminal": a new OS terminal window
@@ -50,7 +51,8 @@ electron/watch.ts              live view: fs.watch + stat polling of targets the
 shared/types.ts                node/session/health types + the IPC contract
 shared/render.ts               lineage walks, branch counting, token math
 src/tree-layout.ts             chain compression + tidy layout
-src/components/                TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome
+src/components/                TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome · Settings
+src/list.ts                    welcome-list rules: filters, rail, search, fork names
 vscode-ext/                    VS Code extension: same providers, same renderer
 test/                          vitest suites, synthetic fixtures (test/fixtures/make-fixtures.mjs), a fake codex app-server
 ```
@@ -741,6 +743,32 @@ The tree follows the transcripts on disk.
     looked minutes old when sorted by every record.
   - `touchedAt`, the newest timestamp on **any** record ("last file
     change"), shown in the card's tooltip.
+
+## Settings
+
+`~/.agentree/settings.json`, edited from the panel behind the welcome
+screen's gear, read and written only by the backend worker
+(`getSettings` / `setSettings` in `methods`), so both hosts share one
+implementation and one file. **A setting changes what you see or where data
+lives, never how a transcript is interpreted**: no setting touches the
+parsers, stitching, fork rules or health thresholds.
+
+- Scan settings are applied in the worker: agents turned off are not
+  scanned, listed, opened or watched (`registry.enabled`); all-archived Codex
+  families can be listed (`archived` on the entry); data locations go
+  environment variable > setting > default (`paths.ts`, `configuredPath`).
+  `AGENTREE_HOME` is environment-only: the settings live in it.
+- View settings are applied in the renderer: the sort time, remembered view
+  state (compress, directory and agent filters, saved debounced) and whether
+  a new fork opens in the chat panel (unset: VS Code yes, desktop no).
+- The file is validated field by field, so a hand-broken file falls back
+  per field, and cached by (mtime, size), so a write from the other host's
+  worker is picked up. Writes are atomic per file, like the sidecars.
+- A change refreshes the list, reloads an open tree, and bumps
+  `settingsRev`, which re-subscribes every watch: watch targets are resolved
+  once, so a moved root needs a new watch. The parse caches are keyed by
+  absolute path and evicted per scan, so they rebind by themselves (the Codex
+  name-index stamp includes its path for the same reason).
 
 ## Not dying under load
 

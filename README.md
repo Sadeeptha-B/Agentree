@@ -98,13 +98,16 @@ short version.
 1. Run **Agentree: Open Conversation Trees** from the Command Palette
    (Ctrl/Cmd+Shift+P).
 2. **Welcome screen:** pick a conversation. The left rail filters by project
-   directory and the search box filters by title, directory or id. Badges:
-   `⑂ n` is the number of branch points, and `N sessions` means a fork family.
+   directory, the agent chips above the list filter by agent, and the search
+   box filters by title (forks' titles too), directory or id. Badges: `⑂ n` is
+   the number of branch points, and `N sessions` means a fork family, whose
+   forks are named under its title; click one to open the tree on that fork.
    The provider rows above the list are the health check.
 3. **Tree:** drag to pan, wheel to zoom, and use `fit` to re-frame. Click a
    collapsed chain (a dotted line with an `n` count, meaning n hidden turns) to
    expand it. Solid edges are turns within one session; long-dashed edges
-   enter a fork or a Codex edited branch. Esc goes back to the list.
+   enter a fork (tagged with the fork's name) or a Codex edited branch. Esc
+   goes back to the list.
 4. **Panel (right):** "Session" is the session the selected turn belongs to,
    and which session it was forked from ("probably forked from" when the
    harness recorded nothing and Agentree inferred the direction). From there:
@@ -174,11 +177,23 @@ installs from this fork. On Windows, use the steps above.
 
 ## Configuration
 
+The gear on the welcome screen opens the settings, stored in
+`~/.agentree/settings.json` and shared by the desktop app and the extension:
+the sort order (last message or tool activity, or last file change), which
+agents to scan, whether to list archived Codex conversations, whether to
+remember the view (compress chains, directory and agent filters), whether a
+new fork opens in the chat panel, the data locations below, and (desktop
+only) the launch update check. Settings change what you see and where data
+lives, never how a transcript is read.
+
+The environment variables still work, and win over the settings:
+
 | Variable | Effect |
 |---|---|
 | `CLAUDE_CONFIG_DIR` | Claude Code's config root (default `~/.claude`) — the same variable the CLI honours |
 | `CODEX_HOME` | Codex's root (default `~/.codex`) — same as Codex |
-| `AGENTREE_HOME` | Where Agentree keeps annotations and fork lineage (default `~/.agentree`) |
+| `COPILOT_HOME` | Copilot CLI's root (default `~/.copilot`) |
+| `AGENTREE_HOME` | Where Agentree keeps annotations, fork lineage and its settings (default `~/.agentree`). Environment only |
 | `AGENTREE_CODEX_BIN` | codex binary used for forks. By default Agentree uses the one bundled with the Codex VS Code extension, then the one on `PATH` |
 | `AGENTREE_NO_UPDATE_CHECK=1` | Desktop app: skip the launch-time GitHub version check |
 

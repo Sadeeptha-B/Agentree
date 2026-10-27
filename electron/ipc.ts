@@ -8,6 +8,8 @@ export const CH = {
   patchNode: "sessions:patchNode",
   forkAt: "sessions:forkAt",
   providerHealth: "providers:health",
+  getSettings: "settings:get",
+  setSettings: "settings:set",
   openNative: "sessions:openNative",
   resumeInTerminal: "sessions:resumeInTerminal",
 

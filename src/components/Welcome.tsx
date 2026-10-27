@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { when } from "../format.ts";
 import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
-import { filterSessions, focusFor, ofProvider, railDirs, shownForks, type RailDir } from "../list.ts";
+import { filterSessions, focusFor, ofProvider, railDirs, shownForks, timeOf, type RailDir } from "../list.ts";
+import { Settings } from "./Settings.tsx";
 import logoUrl from "../../assets/logo.png";
 
 /** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
@@ -87,17 +88,19 @@ function HealthRows({
 const RAIL_DIRS = 10;
 
 export function Welcome() {
-  const { sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set } = useStore();
+  const { sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen } =
+    useStore();
+  const sortBy = settings?.settings.sortBy ?? "active";
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
   // The rail counts what the agent filter lets through, so its numbers agree
   // with the list they narrow.
   const mine = useMemo(() => ofProvider(sessions, providerFilter), [sessions, providerFilter]);
-  const dirs = useMemo(() => railDirs(mine), [mine]);
+  const dirs = useMemo(() => railDirs(mine, sortBy), [mine, sortBy]);
   const visible = useMemo(
-    () => filterSessions(sessions, { query: filter, cwd: cwdFilter, provider: providerFilter }),
-    [sessions, filter, cwdFilter, providerFilter],
+    () => filterSessions(sessions, { query: filter, cwd: cwdFilter, provider: providerFilter, sortBy }),
+    [sessions, filter, cwdFilter, providerFilter, sortBy],
   );
   const activeDir = dirs.find((d) => d.key === cwdFilter);
 
@@ -110,6 +113,9 @@ export function Welcome() {
             <h1>Agentree</h1>
             <p className="muted small">conversation trees</p>
           </div>
+          <button className="ghost gear" title="Settings" aria-label="Settings" onClick={() => set({ settingsOpen: true })}>
+            ⚙
+          </button>
         </div>
 
         <nav className="dir-list">
@@ -242,6 +248,7 @@ export function Welcome() {
                   <span className="tree-title">
                     <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
                     {s.title}
+                    {s.archived && <span className="fork-badge">archived</span>}
                   </span>
                   <span className="muted small tree-sub">
                     {!cwdFilter && (
@@ -264,8 +271,14 @@ export function Welcome() {
                       </span>
                     )}
                     {" · "}
-                    <span title={`Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`}>
-                      {when(s.activeAt)}
+                    <span
+                      title={
+                        sortBy === "touched"
+                          ? `Last file change. Last message or tool activity: ${new Date(s.activeAt).toLocaleString()}`
+                          : `Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`
+                      }
+                    >
+                      {when(timeOf(s, sortBy))}
                     </span>
                     {" · "}
                     <code className="id-short">{s.id.slice(0, 8)}</code>
@@ -308,6 +321,7 @@ export function Welcome() {
           </p>
         )}
       </main>
+      {settingsOpen && <Settings />}
     </div>
   );
 }
