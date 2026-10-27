@@ -1,6 +1,6 @@
 # Review handoff: Agentree modernization (branch `modernize`, 2026-10-27)
 
-> **Historical handoff, 2026-10.** Retained with its assumptions, implementation corrections and evidence labels. It does not override the [current design notes](../../design.md) or [working instructions](../../../AGENTS.md). The [round 3 review](review-findings-round-3.md) remains open; references below to `AGENTS.md` as the engineering manual describe its role at the time.
+> **Historical handoff, 2026-10.** Retained with its assumptions, implementation corrections and evidence labels. It does not override the [current design notes](../../design.md) or [working instructions](../../../AGENTS.md). The [round 3 review](review-findings-round-3.md) has since been resolved; references below to `AGENTS.md` as the engineering manual describe its role at the time.
 
 > **Status:** reviewed. The findings and their resolution are in
 > [review-findings.md](review-findings.md); several [assumption]s below are

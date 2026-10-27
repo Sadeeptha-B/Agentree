@@ -21,11 +21,6 @@ This guide owns user workflows, configuration and limitations. The
 [design notes](design.md) explain the internals and their evidence;
 [AGENTS.md](../AGENTS.md) supplies contributor instructions.
 
-> **Current review:** [round 3](archive/2026-10-modernize/review-findings-round-3.md)
-> remains unaddressed. Distinct code prompts can be merged, and a quiet fork's
-> selected endpoint or Open/Resume target can be its parent's. The
-> [limitations section](#limitations-and-open-review) explains affected workflows.
-
 - [Launch](#1-get-it-running)
 - [Tree legend](#2-the-idea-in-one-picture)
 - [List, tree and panel](#3-a-quick-tour)
@@ -33,7 +28,7 @@ This guide owns user workflows, configuration and limitations. The
 - [Fork restrictions](#5-good-to-know)
 - [Settings and data locations](#settings-and-data-locations)
 - [Desktop and updates](#desktop-and-updates)
-- [Limitations and open review](#limitations-and-open-review)
+- [Limitations](#limitations)
 - [Troubleshooting](#6-if-something-looks-off)
 - [Cheat sheet](#cheat-sheet)
 
@@ -138,8 +133,8 @@ The sketch below is illustrative; its counts are not a current store audit.
   filter. Turning a provider off in settings is a separate scan preference.
 - **Search:** root title/directory/id and fork titles/ids. A matching fork name
   is highlighted and brought forward under the family card. Clicking a name,
-  or opening a card matched only by a fork, selects that member's computed tip.
-  Quiet-fork endpoint/action defects remain open; check the panel's Session.
+  or opening a card matched only by a fork, opens the tree **on that fork**:
+  its newest turn is selected, and the panel's open/resume act on it.
 - **Fork names:** cards show up to three names, more when needed to show search
   matches, then `+N`. Names are ordered by activity after search matches.
 - **Sort indicator beside the count:** switches between last activity and last
@@ -172,8 +167,8 @@ still supply history to live forks even when all-archived families are hidden.
 
 ### The side panel
 
-The panel always describes **the turn you selected** and **the session that
-turn belongs to**:
+The panel always describes **the turn you selected** and **the session
+open/resume will act on**:
 
 ```
 CONVERSATION  codex · 5 sessions
@@ -199,10 +194,19 @@ files were created. The panel says "probably" when that's how it knows.
 That inference can be wrong for copied/restored files with renamed titles;
 it is evidence of likely direction rather than a vendor-recorded relationship.
 
-Shared history is drawn once, under one member's ownership. The current panel
-uses that canonical owner for its Session block, even after a different quiet
-member was selected by name. See the [open review limitations](#limitations-and-open-review)
-before using that path to Open/Resume.
+**Which session?** Shared history is drawn once, but it belongs to every
+session that copied or inherited it. When you opened the tree on a fork (by
+its name in the list), the Session block keeps showing that fork for every
+turn in its history, including the part it shares with its parent. A turn
+the fork doesn't have shows the session it belongs to. On a shared turn the
+session's title becomes a drop-down listing every session holding that
+turn; pick one to act on it instead. Opening the tree from the card itself
+focuses no fork: each turn shows the session it belongs to, and a shared
+turn its original conversation.
+
+A fork that has no turn of its own yet ("quiet") ends exactly where it was
+forked: the tree never shows its last turn merged with what the original
+said next.
 
 ---
 
@@ -226,10 +230,9 @@ Select a turn on the branch you want, then:
 - **resume in terminal** to run `claude --resume …` / `codex resume …` in the
   right folder.
 
-These act on the **session shown in the panel's Session block**. A fork's own
-new turn normally targets that fork; a shared node can target the parent
-instead, including the unresolved quiet-fork case. Check the displayed title
-and id before handing off. Within one session, the agent continues from where *it* left
+These act on the **session shown in the panel's Session block** (see "Which
+session?" above); check its title and id before handing off. Within one
+session, the agent continues from where *it* left
 off: the end of the session's current path. A session can hold several
 branches (a rewind in Claude, a prompt edit in Codex), and selecting an older
 one doesn't change which one the agent continues.
@@ -249,9 +252,8 @@ This is the core move:
    an in-between reply can't be a fork point, and the panel says so.)
 3. In VS Code the new session opens in the chat panel by default; on desktop
    use the returned buttons. The automatic-open setting can override either
-   default. The fork is intended to contain the prefix through the selected
-   valid anchor. The quiet-fork endpoint bug can select more parent history
-   than the named fork actually contains; see the open review.
+   default. The fork contains the conversation up to and including the
+   selected turn, and nothing after it.
 4. Type your new direction. The new branch grows in the tree as you go, joined
    by a dashed line.
 
@@ -281,11 +283,11 @@ the fork goes nowhere, mark it as a dead end and move on.
 
 Annotations are stored only by Agentree, in `~/.agentree`. They never touch
 your actual chats.
-Keep Agentree's data directory with your history backups. An annotation written
-before another fork is discovered can disappear after the original transcript
-is removed, even if both were loaded together (round 3 finding 4). Concurrent
-desktop/extension writes can also lose updates. Annotation durability is not
-a substitute for a backup while these limitations remain.
+An annotation is saved with every session of the family, including forks
+found later (the next time the tree is opened), so deleting the original
+transcript doesn't lose it. Keep Agentree's data directory with your history
+backups all the same: the desktop app and the extension writing at the same
+moment can lose one change.
 
 ### Context and token numbers
 
@@ -344,9 +346,9 @@ fall back independently; a malformed JSON file falls back to defaults.
 | Setting / JSON field | Default | Effect |
 |---|---|---|
 | Sort / `sortBy` | `"active"` | `"active"` dates/sorts by messages and tools; `"touched"` includes all record timestamps, bookkeeping included. Also switch beside the list count |
-| Agents / `providers` | Claude, Codex and Copilot enabled | Excludes disabled agents from listing/loading. Intended to prevent all scanning/watching too, but session watch discovery still probes disabled providers (finding 6). Chips only filter the current list |
+| Agents / `providers` | Claude, Codex and Copilot enabled | A disabled agent's history isn't read or watched at all: not listed, opened, forked or health-checked. Chips only filter the current list |
 | Archived Codex / `showArchivedCodex` | `false` | Include families whose every thread is archived. Archived bases of live forks are read either way |
-| Remember view / `rememberView` | `true` | Save compress-chains, directory and agent filters in `view`. Free-text search is not remembered. Turning off clears saved view, subject to the pending-save race in finding 8 |
+| Remember view / `rememberView` | `true` | Save compress-chains, directory and agent filters in `view`. Free-text search is not remembered. Turning it off clears the saved view, and none is saved while it is off |
 | Open fresh fork / `openForkInChat` | Unset: on in VS Code, off on desktop | Automatically open a successful Claude/Codex fork in the chat panel. Explicit `true`/`false` overrides the host default; no native panel exists for Copilot CLI |
 | Data/binary paths / `paths` | Unset; defaults below | `claudeConfigDir`, `codexHome`, `copilotHome`, `codexBin`; environment values override them |
 | Desktop update check / `updateCheck` | `true` | Check at the next desktop launch; the extension uses VS Code's extension-update mechanism |
@@ -382,7 +384,7 @@ Agentree's own files are `settings.json`, `lineage.json`, and
 `meta/<sessionId>.json` beneath its home. If an old `~/.agentview` exists and
 the default new home does not, Agentree attempts a one-time rename. Preserve
 the home when backing up annotations and fork lineage. The [design notes](design.md#annotations)
-explain formats, migration and the unresolved durability limitations.
+explain formats, migration and durability limits.
 
 ## Desktop and updates
 
@@ -404,23 +406,10 @@ that checkout by resetting it to `origin/main` on an update; use a separate
 manual checkout for local development. It does not install a desktop OS package
 and is not a Windows installer. The manual README steps work on Windows.
 
-## Limitations and open review
+## Limitations
 
-The [round 3 report](archive/2026-10-modernize/review-findings-round-3.md) owns
-reproductions and acceptance criteria. **All eight findings are still open:**
-
-| Affected situation | Current consequence |
-|---|---|
-| [Distinct prompts differing in meaningful whitespace](archive/2026-10-modernize/review-findings-round-3.md#r3-1) | Text-based matching can merge them and display a reply beneath the wrong prompt |
-| [Quiet fork ending inside a merged run](archive/2026-10-modernize/review-findings-round-3.md#r3-2) | Focusing it can include later parent-only text and select a later parent anchor |
-| [Open/Resume after focusing shared history](archive/2026-10-modernize/review-findings-round-3.md#r3-3) | Actions can target the canonical parent instead of the named quiet fork; inspect the Session block |
-| [Annotation predates discovery of a fork](archive/2026-10-modernize/review-findings-round-3.md#r3-4) | Removing the original transcript can make the annotation disappear from surviving history |
-| [Rename in a contained/moved session copy](archive/2026-10-modernize/review-findings-round-3.md#r3-5) | UUID-less metadata in that copy can be ignored |
-| [Provider disabled in settings](archive/2026-10-modernize/review-findings-round-3.md#r3-6) | Opening another tree can still read/probe the disabled store during watch discovery |
-| [Long Copilot/legacy Codex chains](archive/2026-10-modernize/review-findings-round-3.md#r3-7) | Identity strings grow disproportionately, increasing memory and transfer costs |
-| [Remember view disabled within the save debounce](archive/2026-10-modernize/review-findings-round-3.md#r3-8) | A pending save can recreate cleared view data; the off flag still prevents boot restoration |
-
-Other supported-scope restrictions and evidence limits:
+The [round 3 review](archive/2026-10-modernize/review-findings-round-3.md)'s
+eight findings are resolved. Supported-scope restrictions and evidence limits:
 
 - Open/Resume continue the panel session's **current vendor path**, which can
   differ from the displayed newest branch. Fork a valid endpoint to continue
@@ -440,9 +429,14 @@ Other supported-scope restrictions and evidence limits:
   already open tree. The welcome list scans all configured project directories.
 - Inferred Claude parent direction can be wrong for copied/restored directories
   with renamed titles. The “probably forked from” label is intentional.
-- Concurrent desktop/extension sidecar writes can lose changes. Legacy raw-ID
-  annotations whose source is deleted before migration cannot always be mapped;
-  new-member stable-key survival has the separate open defect above.
+- Concurrent desktop/extension sidecar writes can lose changes. An annotation
+  whose original transcript is deleted before any tree holding that turn is
+  opened again can't be mapped. One saved by a version before 2026-10-27 on a
+  prompt that only differs in whitespace from a sibling prompt can't be told
+  apart, and is shown on neither.
+- A session stored in two project folders takes its title from the copy
+  written last, by file modification time; copying folders around can change
+  that order.
 - VS Code Copilot Chat and Copilot CLI history predating `events.jsonl` are
   unsupported. Copilot has no per-turn token counts. Subagent turns have no
   separate lane; Claude sidechains that are drawn are dimmed, while Codex's
@@ -460,7 +454,7 @@ Other supported-scope restrictions and evidence limits:
 | A list unexpectedly looks empty | Clear search, directory and agent filters; check Agents to scan and archived Codex settings, then confirm the effective paths. Missing/uninstalled roots are different from failed files |
 | Two forks show up as separate conversations | Forks are joined by evidence the agent copies into every fork (Claude's reply ids, Codex's fork records). Each conversation's "N sessions" count shows what was joined. If a fork still stands alone, it's worth reporting with the agent's version. |
 | "Open" continued a different branch in the same session | Open/Resume continue that session's current path. Fork at the valid end of the desired older branch (§4) |
-| Selecting a named quiet fork offers the parent's session | Known round 3 endpoint/focus defects. Check the Session block; selecting a shared node does not currently preserve the named member's action context |
+| Open/resume offers the original conversation instead of a fork | On a shared turn, pick the fork in the Session block's drop-down, or open the tree by the fork's name in the list |
 | "open in Claude Code" does nothing | The session may belong to a folder other than the one open in VS Code. Use **resume in terminal** instead. |
 | `npm start` fails with `ipcMain` undefined | Use the current `npm start` launcher rather than bare `electron .`; it clears `ELECTRON_RUN_AS_NODE`. Rebuild if running stale output |
 | The desktop app has no Electron | Run `npm approve-scripts electron`, then `node node_modules/electron/install.js`. |

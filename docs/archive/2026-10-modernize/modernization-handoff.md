@@ -1,6 +1,6 @@
 # Agentree modernization handoff (2026-10)
 
-> **Historical handoff, 2026-10.** Retained with its assumptions, implementation corrections and evidence labels. It does not override the [current design notes](../../design.md) or [working instructions](../../../AGENTS.md). The [round 3 review](review-findings-round-3.md) remains open; references below to `AGENTS.md` as the engineering manual describe its role at the time.
+> **Historical handoff, 2026-10.** Retained with its assumptions, implementation corrections and evidence labels. It does not override the [current design notes](../../design.md) or [working instructions](../../../AGENTS.md). The [round 3 review](review-findings-round-3.md) has since been resolved; references below to `AGENTS.md` as the engineering manual describe its role at the time.
 
 > **Status (2026-10-27):** P0–P3 are implemented on branch `modernize`, and
 > AGENTS.md now describes the result. Copilot Chat (P4) and the canary (P5)
