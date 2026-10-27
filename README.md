@@ -105,8 +105,9 @@ short version.
    collapsed chain (a dotted line with an `n` count, meaning n hidden turns) to
    expand it. Solid edges are turns within one session; long-dashed edges
    enter a fork or a Codex edited branch. Esc goes back to the list.
-4. **Panel (right):** "Session" is the session the selected turn belongs to.
-   From there:
+4. **Panel (right):** "Session" is the session the selected turn belongs to,
+   and which session it was forked from ("probably forked from" when the
+   harness recorded nothing and Agentree inferred the direction). From there:
    - **open in Claude Code / Codex** opens that session in its chat panel, at
      the end of its current path — which isn't necessarily the branch you
      selected, if the session has several;

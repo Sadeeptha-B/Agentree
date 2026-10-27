@@ -8,6 +8,10 @@
 > owner-confirmed decisions (raw Codex files, a reimplemented Claude fork, no
 > SDK, Codex writes only through app-server) stand.
 >
+> Round 2 ([review-findings-round-2.md](review-findings-round-2.md)) found
+> four of these fixes partial (4, 6, 8, 9); they were reworked there, and the
+> `aliasIds` below became `stableIds` + `occurrences`.
+>
 > | # | Fix | Test |
 > |---|---|---|
 > | 1 | Codex history encoding (reference vs copied prefix) is read independently of event vocabulary. `forked_from_id` joins families always; a copied prefix aligns on turn ids and the first own turn gets the fork edge. On real data: 94 → 87 entries, exactly the 7 links joined. | codex: copied-prefix fork |
