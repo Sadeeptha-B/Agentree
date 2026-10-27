@@ -1,9 +1,16 @@
 import * as vscode from "vscode";
 
-import { listAllSessions, loadAnySession, forkAnyAt } from "../../electron/registry.ts";
+import {
+  allHealth,
+  forkAnyAt,
+  listAllSessions,
+  loadAnySession,
+  providerById,
+} from "../../electron/registry.ts";
 import { writeMeta } from "../../electron/meta.ts";
+import { quote } from "../../electron/shell.ts";
 import { watchTranscripts, type Watcher } from "../../electron/watch.ts";
-import type { NodeMeta } from "../../shared/types.ts";
+import type { ActionResult, NodeMeta, SessionRef } from "../../shared/types.ts";
 
 /**
  * VS Code host for Agentree. The Electron app's main/renderer split maps
@@ -95,9 +102,61 @@ function dispatch(method: string, args: unknown[]): unknown {
       return writeMeta(args[0] as string, args[1] as string, args[2] as NodeMeta);
     case "forkAt":
       return forkAnyAt(args[0] as string, args[1] as string);
+    case "providerHealth":
+      return allHealth();
+    case "openNative":
+      return openNative(args[0] as SessionRef);
+    case "resumeInTerminal":
+      return resumeInTerminal(args[0] as SessionRef);
     default:
       throw new Error(`Unknown method: ${method}`);
   }
+}
+
+/**
+ * Hand a session to its harness's own VS Code extension.
+ *
+ * - Claude Code: `claude-vscode.editor.open(sessionId)` — the command its own
+ *   `vscode://anthropic.claude-code/open?session=` URI handler calls.
+ * - Codex: its URI handler routes `/local/<threadId>` to the conversation
+ *   view; `uriScheme` keeps this right under Insiders and forks of VS Code.
+ */
+async function openNative(ref: SessionRef): Promise<ActionResult> {
+  const id = ref.sessionId;
+  if (!/^[a-zA-Z0-9-]{8,64}$/.test(id)) return { ok: false, error: "Not a session id." };
+  try {
+    if (ref.provider === "claude") {
+      if (!vscode.extensions.getExtension("anthropic.claude-code")) {
+        return { ok: false, error: "The Claude Code extension isn't installed in this VS Code." };
+      }
+      await vscode.commands.executeCommand("claude-vscode.editor.open", id);
+      return { ok: true };
+    }
+    if (ref.provider === "codex") {
+      if (!vscode.extensions.getExtension("openai.chatgpt")) {
+        return { ok: false, error: "The Codex extension (openai.chatgpt) isn't installed in this VS Code." };
+      }
+      const uri = vscode.Uri.parse(`${vscode.env.uriScheme}://openai.chatgpt/local/${id}`);
+      const ok = await vscode.env.openExternal(uri);
+      return ok ? { ok: true } : { ok: false, error: "VS Code declined to open the Codex link." };
+    }
+    return { ok: false, error: "This harness has no VS Code extension to open sessions in." };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Resume in an integrated terminal started in the session's own directory. */
+function resumeInTerminal(ref: SessionRef): ActionResult {
+  const p = providerById(ref.provider);
+  if (!p) return { ok: false, error: "Unknown harness." };
+  const term = vscode.window.createTerminal({
+    name: `${ref.provider} ${ref.sessionId.slice(0, 8)}`,
+    cwd: ref.cwd || undefined,
+  });
+  term.show();
+  term.sendText(p.resumeArgv(ref.sessionId).map((a) => quote(a)).join(" "));
+  return { ok: true };
 }
 
 function htmlFor(webview: vscode.Webview, root: vscode.Uri): string {

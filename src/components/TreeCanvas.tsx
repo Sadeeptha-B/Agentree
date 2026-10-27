@@ -42,6 +42,8 @@ export function TreeCanvas() {
     [session, children],
   );
   const tipColor = (tip && nodes.get(tip)?.role === "user") ? "var(--user)" : "var(--assistant)";
+  // The legend only explains dashed edges when the tree actually has one.
+  const hasCross = layout.edges.some((e) => e.cross);
 
   // A dead-end mark covers the whole exploration beneath it: everything under
   // a marked turn is equally abandoned, so the subtree dims as one.
@@ -145,7 +147,7 @@ export function TreeCanvas() {
               <path
                 key={i}
                 d={edgePath(e.from, e.to)}
-                className={`edge ${e.onPath ? "on-path" : ""}`}
+                className={`edge ${e.onPath ? "on-path" : ""} ${e.cross ? "cross" : ""}`}
               />
             ))}
           </g>
@@ -188,6 +190,11 @@ export function TreeCanvas() {
         <span><i className="lg-dot lg-user" /> User</span>
         <span><i className="lg-dot lg-assistant" /> Agent</span>
         <span><i className="lg-dot lg-tip" style={{ borderColor: tipColor }} /> latest turn</span>
+        {hasCross && (
+          <span title="The dashed edge enters a different session: a fork, or a Codex prompt edit">
+            <i className="lg-cross" /> new session (fork / edit)
+          </span>
+        )}
       </div>
     </div>
   );

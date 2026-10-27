@@ -1,12 +1,60 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { when } from "../format.ts";
+import type { ProviderHealth } from "../../shared/types.ts";
 import logoUrl from "../../assets/logo.png";
 
-/** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`. */
+/** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
 function tilde(p: string): string {
-  const m = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(p);
+  const m = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(p) ?? /^[A-Za-z]:\\Users\\[^\\]+(\\.*)?$/i.exec(p);
   return m ? "~" + (m[1] ?? "") : p;
+}
+
+/** Last segment of a POSIX or Windows path. */
+const leaf = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p;
+
+/**
+ * One line per harness: what the last scan saw. A format change shows up here
+ * as "files seen, few parsed" or as unknown record types the day it happens,
+ * instead of as a list that is quietly missing conversations.
+ */
+function HealthRows({ health }: { health: ProviderHealth[] }) {
+  const rows = health.filter((h) => h.present || h.error);
+  if (rows.length === 0) return null;
+  return (
+    <div className="health muted small">
+      {rows.map((h) => {
+        const unknown = Object.entries(h.unknownRecordTypes);
+        const versions = Object.entries(h.formatVersions)
+          .map(([v, n]) => `${v} ×${n}`)
+          .join(", ");
+        const level = h.error ? "error" : h.warnings.length ? "warn" : "";
+        return (
+          <div
+            key={h.provider}
+            className={`health-row ${level}`}
+            title={versions ? `${h.root}\n${versions}` : h.root}
+          >
+            <span className={`provider-chip ${h.provider}`}>{h.provider}</span>
+            <span>
+              {h.filesSeen} files · {h.sessionsParsed} parsed
+              {h.skipped ? ` · ${h.skipped} hidden` : ""} · {h.listed} listed · {h.backend}
+            </span>
+            {unknown.length > 0 && (
+              <details>
+                <summary>· {unknown.length} unknown record types</summary>
+                <code>{unknown.map(([t, n]) => `${t} ×${n}`).join(", ")}</code>
+              </details>
+            )}
+            {h.error && <span>· {h.error}</span>}
+            {h.warnings.map((w) => (
+              <span key={w}>· {w}</span>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 /**
@@ -21,7 +69,7 @@ function tilde(p: string): string {
 const RAIL_DIRS = 10;
 
 export function Welcome() {
-  const { sessions, filter, cwdFilter, loading, update, openSession, set } = useStore();
+  const { sessions, health, filter, cwdFilter, loading, update, openSession, set } = useStore();
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -96,7 +144,7 @@ export function Welcome() {
                 title={tilde(cwd)}
                 onClick={() => set({ cwdFilter: cwd })}
               >
-                <span className="dir-name">{cwd.split("/").pop() || cwd}</span>
+                <span className="dir-name">{leaf(cwd)}</span>
                 <span className="dir-count">{n}</span>
               </button>
             );
@@ -160,6 +208,8 @@ export function Welcome() {
           </span>
         </div>
 
+        <HealthRows health={health} />
+
         {cwdFilter && (
           <div className="active-dir muted small">
             <code>{tilde(cwdFilter)}</code>
@@ -192,6 +242,11 @@ export function Welcome() {
                       ⑂ {s.branchPoints}
                     </span>
                   )}
+                  {(s.members ?? 1) > 1 && (
+                    <span className="fork-badge" title="sessions stitched into this tree (forks)">
+                      {s.members} sessions
+                    </span>
+                  )}
                   {" · "}
                   {when(s.updatedAt)}
                   {" · "}
@@ -205,7 +260,7 @@ export function Welcome() {
         {!loading && visible.length === 0 && (
           <p className="muted empty">
             {sessions.length === 0
-              ? "No agent sessions found (~/.claude/projects, ~/.codex/sessions, ~/.copilot/session-state)."
+              ? "No agent sessions found in ~/.claude/projects, ~/.codex/sessions or ~/.copilot/session-state."
               : filter
                 ? "Nothing matches that filter."
                 : "No conversations in this directory yet."}
