@@ -222,7 +222,7 @@ export function Welcome() {
 
         <ul className="tree-list">
           {visible.map((s) => (
-            <li key={s.id}>
+            <li key={`${s.provider}:${s.id}`}>
               <button className="tree-card" onClick={() => void openSession(s.id)}>
                 <span className="tree-title">
                   <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
