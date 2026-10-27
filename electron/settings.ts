@@ -62,8 +62,10 @@ export function validate(raw: unknown): Settings {
     paths: {},
     updateCheck: bool(r.updateCheck, DEFAULT_SETTINGS.updateCheck),
   };
+  // Remembering off means no view is kept — whatever order the renderer's
+  // writes arrive in, a late view save can't bring one back.
   const view = viewOf(r.view);
-  if (view) out.view = view;
+  if (view && out.rememberView) out.view = view;
   if (typeof r.openForkInChat === "boolean") out.openForkInChat = r.openForkInChat;
   for (const k of Object.keys(PATH_ENV) as (keyof SettingsPaths)[]) {
     const p = absPath(paths[k]);

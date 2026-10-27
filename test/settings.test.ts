@@ -31,6 +31,15 @@ describe("settings store", () => {
     expect(writeSettings({ view: null }).view).toBeUndefined();
   });
 
+  it("keeps no remembered view while remembering is off, whichever write lands last", () => {
+    const view = { compress: false, cwdFilter: "", providerFilter: "claude" as const };
+    writeSettings({ rememberView: false, view: null });
+    // A view save that was already on its way.
+    expect(writeSettings({ view }).view).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(settingsFile(), "utf8")).view).toBeUndefined();
+    expect(writeSettings({ rememberView: true, view }).view).toEqual(view);
+  });
+
   it("falls back field by field on a broken or hand-edited file", () => {
     fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
     fs.writeFileSync(settingsFile(), "{not json");

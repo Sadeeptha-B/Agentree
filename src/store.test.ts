@@ -1,6 +1,7 @@
 // Lives in src/ (not test/) so it type-checks with the renderer's DOM config.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MemberInfo, SessionDetail, TurnNode } from "../shared/types.ts";
+import type { MemberInfo, SessionDetail, SettingsState, TurnNode } from "../shared/types.ts";
+import { actionTarget } from "../shared/render.ts";
 
 const api = vi.hoisted(() => ({
   getSession: vi.fn(),
@@ -15,7 +16,14 @@ vi.mock("./api.ts", () => ({ api }));
 
 const { useStore } = await import("./store.ts");
 
-const node = (id: string, parentId: string | null, text: string, stable: string, sourceSessionId: string): TurnNode => ({
+const node = (
+  id: string,
+  parentId: string | null,
+  text: string,
+  stable: string,
+  sourceSessionId: string,
+  heldBy = [sourceSessionId],
+): TurnNode => ({
   id,
   parentId,
   role: parentId ? "assistant" : "user",
@@ -23,13 +31,14 @@ const node = (id: string, parentId: string | null, text: string, stable: string,
   timestamp: 1,
   stableIds: [stable],
   sourceSessionId,
+  heldBy,
 });
 const member = (id: string, parentId: string | null): MemberInfo => ({
   id,
   title: id,
   parentId,
-  cwd: "",
-  resumeCommand: "",
+  cwd: `/work/${id}`,
+  resumeCommand: `resume ${id}`,
   activeAt: 0,
   touchedAt: 0,
 });
@@ -63,9 +72,44 @@ const reRooted = detail(
   [member("F", null)],
 );
 
+/**
+ * A parent P (Q → A → Q2 → A2) and a quiet fork F taken after A: F's history
+ * is P's first two turns, drawn as P's.
+ */
+const quiet = detail(
+  "P",
+  [
+    node("p-u1", null, "Q", "u:q", "P", ["P", "F"]),
+    node("p-a1", "p-u1", "A", "m:a", "P", ["P", "F"]),
+    node("p-u2", "p-a1", "Q2", "u:q2", "P"),
+    node("p-a2", "p-u2", "A2", "m:a2", "P"),
+  ],
+  [member("P", null), { ...member("F", "P"), tipId: "p-a1" }],
+);
+/** The ref the panel's open / resume buttons get for the current state. */
+const target = () => {
+  const s = useStore.getState();
+  return actionTarget(s.session!, s.nodes.get(s.selected!), s.focus).ref;
+};
+
+const settingsState = (rememberView: boolean, view?: SettingsState["settings"]["view"]): SettingsState => ({
+  settings: {
+    sortBy: "active",
+    providers: { claude: true, codex: true, copilot: true },
+    showArchivedCodex: false,
+    rememberView,
+    ...(view ? { view } : {}),
+    paths: {},
+    updateCheck: true,
+  },
+  env: {},
+  updateCheckDisabledByEnv: false,
+  file: "settings.json",
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
-  useStore.setState({ session: null, nodes: new Map(), children: new Map(), selected: null, error: null });
+  useStore.setState({ session: null, nodes: new Map(), children: new Map(), selected: null, focus: null, error: null });
 });
 
 describe("renderer store lifecycle", () => {
@@ -116,20 +160,7 @@ describe("renderer store lifecycle", () => {
   });
 
   it("restores remembered view state at launch, and saves it again when it changes", async () => {
-    const remembered = {
-      settings: {
-        sortBy: "active",
-        providers: { claude: true, codex: true, copilot: true },
-        showArchivedCodex: false,
-        rememberView: true,
-        view: { compress: false, cwdFilter: "c:/work", providerFilter: "codex" },
-        paths: {},
-        updateCheck: true,
-      },
-      env: {},
-      updateCheckDisabledByEnv: false,
-      file: "settings.json",
-    };
+    const remembered = settingsState(true, { compress: false, cwdFilter: "c:/work", providerFilter: "codex" });
     api.getSettings.mockResolvedValueOnce(remembered);
     api.setSettings.mockResolvedValue(remembered);
     vi.useFakeTimers();
@@ -142,6 +173,73 @@ describe("renderer store lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("writes no remembered view once remembering is turned off, even one already scheduled", async () => {
+    api.getSettings.mockResolvedValueOnce(settingsState(true, { compress: true, cwdFilter: "", providerFilter: "" }));
+    api.setSettings.mockImplementation(async (patch: { rememberView?: boolean }) =>
+      settingsState(patch.rememberView ?? true),
+    );
+    vi.useFakeTimers();
+    try {
+      await useStore.getState().boot();
+      await vi.advanceTimersByTimeAsync(600);
+      api.setSettings.mockClear();
+      // A filter change schedules a save; remembering is turned off before it fires.
+      useStore.getState().set({ providerFilter: "claude" });
+      await useStore.getState().saveSettings({ rememberView: false, view: null });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(api.setSettings.mock.calls).toEqual([[{ rememberView: false, view: null }]]);
+      // And nothing is scheduled by later changes either.
+      useStore.getState().set({ providerFilter: "codex" });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(api.setSettings).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      api.setSettings.mockReset();
+    }
+  });
+
+  it("keeps the newest settings when an older write answers last", async () => {
+    let answerOld!: (s: SettingsState) => void;
+    api.setSettings.mockReturnValueOnce(new Promise((r) => (answerOld = r)));
+    api.setSettings.mockResolvedValueOnce(settingsState(false));
+    const older = useStore.getState().saveSettings({ sortBy: "touched" });
+    await useStore.getState().saveSettings({ rememberView: false, view: null });
+    answerOld(settingsState(true));
+    await older;
+    expect(useStore.getState().settings?.settings.rememberView).toBe(false);
+  });
+
+  it("acts on a focused quiet fork over the history it shares with its parent", async () => {
+    api.getSession.mockResolvedValue(quiet);
+    await useStore.getState().openSession("P", { focus: "F" });
+    expect(useStore.getState()).toMatchObject({ selected: "p-a1", focus: "F" });
+    // The node is drawn as P's; open/resume still go to the fork.
+    expect(target()).toEqual({ provider: "claude", sessionId: "F", cwd: "/work/F" });
+    // A turn the fork doesn't hold acts on its own session...
+    useStore.getState().select("p-a2");
+    expect(target().sessionId).toBe("P");
+    // ...and coming back to shared history is the fork again, across a reload too.
+    useStore.getState().select("p-u1");
+    await useStore.getState().reloadSession();
+    expect(useStore.getState().focus).toBe("F");
+    expect(target().sessionId).toBe("F");
+  });
+
+  it("acts on the parent when the family is opened on it, and drops a focus that left the family", async () => {
+    api.getSession.mockResolvedValue(quiet);
+    await useStore.getState().openSession("P");
+    expect(useStore.getState().focus).toBeNull();
+    expect(target().sessionId).toBe("P");
+    useStore.getState().select("p-a1");
+    expect(target().sessionId).toBe("P");
+
+    await useStore.getState().openSession("P", { focus: "F" });
+    api.getSession.mockResolvedValue({ ...quiet, members: [member("P", null)] });
+    await useStore.getState().reloadSession();
+    expect(useStore.getState().focus).toBeNull();
+    expect(target().sessionId).toBe("P");
   });
 
   it("sends a cleared annotation field as null, which survives JSON", async () => {

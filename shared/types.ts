@@ -77,17 +77,33 @@ export interface TurnNode {
    * Semantic identity of the message(s) this node draws: the same in every
    * session holding a copy, whatever uuid each copy got (Claude:
    * `m:<message.id>` / `u:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
-   * text-only evidence is qualified by its parent's identity). The node's own
-   * comes first, then any merged-in parts'. Keys annotations, and keeps a
-   * selection across a reload that re-roots the family.
+   * text-only evidence is qualified by its parent's identity — see
+   * electron/identity.ts). The node's own comes first, then any merged-in
+   * parts'. Keys annotations, and keeps a selection across a reload that
+   * re-roots the family.
    */
   stableIds?: string[];
   /**
+   * The same parts' identities under the previous identity scheme, where they
+   * differ — only so annotations saved under it are still found.
+   */
+  legacyIds?: string[];
+  /**
    * The other sessions of the family that hold a copy of this turn, with the
    * id it has there. Stitching draws one node per turn; this keeps where else
-   * it lives (`sourceSessionId` is the one drawn).
+   * it lives (`sourceSessionId` is the one drawn). Physical copies only; who
+   * holds the turn is `heldBy`.
    */
   occurrences?: { sessionId: SessionId; id: NodeId }[];
+  /**
+   * Every member session whose history holds ALL of this node: the sessions
+   * that open or resume onto it. Claude and Copilot: its owner and every
+   * session with a copy (the display merge never folds across a session's
+   * endpoint, so a copy of one part is a copy of all); Codex: the threads
+   * whose current history holds the turn — a fork by reference copies
+   * nothing. Set by the provider on a loaded family.
+   */
+  heldBy?: SessionId[];
   /**
    * The harness's own unit of work this node belongs to, where it has one
    * (Codex: the turn id). The display merge never folds across it, because a
@@ -213,10 +229,9 @@ export interface MemberInfo {
   files?: string[];
   /**
    * The node to land on when the tree is opened on this session: the newest
-   * leaf among the turns it holds — its own, or copied (or, in Codex,
-   * inherited) from its parent. A fork with no turn of its own yet lands on
-   * the turn it was forked at. Decided by the provider, which knows what a
-   * session holds.
+   * leaf among the nodes it holds (`TurnNode.heldBy`) — its own, or copied
+   * (or, in Codex, inherited) from its parent. A fork with no turn of its own
+   * yet lands on the turn it was forked at, and nothing past it.
    */
   tipId?: NodeId;
 }
@@ -284,7 +299,7 @@ export interface Settings {
   providers: Record<ProviderId, boolean>;
   /** List Codex families whose every thread is archived (hidden by default). */
   showArchivedCodex: boolean;
-  /** Keep compress-chains and the list filters across launches, in `view`. */
+  /** Keep compress-chains and the list filters across launches, in `view`. Off, no `view` is kept. */
   rememberView: boolean;
   view?: ViewState;
   /** Open a fresh fork in the harness's chat panel. Unset: yes in VS Code, no in the desktop app. */
