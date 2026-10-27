@@ -1,5 +1,32 @@
 # Agentree roadmap (2026-10-27)
 
+> **Status (2026-10-27, same branch).** A1–A4, B1–B4 and C1 are built; B5
+> is deferred. The owner's answers: the directory filter matches **any
+> member's** directory (open question 1), and "last file change" **stays**
+> a sort option (question 2). Departures from the text below, decided while
+> building:
+>
+> - A1: physical locators live on `MemberInfo.files`, not on each
+>   occurrence. A session in several folders is read as one record set
+>   (shadow copies skipped, diverged copies unioned), so every anchor
+>   resolves; the fork writes next to the newest copy holding the turn.
+>   The health warning says copies are "read as one session", not "the
+>   newest is used".
+> - A2: "the last cwd" was wrong on real data: Claude records the shell's
+>   cwd, which follows every `cd`. The session's directory is the last cwd
+>   its project folder's name encodes, else the last that isn't inside or
+>   above the previous one.
+> - B3: the focus target is computed by the provider (`MemberInfo.tipId`):
+>   Codex forks by reference hold turns they have no occurrence of.
+> - B4: a fork titled "<parent> (fork)" is tagged `fork <id8>`; no colour
+>   band.
+> - C1: `AGENTREE_HOME` is environment-only (the settings live in it).
+>
+> Real stores after the change: Claude 62 → 61 entries (the moved session
+> once, 52 nodes, filed under its new folder), Codex 87 and Copilot 5
+> unchanged, no family changed shape; 85 Codex threads that the extension
+> re-stamped when it loaded them now show their real last activity.
+
 What to build next, and why. This is the agreed plan from product discussions
 with the owner after the modernization reviews ([review-findings.md](review-findings.md)
 and [review-findings-round-2.md](review-findings-round-2.md), both resolved).
