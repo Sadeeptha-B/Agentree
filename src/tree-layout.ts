@@ -39,26 +39,34 @@ export function nodeLabel(n: TurnNode): string | null {
 }
 
 /** Longest member title drawn in a fork tag before it's ellipsised. */
-const TAG_MAX = 26;
+const TAG_MAX = 22;
 /** Height of a fork tag, and its gap above the node it names. */
 export const TAG_H = 13;
 const TAG_GAP = 2;
 /** Room kept in every tag for a ★ / ✕ mark, which moves into the tag. */
 const TAG_MARK_W = 12;
 
+/** A title without the " (fork)" suffixes the Claude extension stamps on each fork. */
+const unforked = (t: string) => t.replace(/(\s*\(fork\))+\s*$/, "").replace(/\s+/g, " ").trim();
+
 /**
  * The name tag over each fork's first turn: the member session's title. A
- * user label on the node replaces it (the title moves to the tooltip), and a
- * Codex prompt edit gets none — it's a branch of the same thread, not a
- * separate chat with a name.
+ * title that only repeats its parent's plus "(fork)" — the Claude extension's
+ * default — would say nothing a dashed edge doesn't, so it becomes "fork
+ * <id>", which at least tells two such forks apart. A user label on the node
+ * replaces the tag (the title moves to the tooltip), and a Codex prompt edit
+ * gets none: it's a branch of the same thread, not a separate chat.
  */
 export function forkTags(nodes: TurnNode[], members: MemberInfo[]): Map<NodeId, string> {
-  const title = new Map(members.map((m) => [m.id, m.title]));
+  const byId = new Map(members.map((m) => [m.id, m]));
   const tags = new Map<NodeId, string>();
   for (const n of nodes) {
     if (n.branchKind !== "fork" || n.label || !n.sourceSessionId) continue;
-    const t = title.get(n.sourceSessionId)?.replace(/\s+/g, " ").trim();
-    if (t) tags.set(n.id, t.length > TAG_MAX ? t.slice(0, TAG_MAX - 1) + "…" : t);
+    const m = byId.get(n.sourceSessionId);
+    if (!m?.title.trim()) continue;
+    const parent = m.parentId ? byId.get(m.parentId) : undefined;
+    const t = parent && unforked(m.title) === unforked(parent.title) ? `fork ${m.id.slice(0, 8)}` : m.title.replace(/\s+/g, " ").trim();
+    tags.set(n.id, t.length > TAG_MAX ? t.slice(0, TAG_MAX - 1) + "…" : t);
   }
   return tags;
 }
