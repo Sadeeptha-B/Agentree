@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { agentreeHome } from "./paths.ts";
 import type { NodeId, NodeMeta, SessionId } from "../shared/types.ts";
 
 /**
@@ -11,15 +12,15 @@ import type { NodeId, NodeMeta, SessionId } from "../shared/types.ts";
  * them would risk corrupting a session the CLI is mid-append on, and would
  * make our UI state indistinguishable from real conversation content.
  */
-const DIR = path.join(os.homedir(), ".agentree", "meta");
+const DIR = () => path.join(agentreeHome(), "meta");
 
 // The app used to be called AgentView and kept its sidecar in ~/.agentview.
 // Carry existing annotations across once; a failed rename (permissions, race)
 // just leaves the old dir in place for a later attempt.
 const OLD_ROOT = path.join(os.homedir(), ".agentview");
 try {
-  if (fs.existsSync(OLD_ROOT) && !fs.existsSync(path.dirname(DIR))) {
-    fs.renameSync(OLD_ROOT, path.dirname(DIR));
+  if (!process.env.AGENTREE_HOME && fs.existsSync(OLD_ROOT) && !fs.existsSync(agentreeHome())) {
+    fs.renameSync(OLD_ROOT, agentreeHome());
   }
 } catch {
   /* keep reading/writing the new location; old annotations stay recoverable */
@@ -27,7 +28,7 @@ try {
 
 function fileFor(sessionId: SessionId): string | null {
   if (!/^[a-zA-Z0-9-]{8,64}$/.test(sessionId)) return null;
-  return path.join(DIR, `${sessionId}.json`);
+  return path.join(DIR(), `${sessionId}.json`);
 }
 
 export function readMeta(sessionId: SessionId): Record<NodeId, NodeMeta> {
@@ -43,7 +44,7 @@ export function readMeta(sessionId: SessionId): Record<NodeId, NodeMeta> {
 export function writeMeta(sessionId: SessionId, nodeId: NodeId, patch: NodeMeta): void {
   const file = fileFor(sessionId);
   if (!file) return;
-  fs.mkdirSync(DIR, { recursive: true });
+  fs.mkdirSync(DIR(), { recursive: true });
 
   const all = readMeta(sessionId);
   const next: NodeMeta = { ...all[nodeId], ...patch };

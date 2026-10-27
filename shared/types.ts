@@ -5,8 +5,11 @@ export type SessionId = string;
  * The harness a session belongs to. Each stores transcripts differently:
  *
  * - `claude`   — ~/.claude/projects/**.jsonl, a native DAG (uuid/parentUuid);
- * - `codex`    — ~/.codex/sessions/Y/M/D/rollout-*.jsonl, linear; a fork is a
- *                NEW rollout carrying a copied prefix plus `forked_from_id`;
+ *                a VS Code "fork conversation" is a NEW file holding a copy of
+ *                the active chain, matched back to its parent by message ids;
+ * - `codex`    — ~/.codex/sessions/Y/M/D/rollout-*.jsonl[.zst], paginated:
+ *                each page links to the page it continues via `history_base`,
+ *                so forks and prompt edits form an exact tree of pages;
  * - `copilot`  — ~/.copilot/session-state/<id>/events.jsonl, a linear
  *                id/parentId event chain; forks are copy-truncated dirs.
  */
@@ -79,6 +82,16 @@ export interface TurnNode {
    * at `id` would resume in the middle of a reply.
    */
   lastRawId?: NodeId;
+  /**
+   * The session (transcript file / thread) this turn belongs to. A family tree
+   * mixes turns from several sessions; resume, open and fork act on this one.
+   */
+  sourceSessionId?: SessionId;
+  /**
+   * The edge INTO this node crosses into a different session or page — the
+   * first turn of a fork, or of a Codex prompt edit. Drawn dashed.
+   */
+  crossSession?: boolean;
 
   // ---- sidecar metadata (Agentree's own store, never written to the transcript)
   label?: string;
@@ -108,11 +121,64 @@ export interface SessionMeta {
    * provider — the renderer must not hard-code any one CLI's flag spelling.
    */
   resumeCommand: string;
+  /** Sessions stitched into this entry's tree (1 when it was never forked). */
+  members?: number;
+  /** Where the session was driven from, e.g. "claude-vscode" or "cli". */
+  entrypoint?: string;
+}
+
+/** One session of a fork family, as listed in the panel. */
+export interface MemberInfo {
+  id: SessionId;
+  title: string;
+  /** The session this one was forked from; null for the family root. */
+  parentId: SessionId | null;
+  cwd: string;
+  resumeCommand: string;
+  updatedAt: number;
+  archived?: boolean;
+  entrypoint?: string;
 }
 
 export interface SessionDetail {
   meta: SessionMeta;
   nodes: TurnNode[];
+  members: MemberInfo[];
+}
+
+/** A session to hand to its native harness (VS Code extension or CLI). */
+export interface SessionRef {
+  provider: ProviderId;
+  sessionId: SessionId;
+  cwd: string;
+}
+
+export type ActionResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * What a provider saw on its last scan — the "fail loudly" surface. A harness
+ * that changes its format shows up here as files seen but not parsed, or as
+ * record types nobody has taught the parser about, instead of as a silently
+ * empty list.
+ */
+export interface ProviderHealth {
+  provider: ProviderId;
+  root: string;
+  /** Root directory exists at all — false just means "not installed". */
+  present: boolean;
+  filesSeen: number;
+  /** Files deliberately not listed (guardian reviews, subagents, empty). */
+  skipped: number;
+  /** Files that produced a session. */
+  sessionsParsed: number;
+  /** Entries on the welcome screen (one per fork family). */
+  listed: number;
+  /** e.g. {"codex-cli 0.162": 44}. */
+  formatVersions: Record<string, number>;
+  unknownRecordTypes: Record<string, number>;
+  backend: "raw" | "api";
+  warnings: string[];
+  error?: string;
 }
 
 /** Result of the launch-time "is this the latest build?" check. */
@@ -139,11 +205,20 @@ export interface AgentreeApi {
   getSession(id: string): Promise<SessionDetail | null>;
   patchNode(sessionId: string, nodeId: string, patch: NodeMeta): Promise<void>;
   /**
-   * Build the `claude --resume … --resume-session-at …` command that continues
-   * the session just after `nodeId`; the new exchange branches there, in this
-   * same tree. Read-only — nothing is written until the user runs it.
+   * Fork the session just after `nodeId`: a NEW session holding the prefix,
+   * created in the harness's own fork format (Claude) or through its API
+   * (Codex). Originals are never modified; the family tree picks the fork up.
    */
   forkAt(sessionId: string, nodeId: string): Promise<ForkResult>;
+
+  /** Which shell the renderer runs in; decides which actions are offered. */
+  readonly host: "electron" | "vscode";
+  /** One row per provider, from the most recent scan. */
+  providerHealth(): Promise<ProviderHealth[]>;
+  /** Open the session in its harness's VS Code extension (VS Code host only). */
+  openNative(ref: SessionRef): Promise<ActionResult>;
+  /** Run the harness's resume command in a new integrated terminal (VS Code host only). */
+  resumeInTerminal(ref: SessionRef): Promise<ActionResult>;
 
   /**
    * Watch a session's transcript (or, with `null`, the whole projects tree) and
@@ -162,16 +237,13 @@ export interface AgentreeApi {
 export type ForkResult =
   | {
       ok: true;
-      /**
-       * The session to resume. For Claude this is the SAME id — the branch
-       * lives inside one transcript. For Codex/Copilot the harness has no
-       * resume-at flag, so the fork IS a new session (a copy-truncated
-       * transcript); Agentree stitches the family back into one tree.
-       */
+      /** The new session. Agentree stitches it into the family tree. */
       id: SessionId;
       cwd: string;
-      /** Ready-to-paste shell command. */
+      /** Ready-to-paste command that resumes the fork, in the host OS's shell syntax. */
       command: string;
+      /** Hand the fork to the harness's VS Code extension. */
+      open?: SessionRef;
       /** Provider-specific caveat worth showing next to the command. */
       note?: string;
     }

@@ -12,6 +12,13 @@ const api: AgentreeApi = {
   patchNode: (sessionId, nodeId, patch: NodeMeta) =>
     ipcRenderer.invoke(CH.patchNode, sessionId, nodeId, patch),
   forkAt: (sessionId, nodeId) => ipcRenderer.invoke(CH.forkAt, sessionId, nodeId),
+  providerHealth: () => ipcRenderer.invoke(CH.providerHealth),
+
+  // The desktop app has no harness extension to hand a session to; the panel
+  // offers the copyable resume command instead.
+  host: "electron",
+  openNative: async () => ({ ok: false, error: "Opening in the harness's extension needs the VS Code extension." }),
+  resumeInTerminal: async () => ({ ok: false, error: "Copy the resume command and run it in a terminal." }),
 
   onUpdateAvailable: (cb) => {
     const listener = (_e: unknown, info: Parameters<typeof cb>[0]) => cb(info);
