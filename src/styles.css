@@ -491,3 +491,32 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 :root:not([data-platform="darwin"]) .rail-brand { padding: 14px; }
 :root:not([data-platform="darwin"]) .session-pane-head { padding: 12px 0; }
 :root:not([data-platform="darwin"]) .toolbar { padding: 8px 12px; }
+
+/* ---------------------------------------------------------------- settings */
+
+.rail-brand .gear { margin-left: auto; font-size: 16px; padding: 2px 8px; align-self: flex-start; -webkit-app-region: no-drag; }
+.settings-backdrop {
+  position: fixed; inset: 0; z-index: 20; display: flex; align-items: flex-start; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 60%, transparent); padding: 6vh 16px;
+}
+.settings {
+  width: min(560px, 100%); max-height: 88vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 10px 40px #0004; padding: 6px 20px 14px;
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; }
+.settings-head h2 { font-size: 16px; margin: 12px 0; }
+.settings section { border-top: 1px solid var(--line); padding: 10px 0; }
+.settings h3 { font-size: 13px; margin: 0 0 8px; }
+.settings p { margin: 0 0 8px; }
+.settings-row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; margin-bottom: 8px; }
+.settings-row > span { width: 100%; }
+.settings-check { display: block; margin: 4px 0; }
+.settings-path { display: flex; flex-direction: column; gap: 3px; margin: 8px 0; }
+.settings-path input {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 5px 9px; font-family: var(--mono); font-size: 12px;
+}
+.settings-path input:focus { outline: none; border-color: var(--accent); }
+.settings-path input:disabled { opacity: 0.6; }
+.settings-file code { font-family: var(--mono); word-break: break-all; }

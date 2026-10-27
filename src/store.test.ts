@@ -8,6 +8,8 @@ const api = vi.hoisted(() => ({
   providerHealth: vi.fn(async () => []),
   patchNode: vi.fn(async (_sessionId: string, _nodeId: string, _patch: unknown) => {}),
   onUpdateAvailable: vi.fn(() => () => {}),
+  getSettings: vi.fn(),
+  setSettings: vi.fn(),
 }));
 vi.mock("./api.ts", () => ({ api }));
 
@@ -111,6 +113,35 @@ describe("renderer store lifecycle", () => {
     api.getSession.mockResolvedValueOnce(fam);
     await useStore.getState().openSession("P");
     expect(useStore.getState().selected).toBe("f-u2");
+  });
+
+  it("restores remembered view state at launch, and saves it again when it changes", async () => {
+    const remembered = {
+      settings: {
+        sortBy: "active",
+        providers: { claude: true, codex: true, copilot: true },
+        showArchivedCodex: false,
+        rememberView: true,
+        view: { compress: false, cwdFilter: "c:/work", providerFilter: "codex" },
+        paths: {},
+        updateCheck: true,
+      },
+      env: {},
+      updateCheckDisabledByEnv: false,
+      file: "settings.json",
+    };
+    api.getSettings.mockResolvedValueOnce(remembered);
+    api.setSettings.mockResolvedValue(remembered);
+    vi.useFakeTimers();
+    try {
+      await useStore.getState().boot();
+      expect(useStore.getState()).toMatchObject({ compress: false, cwdFilter: "c:/work", providerFilter: "codex" });
+      useStore.getState().set({ providerFilter: "" });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(api.setSettings).toHaveBeenCalledWith({ view: { compress: false, cwdFilter: "c:/work", providerFilter: "" } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sends a cleared annotation field as null, which survives JSON", async () => {

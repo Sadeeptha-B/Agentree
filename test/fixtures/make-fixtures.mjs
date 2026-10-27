@@ -614,6 +614,14 @@ const T12 = "01900000-0000-7000-8000-00000000000c";
   ]);
 }
 
+// A thread the user archived, with no live fork: hidden from the list unless
+// the settings ask for archived conversations.
+const T13 = "01900000-0000-7000-8000-00000000000d";
+{
+  const [t13] = cxTurn(T13, turn(20), 1, 60, "Archived question", ["Looking.", "Archived answer."]);
+  write(`${CODEX}/archived_sessions/rollout-2026-10-09T10-00-00-${T13}.jsonl`, [meta(T13), ...t13]);
+}
+
 // Legacy (pre-paginated) rollout and a copy-prefix fork of it.
 const L = "01800000-0000-7000-8000-000000000001";
 const L2 = "01800000-0000-7000-8000-000000000002";
