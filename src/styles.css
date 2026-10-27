@@ -200,6 +200,16 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
   pointer-events: none; letter-spacing: -0.01em;
 }
 .halo-box { fill: none; stroke: var(--accent); stroke-width: 2; }
+/* A fork's name over its first turn. Opaque, so an edge or a chain line
+   passing behind it doesn't strike the text through. */
+.fork-tag rect { fill: var(--panel); stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 2; }
+.fork-tag text {
+  font-size: 10px; fill: var(--fg); text-anchor: middle; pointer-events: none;
+  font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+}
+.vnode.on-path .fork-tag rect { stroke: var(--accent); }
+.vnode.dead .fork-tag { opacity: 0.45; }
+.fork-tag .mark { font-size: 10px; }
 
 .vchain { cursor: pointer; }
 /* Dotted: turns hidden inside a collapsed chain. (Long dashes mean a new session.) */

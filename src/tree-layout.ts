@@ -1,4 +1,4 @@
-import type { NodeId, TurnNode } from "../shared/types.ts";
+import type { MemberInfo, NodeId, TurnNode } from "../shared/types.ts";
 import { ROOT_KEY } from "../shared/render.ts";
 
 export const ROW_H = 40;
@@ -38,18 +38,90 @@ export function nodeLabel(n: TurnNode): string | null {
   return n.label.length > LABEL_MAX ? n.label.slice(0, LABEL_MAX - 1) + "…" : n.label;
 }
 
+/** Longest member title drawn in a fork tag before it's ellipsised. */
+const TAG_MAX = 26;
+/** Height of a fork tag, and its gap above the node it names. */
+export const TAG_H = 13;
+const TAG_GAP = 2;
+/** Room kept in every tag for a ★ / ✕ mark, which moves into the tag. */
+const TAG_MARK_W = 12;
+
 /**
- * How much horizontal room a node needs.
+ * The name tag over each fork's first turn: the member session's title. A
+ * user label on the node replaces it (the title moves to the tooltip), and a
+ * Codex prompt edit gets none — it's a branch of the same thread, not a
+ * separate chat with a name.
+ */
+export function forkTags(nodes: TurnNode[], members: MemberInfo[]): Map<NodeId, string> {
+  const title = new Map(members.map((m) => [m.id, m.title]));
+  const tags = new Map<NodeId, string>();
+  for (const n of nodes) {
+    if (n.branchKind !== "fork" || n.label || !n.sourceSessionId) continue;
+    const t = title.get(n.sourceSessionId)?.replace(/\s+/g, " ").trim();
+    if (t) tags.set(n.id, t.length > TAG_MAX ? t.slice(0, TAG_MAX - 1) + "…" : t);
+  }
+  return tags;
+}
+
+/** Drawn width of a fork tag (10px text), estimated as generously as a label box. */
+export const tagWidth = (tag: string) => tag.length * 6.4 + 14 + TAG_MARK_W;
+
+/** Half the drawn height of a node: a box, or a dot at its selected radius. */
+const halfHeight = (n: TurnNode) => (nodeLabel(n) ? BOX_H / 2 : 9);
+
+/**
+ * How much horizontal room a node needs — its box or dot, or its fork tag if
+ * that is wider.
  *
  * SVG cannot measure text without rendering it, so a labelled box is sized from
  * its character count. The estimate is deliberately generous: layout uses this
  * number to space siblings apart, and under-measuring puts a box on top of its
  * neighbour, which is far worse than a slightly wide gap.
  */
-export function nodeWidth(n: TurnNode): number {
+export function nodeWidth(n: TurnNode, tag?: string): number {
   const label = nodeLabel(n);
-  if (!label) return DOT_W;
-  return Math.max(38, label.length * 7 + 18);
+  const own = label ? Math.max(38, label.length * 7 + 18) : DOT_W;
+  return tag ? Math.max(own, tagWidth(tag)) : own;
+}
+
+/**
+ * Where a node's fork tag sits, relative to the node's centre: just above
+ * it, inside the node's row. A box in the row above ends 29px up; the tag's
+ * top is at most 26px up, so the two never meet.
+ */
+export function tagBox(n: TurnNode, tag: string): Rect {
+  const w = tagWidth(tag);
+  return { x: -w / 2, y: -(halfHeight(n) + TAG_GAP + TAG_H), w, h: TAG_H };
+}
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * What a drawn element covers, in tree coordinates: a node's box or dot and
+ * its tag, or a chain's count pill. (A chain's dotted line is a connector,
+ * like an edge, and may pass behind a tag.) The no-overlap test checks these.
+ */
+export function elementBounds(v: VNode, tags: Map<NodeId, string>): Rect[] {
+  if (v.kind === "chain") {
+    const span = CHAIN_ROWS * ROW_H;
+    return [{ x: v.x - CHAIN_W / 2, y: v.y + span / 2 - 9, w: CHAIN_W, h: 18 }];
+  }
+  const n = v.node;
+  const label = nodeLabel(n);
+  const w = label ? nodeWidth(n) : 18;
+  const h = halfHeight(n);
+  const out: Rect[] = [{ x: v.x - w / 2, y: v.y - h, w, h: 2 * h }];
+  const tag = tags.get(n.id);
+  if (tag) {
+    const t = tagBox(n, tag);
+    out.push({ ...t, x: v.x + t.x, y: v.y + t.y });
+  }
+  return out;
 }
 
 /**
@@ -82,6 +154,8 @@ export interface Layout {
 
 interface BuildOpts {
   children: Map<string, TurnNode[]>;
+  /** Fork tags (`forkTags`); their width is part of the geometry. */
+  tags?: Map<NodeId, string>;
   /** Nodes from root to the selection. Styling only — never geometry. */
   pathIds: Set<NodeId>;
   /** Chains the user has clicked open. */
@@ -137,6 +211,8 @@ function isStructural(n: TurnNode, children: Map<string, TurnNode[]>): boolean {
 
 export function buildLayout(opts: BuildOpts): Layout {
   const { children, compress, expanded } = opts;
+  const tags = opts.tags ?? new Map<NodeId, string>();
+  const widthOf = (n: TurnNode) => nodeWidth(n, tags.get(n.id));
   const roots = children.get(ROOT_KEY) ?? [];
 
   const edges: VEdge[] = [];
@@ -179,7 +255,7 @@ export function buildLayout(opts: BuildOpts): Layout {
   /** Draw one real node and, recursively, everything beneath it. */
   function placeNode(node: TurnNode, y: number): Placed {
     const v: VNode = { kind: "node", id: node.id, node, x: 0, y };
-    const w = nodeWidth(node);
+    const w = widthOf(node);
     const kids = children.get(node.id) ?? [];
 
     if (kids.length === 0) {
@@ -236,7 +312,7 @@ export function buildLayout(opts: BuildOpts): Layout {
       for (const v of runVs) v.x = below.top.x; // a linear run occupies one column
 
       // The run's own boxes can be wider than everything under it.
-      const runW = Math.max(...run.map(nodeWidth));
+      const runW = Math.max(...run.map(widthOf));
       const out = envelop(
         { top: runVs[0], all: [...runVs, ...below.all], width: below.width },
         below.top.x,
