@@ -660,6 +660,10 @@ The tree follows the transcripts on disk.
   entry per fork family.
 - Badges: `⑂ n` branch points, `N sessions` for a family.
 - Health rows sit above the list.
+- Cards are keyed by `provider:id`, and `registry.listAllSessions` drops a
+  second entry with the same identity (keeping the newer, logging the other).
+  A provider that regresses into duplicates must not reach the screen: two
+  cards with one React key left stale cards above a filtered list.
 - No refresh button (the watcher keeps it live) and no "only branched" filter.
 - `updatedAt` is the newest timestamp on **any** record in any member. It
   isn't mtime (bookkeeping rewrites move that) and it isn't the newest
