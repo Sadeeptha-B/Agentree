@@ -691,7 +691,10 @@ The tree follows the transcripts on disk.
   recent conversation) and one flat list, newest interaction first, with one
   entry per fork family.
 - Badges: `⑂ n` branch points, `N sessions` for a family.
-- Health rows sit above the list.
+- Health rows sit above the list. Their provider chips are the agent filter
+  (one agent, or all; `providerFilter` in the store). It combines with the
+  directory filter and the search, and the rail counts only what it lets
+  through. The rules live in `src/list.ts`, testable without a DOM.
 - Cards are keyed by `provider:id`, and `registry.listAllSessions` drops a
   second entry with the same identity (keeping the newer, logging the other).
   A provider that regresses into duplicates must not reach the screen: two

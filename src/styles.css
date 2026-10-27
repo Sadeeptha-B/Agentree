@@ -402,6 +402,18 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 .provider-chip.claude { color: #c96442; border-color: #c9644255; background: #c9644214; }
 .provider-chip.codex { color: #10a37f; border-color: #10a37f55; background: #10a37f14; }
 .provider-chip.copilot { color: #6c9bd1; border-color: #6c9bd155; background: #6c9bd114; }
+/* A chip that filters the list by agent; "on" fills it in. */
+.provider-chip.toggle { cursor: pointer; font-family: inherit; line-height: inherit; }
+.provider-chip.toggle:hover { border-color: currentColor; }
+.provider-chip.toggle.on { color: #fff; border-color: transparent; }
+.provider-chip.claude.on { background: #c96442; }
+.provider-chip.codex.on { background: #10a37f; }
+.provider-chip.copilot.on { background: #6c9bd1; }
+.dir-clear {
+  background: none; border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 8px; color: var(--muted); cursor: pointer; font: inherit;
+}
+.dir-clear:hover { border-color: var(--accent); color: var(--fg); }
 
 /* Whole-prefix reading view inside the node panel. */
 .prefix-toggle { margin-bottom: 8px; }
