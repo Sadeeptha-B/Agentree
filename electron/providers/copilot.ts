@@ -91,7 +91,16 @@ interface ParsedSession {
   /** For each turn, the index of the LAST event line belonging to it. */
   endLine: number[];
   touchedAt: number;
+  /** Newest conversational event (`ACTIVITY`); 0 if none. */
+  activeAt: number;
 }
+
+/**
+ * Events that are the conversation — messages, turns, tool and subagent
+ * activity — as opposed to session, hook, permission, skill and system
+ * bookkeeping. Checked against real Copilot CLI event logs.
+ */
+const ACTIVITY = /^(user|assistant|tool|external_tool|subagent)\./;
 
 function parseEvents(dir: string): ParsedSession | null {
   const ws = readWorkspace(dir);
@@ -106,6 +115,7 @@ function parseEvents(dir: string): ParsedSession | null {
   const nodes: TurnNode[] = [];
   const endLine: number[] = [];
   let touchedAt = 0;
+  let activeAt = 0;
   const lines = raw.split("\n");
 
   for (let i = 0; i < lines.length; i++) {
@@ -118,6 +128,7 @@ function parseEvents(dir: string): ParsedSession | null {
     }
     const ts = ev.timestamp ? Date.parse(ev.timestamp) : 0;
     if (ts > touchedAt) touchedAt = ts;
+    if (ts > activeAt && ev.type && ACTIVITY.test(ev.type)) activeAt = ts;
 
     if (ev.type === "user.message" || ev.type === "assistant.message") {
       const text = (ev.data?.content ?? "").trim();
@@ -143,7 +154,7 @@ function parseEvents(dir: string): ParsedSession | null {
     }
   }
 
-  return { ws, nodes, endLine, touchedAt };
+  return { ws, nodes, endLine, touchedAt, activeAt };
 }
 
 const parses = new Map<string, { mtimeMs: number; size: number; parsed: ParsedSession }>();
@@ -256,10 +267,13 @@ function metaFor(fam: Family): SessionMeta | null {
   // Always via stitched(): it copies nodes before the merge mutates them,
   // protecting the parse cache. (A single-member family stitches to itself.)
   const nodes = stitched(fam);
-  let updatedAt = 0;
+  let activeAt = 0;
+  let touchedAt = 0;
   for (const m of fam.members) {
     const p = parsed(m.dir);
-    if (p && p.touchedAt > updatedAt) updatedAt = p.touchedAt;
+    if (!p) continue;
+    activeAt = Math.max(activeAt, p.activeAt || p.touchedAt);
+    touchedAt = Math.max(touchedAt, p.touchedAt);
   }
 
   const firstUser = rootParsed.nodes.find((n) => n.role === "user");
@@ -274,7 +288,8 @@ function metaFor(fam: Family): SessionMeta | null {
     cwd: rootMember.ws.cwd,
     project: rootMember.ws.cwd ? path.basename(rootMember.ws.cwd) : "copilot",
     title,
-    updatedAt,
+    activeAt,
+    touchedAt,
     nodeCount: nodes.length,
     branchPoints: countBranchPoints(childIndex(nodes)),
     resumeCommand: resumeCmd(fam.rootId, rootMember.ws.cwd),
@@ -294,7 +309,8 @@ function membersOf(fam: Family): MemberInfo[] {
       parentEvidence: m.ws.id !== fam.rootId && m.ws.forkedFrom ? "explicit" : undefined,
       cwd: m.ws.cwd,
       resumeCommand: resumeCmd(m.ws.id, m.ws.cwd),
-      updatedAt: p?.touchedAt ?? 0,
+      activeAt: (p?.activeAt || p?.touchedAt) ?? 0,
+      touchedAt: p?.touchedAt ?? 0,
     };
   });
 }

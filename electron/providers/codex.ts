@@ -235,6 +235,13 @@ interface Page {
   turns: Turn[];
   lastOrdinal: number;
   touchedAt: number;
+  /**
+   * Newest conversational record: an item starting or completing, of ANY
+   * item type (a tool call too, so a long agent loop stays live). Not the
+   * settings, usage, task and `response_item` records the extension writes
+   * when it merely loads a thread — those made untouched threads look new.
+   */
+  activeAt: number;
   firstUserText: string;
   unknownTypes: Record<string, number>;
 }
@@ -284,6 +291,7 @@ function parsePage(file: string, archived: boolean): Page | null {
     turns: [],
     lastOrdinal: 0,
     touchedAt: 0,
+    activeAt: 0,
     firstUserText: "",
     unknownTypes: {},
   };
@@ -357,6 +365,9 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     const p = r.payload;
     if (!p) continue;
 
+    if (r.type === "event_msg" && (p.type === "item_completed" || p.type === "item_started") && ts > page.activeAt) {
+      page.activeAt = ts;
+    }
     if (r.type === "turn_context" && p.model) model = p.model;
     if (r.type === "event_msg" && p.type && !KNOWN_EVENTS.has(p.type)) bump(`event_msg/${p.type}`);
     if (!p.turn_id) continue;
@@ -485,6 +496,14 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
     if (ts > page.touchedAt) page.touchedAt = ts;
     const p = rec.payload;
     if (!p) continue;
+    // The legacy vocabulary's conversation: prose events and tool calls.
+    if (
+      ts > page.activeAt &&
+      ((rec.type === "event_msg" && (p.type === "user_message" || p.type === "agent_message")) ||
+        (rec.type === "response_item" && (p.type === "function_call" || p.type === "custom_tool_call")))
+    ) {
+      page.activeAt = ts;
+    }
     if (rec.type === "event_msg") {
       if (p.type === "user_message" && typeof p.message === "string") {
         const text = cleanUserText(p.message);
@@ -837,7 +856,8 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
     parentEvidence: ps.some((p) => p.forkedFrom) ? "explicit" : undefined,
     cwd: ps[0].cwd,
     resumeCommand: resumeCmd(id, ps[0].cwd),
-    updatedAt: Math.max(...ps.map((p) => p.touchedAt)),
+    activeAt: Math.max(...ps.map((p) => p.activeAt || p.touchedAt)),
+    touchedAt: Math.max(...ps.map((p) => p.touchedAt)),
     archived: ps.every((p) => p.archived) || undefined,
   }));
   members.sort((a, b) => (a.id === fam.rootThread ? -1 : b.id === fam.rootThread ? 1 : a.id.localeCompare(b.id)));
@@ -850,7 +870,8 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       cwd: root.cwd,
       project: root.cwd ? root.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "codex" : "codex",
       title: root.title,
-      updatedAt: Math.max(...members.map((m) => m.updatedAt)),
+      activeAt: Math.max(...members.map((m) => m.activeAt)),
+      touchedAt: Math.max(...members.map((m) => m.touchedAt)),
       nodeCount: all.length,
       branchPoints: countBranchPoints(childIndex(all)),
       resumeCommand: root.resumeCommand,
