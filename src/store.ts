@@ -4,6 +4,7 @@ import { childIndex, newestLeaf, toNodeMap, type NodeMap } from "../shared/rende
 import type {
   NodeId,
   NodeStatus,
+  ProviderHealth,
   SessionDetail,
   SessionMeta,
   TurnNode,
@@ -12,6 +13,8 @@ import type {
 
 interface State {
   sessions: SessionMeta[];
+  /** One row per provider from the last scan — shown above the list. */
+  health: ProviderHealth[];
   filter: string;
   /** Show only sessions from this working directory. Empty means all of them. */
   cwdFilter: string;
@@ -87,6 +90,7 @@ const sessionGate = gate();
 
 export const useStore = create<State>((set, get) => ({
   sessions: [],
+  health: [],
   filter: "",
   cwdFilter: "",
 
@@ -115,6 +119,8 @@ export const useStore = create<State>((set, get) => ({
       set({ loading: true });
       try {
         set({ sessions: await api.listSessions() });
+        // After the list: health describes the scan that list came from.
+        set({ health: await api.providerHealth() });
       } catch (e) {
         set({ error: String(e) });
       } finally {
