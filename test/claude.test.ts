@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { childIndex, pathToRoot, toNodeMap } from "../shared/render.ts";
+import { childIndex, cwdKey, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
 import { listSessions, loadSession, claudeHealth, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
@@ -30,6 +30,7 @@ const P3 = "4fffffff-ffff-4fff-8fff-ffffffffffff";
 const F3 = "50000000-0000-4000-8000-000000000001";
 const G3 = "50000000-0000-4000-8000-000000000002";
 const TL = "50000000-0000-4000-8000-000000000003";
+const MV = "50000000-0000-4000-8000-000000000004";
 let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
@@ -151,12 +152,19 @@ describe("Claude transcripts", () => {
     expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T15:00:00.000Z");
   });
 
+  it("files a session under the directory it continued in, not the first one", () => {
+    const s = listSessions().find((x) => x.id === MV)!;
+    expect(s.cwd).toBe("/c/work/new");
+    expect(cwdKey(s.cwd)).toBe(cwdKey("C:/work/new"));
+    expect(loadSession(MV)!.meta.cwd).toBe("/c/work/new");
+  });
+
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(18);
+    expect(h.filesSeen).toBe(19);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(17);
+    expect(h.sessionsParsed).toBe(18);
     expect(h.skipped).toBe(0);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
     expect(h.unknownRecordTypes).toEqual({});

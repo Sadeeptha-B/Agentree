@@ -477,7 +477,12 @@ health row, not treated as errors.
 - **`entrypoint`** (`claude-vscode` | `cli`) is shown in the panel.
 - The project-dir slug keeps the drive letter's case as written
   (`c--Users-…` and `C--Users-…` both occur). The cwd inside the transcript is
-  authoritative.
+  authoritative, and it's the **last** one a `user`/`assistant` record
+  carries: a moved repo keeps one session id, and the session continues
+  (and resumes) in the new folder. Codex likewise takes the newest page's
+  last `turn_context.cwd`. One folder is recorded as `c:\…`, `C:\…` and
+  `/c/…` (Git Bash), with or without a trailing separator, so paths are
+  compared by `cwdKey()` (shared/render.ts) and displayed as recorded.
 
 ### Plumbing is stripped, real markup is not
 
@@ -655,7 +660,7 @@ The tree follows the transcripts on disk.
 
 ## Welcome screen
 
-- A directory rail ("All conversations", then directories ranked by most
+- A directory rail ("All conversations", then directories, by `cwdKey`, ranked by most
   recent conversation) and one flat list, newest interaction first, with one
   entry per fork family.
 - Badges: `⑂ n` branch points, `N sessions` for a family.
