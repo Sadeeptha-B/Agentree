@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { cwdKey } from "../shared/render.ts";
 import type { SessionMeta } from "../shared/types.ts";
-import { filterSessions, railDirs } from "./list.ts";
+import { filterSessions, ofProvider, railDirs } from "./list.ts";
 
 const meta = (id: string, cwd: string, activeAt: number, extra: Partial<SessionMeta> = {}): SessionMeta => ({
   id,
@@ -38,7 +38,31 @@ describe("directory keys", () => {
     const list = filterSessions([meta("a", "C:\\work\\new", 1), meta("b", "/c/work/new", 3), meta("c", "C:\\other", 2)], {
       query: "",
       cwd: rail[0].key,
+      provider: "",
     });
     expect(list.map((s) => s.id)).toEqual(["b", "a"]);
+  });
+});
+
+describe("agent filter", () => {
+  const all = [
+    meta("a", "/work/demo", 4),
+    meta("b", "/work/demo", 3, { provider: "codex" }),
+    meta("c", "/work/other", 2, { provider: "codex" }),
+    meta("d", "/work/other", 1),
+  ];
+
+  it("narrows by directory and agent together, and the rail counts agree", () => {
+    const demo = cwdKey("/work/demo");
+    expect(filterSessions(all, { query: "", cwd: demo, provider: "codex" }).map((s) => s.id)).toEqual(["b"]);
+    const rail = railDirs(ofProvider(all, "codex"));
+    expect(rail.map((d) => [d.key, d.n])).toEqual([
+      [demo, 1],
+      [cwdKey("/work/other"), 1],
+    ]);
+    for (const d of rail) {
+      expect(filterSessions(all, { query: "", cwd: d.key, provider: "codex" })).toHaveLength(d.n);
+    }
+    expect(filterSessions(all, { query: "", cwd: "", provider: "" })).toHaveLength(4);
   });
 });

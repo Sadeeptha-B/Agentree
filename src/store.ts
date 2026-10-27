@@ -6,6 +6,7 @@ import type {
   NodeMeta,
   NodeStatus,
   ProviderHealth,
+  ProviderId,
   SessionDetail,
   SessionMeta,
   TurnNode,
@@ -19,6 +20,8 @@ interface State {
   filter: string;
   /** Show only sessions from this working directory (a `cwdKey`). Empty means all of them. */
   cwdFilter: string;
+  /** Show only one agent's sessions. Empty means every agent. */
+  providerFilter: ProviderId | "";
 
   session: SessionDetail | null;
   nodes: NodeMap;
@@ -111,6 +114,7 @@ export const useStore = create<State>((set, get) => ({
   health: [],
   filter: "",
   cwdFilter: "",
+  providerFilter: "",
 
   session: null,
   nodes: new Map(),

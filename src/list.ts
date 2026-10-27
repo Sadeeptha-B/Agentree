@@ -1,5 +1,5 @@
 import { cwdKey } from "../shared/render.ts";
-import type { SessionMeta } from "../shared/types.ts";
+import type { ProviderId, SessionMeta } from "../shared/types.ts";
 
 /**
  * The welcome list's filtering and directory rail, kept apart from the
@@ -45,12 +45,18 @@ export interface ListFilter {
   query: string;
   /** A `cwdKey`, or "" for every directory. */
   cwd: string;
+  /** One agent, or "" for all of them. */
+  provider: ProviderId | "";
 }
+
+/** The sessions of the selected agent — what the rail counts and the list draws from. */
+export const ofProvider = (sessions: SessionMeta[], provider: ProviderId | "") =>
+  provider ? sessions.filter((s) => s.provider === provider) : sessions;
 
 /** The list as shown: filtered, newest activity first. */
 export function filterSessions(sessions: SessionMeta[], f: ListFilter): SessionMeta[] {
   const q = f.query.trim().toLowerCase();
-  const list = sessions.filter((s) => {
+  const list = ofProvider(sessions, f.provider).filter((s) => {
     if (f.cwd && !dirsOf(s).some((d) => cwdKey(d) === f.cwd)) return false;
     if (!q) return true;
     return s.title.toLowerCase().includes(q) || s.cwd.toLowerCase().includes(q) || s.id.startsWith(q);

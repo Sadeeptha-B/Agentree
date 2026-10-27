@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { when } from "../format.ts";
-import type { ProviderHealth } from "../../shared/types.ts";
-import { filterSessions, railDirs, type RailDir } from "../list.ts";
+import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
+import { filterSessions, ofProvider, railDirs, type RailDir } from "../list.ts";
 import logoUrl from "../../assets/logo.png";
 
 /** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
@@ -19,7 +19,15 @@ const leaf = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p;
  * as "files seen, few parsed" or as unknown record types the day it happens,
  * instead of as a list that is quietly missing conversations.
  */
-function HealthRows({ health }: { health: ProviderHealth[] }) {
+function HealthRows({
+  health,
+  active,
+  onToggle,
+}: {
+  health: ProviderHealth[];
+  active: ProviderId | "";
+  onToggle: (p: ProviderId) => void;
+}) {
   const rows = health.filter((h) => h.present || h.error);
   if (rows.length === 0) return null;
   return (
@@ -36,7 +44,15 @@ function HealthRows({ health }: { health: ProviderHealth[] }) {
             className={`health-row ${level}`}
             title={versions ? `${h.root}\n${versions}` : h.root}
           >
-            <span className={`provider-chip ${h.provider}`}>{h.provider}</span>
+            {/* The chip is the agent filter: one agent's sessions, or all again. */}
+            <button
+              className={`provider-chip ${h.provider} toggle ${active === h.provider ? "on" : ""}`}
+              aria-pressed={active === h.provider}
+              title={active === h.provider ? "Show every agent's conversations" : `Show only ${h.provider} conversations`}
+              onClick={() => onToggle(h.provider)}
+            >
+              {h.provider}
+            </button>
             <span>
               {h.filesSeen} files · {h.sessionsParsed} parsed
               {h.skipped ? ` · ${h.skipped} hidden` : ""}
@@ -71,14 +87,17 @@ function HealthRows({ health }: { health: ProviderHealth[] }) {
 const RAIL_DIRS = 10;
 
 export function Welcome() {
-  const { sessions, health, filter, cwdFilter, loading, update, openSession, set } = useStore();
+  const { sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set } = useStore();
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const dirs = useMemo(() => railDirs(sessions), [sessions]);
+  // The rail counts what the agent filter lets through, so its numbers agree
+  // with the list they narrow.
+  const mine = useMemo(() => ofProvider(sessions, providerFilter), [sessions, providerFilter]);
+  const dirs = useMemo(() => railDirs(mine), [mine]);
   const visible = useMemo(
-    () => filterSessions(sessions, { query: filter, cwd: cwdFilter }),
-    [sessions, filter, cwdFilter],
+    () => filterSessions(sessions, { query: filter, cwd: cwdFilter, provider: providerFilter }),
+    [sessions, filter, cwdFilter, providerFilter],
   );
   const activeDir = dirs.find((d) => d.key === cwdFilter);
 
@@ -99,7 +118,7 @@ export function Welcome() {
             onClick={() => set({ cwdFilter: "" })}
           >
             <span className="dir-name">All conversations</span>
-            <span className="dir-count">{sessions.length}</span>
+            <span className="dir-count">{mine.length}</span>
           </button>
 
           <div className="rail-label muted small">recent directories</div>
@@ -186,12 +205,29 @@ export function Welcome() {
           </span>
         </div>
 
-        <HealthRows health={health} />
+        <HealthRows
+          health={health}
+          active={providerFilter}
+          onToggle={(p) => set({ providerFilter: providerFilter === p ? "" : p })}
+        />
 
-        {cwdFilter && (
+        {(cwdFilter || providerFilter) && (
           <div className="active-dir muted small">
-            <code>{tilde(activeDir?.path ?? cwdFilter)}</code>
-            <button className="ghost" onClick={() => set({ cwdFilter: "" })}>
+            {providerFilter && (
+              <button
+                className={`provider-chip ${providerFilter} toggle on`}
+                title="Show every agent's conversations"
+                onClick={() => set({ providerFilter: "" })}
+              >
+                {providerFilter} ✕
+              </button>
+            )}
+            {cwdFilter && (
+              <button className="dir-clear" title="Show every directory" onClick={() => set({ cwdFilter: "" })}>
+                <code>{tilde(activeDir?.path ?? cwdFilter)}</code> ✕
+              </button>
+            )}
+            <button className="ghost" onClick={() => set({ cwdFilter: "", providerFilter: "" })}>
               show all
             </button>
           </div>
@@ -243,7 +279,9 @@ export function Welcome() {
               ? "No agent sessions found in ~/.claude/projects, ~/.codex/sessions or ~/.copilot/session-state."
               : filter
                 ? "Nothing matches that filter."
-                : "No conversations in this directory yet."}
+                : providerFilter && !cwdFilter
+                  ? `No ${providerFilter} conversations.`
+                  : "No conversations in this directory yet."}
           </p>
         )}
       </main>
