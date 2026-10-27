@@ -4,7 +4,7 @@ import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { childIndex, cwdKey, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
-import { listSessions, loadSession, claudeHealth, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
+import { claudeHealth, claudeWatchDirs, listSessions, loadSession, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
 import { readLineage } from "../electron/lineage.ts";
 import { annotate } from "../electron/registry.ts";
@@ -31,6 +31,9 @@ const F3 = "50000000-0000-4000-8000-000000000001";
 const G3 = "50000000-0000-4000-8000-000000000002";
 const TL = "50000000-0000-4000-8000-000000000003";
 const MV = "50000000-0000-4000-8000-000000000004";
+const MO = "50000000-0000-4000-8000-000000000005";
+const MF = "50000000-0000-4000-8000-000000000006";
+const SP = "50000000-0000-4000-8000-000000000007";
 let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
@@ -162,12 +165,60 @@ describe("Claude transcripts", () => {
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(19);
+    expect(h.filesSeen).toBe(24);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(18);
-    expect(h.skipped).toBe(0);
+    expect(h.sessionsParsed).toBe(22);
+    // The moved session's old copy: every record is in the new one.
+    expect(h.skipped).toBe(1);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
+    expect(h.warnings.join(" ")).toMatch(/2 sessions have copies in more than one project folder.*1 of them diverged/);
     expect(h.unknownRecordTypes).toEqual({});
+  });
+});
+
+describe("Claude sessions stored in several project folders", () => {
+  it("lists a moved session once, as its newest copy, with a fork from a third folder", () => {
+    const list = listSessions().filter((s) => [MO, MF].includes(s.id));
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: MO, members: 2, cwd: "C:\\work\\articulation", title: "Package rename" });
+    for (const id of [MO, MF]) {
+      const d = loadSession(id)!;
+      expectTree(d);
+      expect(d.meta.id).toBe(MO);
+      // The continuation that exists only in the new folder's copy is drawn.
+      expect(kidsOf(d, one(d, "Imports updated."))).toEqual(["Publish it"]);
+      expect(one(d, "Publish it")).toMatchObject({ branchKind: "fork", sourceSessionId: MF });
+      expect(d.members.find((m) => m.id === MO)!.files).toHaveLength(2);
+      expect(d.members.find((m) => m.id === MF)!.parentId).toBe(MO);
+    }
+    // The live view watches every folder the family lives in.
+    expect(claudeWatchDirs(MF).map((d) => path.basename(d)).sort()).toEqual([
+      "c--work-moved-a-old",
+      "c--work-moved-b-new",
+      "c--work-moved-c-third",
+    ]);
+  });
+
+  it("draws both continuations of copies that diverged after a shared prefix", () => {
+    expect(listSessions().filter((s) => s.id === SP)).toHaveLength(1);
+    const d = loadSession(SP)!;
+    expectTree(d);
+    expect(d.nodes.filter((n) => n.parentId === null)).toHaveLength(1);
+    expect(kidsOf(d, one(d, "Two phases."))).toEqual(["Phase one first", "Phase two first"]);
+    one(d, "Phase one done.");
+    one(d, "Phase two done.");
+  });
+
+  it("forks a moved session from the copy that holds the turn, next to it", () => {
+    const d = loadSession(MO)!;
+    const res = forkClaudeAt(MO, one(d, "Imports updated.").id);
+    expect(res).toMatchObject({ ok: true, cwd: "C:\\work\\articulation" });
+    if (!res.ok) return;
+    expect(fs.existsSync(path.join(projectDir("c--work-moved-b-new"), `${res.id}.jsonl`))).toBe(true);
+    const after = loadSession(MO)!;
+    expectTree(after);
+    expect(after.nodes.length).toBe(d.nodes.length);
+    fs.rmSync(path.join(projectDir("c--work-moved-b-new"), `${res.id}.jsonl`));
   });
 });
 

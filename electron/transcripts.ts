@@ -639,8 +639,14 @@ const isActivity = (rec: RawRecord) =>
 
 /** Project a transcript file into the node list. Read-only — we never write here. */
 export function parseFile(file: string): Parsed {
-  const sessionId = path.basename(file).replace(/\.jsonl$/, "");
-  const read = readLines(file);
+  return parseRecords(path.basename(file).replace(/\.jsonl$/, ""), readLines(file));
+}
+
+/**
+ * Project one session's records — one file's, or the union of several
+ * copies of the same session (`unionRecords`) — into the node list.
+ */
+export function parseRecords(sessionId: SessionId, read: { records: RawRecord[]; bad: number } | null): Parsed {
   if (!read) return EMPTY(sessionId, "unreadable");
   if (read.records.length === 0) return EMPTY(sessionId, read.bad > 0 ? "malformed" : undefined);
   const all = read.records;
@@ -954,25 +960,36 @@ export function parseFile(file: string): Parsed {
 // ------------------------------------------------------------------ lookup
 
 interface Located {
+  /** The logical session: every physical copy, resolved (`resolveSource`). */
+  source: SessionSummary;
+  /** The copy that stands for it — the newest-activity one that is read. */
   file: string;
+  /** Where the session continues: its last cwd. */
   cwd: string;
-  dirName: string;
 }
 
 const isSessionId = (id: string) => /^[a-zA-Z0-9-]{8,64}$/.test(id);
 
-/** Find a session's transcript (cheap: one existsSync per project dir). */
+/**
+ * Find a session's transcripts: EVERY project folder holding one — a moved
+ * repo leaves the same session id in two — resolved into one logical
+ * session. Cheap: one existsSync per project dir, plus cached summaries.
+ */
 export function locate(sessionId: SessionId): Located | null {
   if (!isSessionId(sessionId)) return null;
   const root = claudeProjects();
   if (!fs.existsSync(root)) return null;
 
+  const copies: FileSummary[] = [];
   for (const dirName of fs.readdirSync(root)) {
     const file = path.join(root, dirName, `${sessionId}.jsonl`);
-    // The parse summary's cwd: where the session continues (cached per file).
-    if (fs.existsSync(file)) return { file, cwd: summarise(file, dirName)?.cwd ?? "", dirName };
+    if (!fs.existsSync(file)) continue;
+    const s = summarise(file, dirName);
+    if (s) copies.push(s);
   }
-  return null;
+  if (copies.length === 0) return null;
+  const source = resolveSource(copies);
+  return { source, file: source.file, cwd: source.cwd };
 }
 
 export const claudeResumeArgv = RESUME_ARGV.claude;
@@ -1029,9 +1046,19 @@ function summarise(file: string, dirName: string): FileSummary | null {
   const hit = summaries.get(file);
   if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
 
-  const parsed = parseFile(file);
+  const s = summaryOf(parseFile(file), file, dirName, stat);
+  summaries.set(file, s);
+  return s;
+}
+
+function summaryOf(
+  parsed: Parsed,
+  file: string,
+  dirName: string,
+  stat: { mtimeMs: number; size: number; birthtimeMs?: number },
+): FileSummary {
   const merged = mergeSameRoleRuns(parsed.nodes);
-  const s: FileSummary = {
+  return {
     file,
     dirName,
     id: parsed.sessionId,
@@ -1055,8 +1082,6 @@ function summarise(file: string, dirName: string): FileSummary | null {
     problem: parsed.problem,
     unknownTypes: parsed.unknownTypes,
   };
-  summaries.set(file, s);
-  return s;
 }
 
 /** Every transcript in one project directory, summarised. */
@@ -1079,10 +1104,150 @@ function summariseDir(dirName: string, seen?: Set<string>): FileSummary[] {
   return out;
 }
 
+// ------------------------------------------------------------------ copies
+
+/**
+ * One logical session. Usually one file — but a session id can exist in
+ * several project folders: a moved or renamed repo leaves the old folder's
+ * copy behind and the session continues in a new one (verified: an 11.8 MB
+ * copy in the old folder, every record of which is in the 23.5 MB copy in
+ * the new one). The summary fields describe the session as a whole;
+ * `file`/`dirName` name the copy that stands for it.
+ */
+interface SessionSummary extends FileSummary {
+  /** Every physical copy, shadows included: they are watched and keyed on. */
+  copies: FileSummary[];
+  /** The copies whose records are read, oldest activity first: one, unless they diverged. */
+  parse: FileSummary[];
+}
+
+/** Record uuids per copy, by file identity — only read for ids with several copies. */
+const uuidCache = new Map<string, { mtimeMs: number; size: number; uuids: Set<string> }>();
+
+export function uuidsOf(c: FileSummary): Set<string> {
+  const hit = uuidCache.get(c.file);
+  if (hit && hit.mtimeMs === c.mtimeMs && hit.size === c.size) return hit.uuids;
+  const uuids = new Set<string>();
+  for (const r of readRecords(c.file) ?? []) if (r.uuid) uuids.add(r.uuid);
+  uuidCache.set(c.file, { mtimeMs: c.mtimeMs, size: c.size, uuids });
+  return uuids;
+}
+
+const contains = (big: Set<string>, small: Set<string>) => {
+  if (small.size > big.size) return false;
+  for (const u of small) if (!big.has(u)) return false;
+  return true;
+};
+
+/** Logical summaries of diverged copies, keyed by every copy's identity. */
+const unionSummaries = new Map<string, SessionSummary>();
+const copiesSig = (copies: FileSummary[]) => copies.map((c) => `${c.file}:${c.mtimeMs}:${c.size}`).sort().join("|");
+
+/**
+ * Resolve one session id's copies into a logical session.
+ *
+ * Copies of ONE session share record uuids (it is the same transcript, grown
+ * in different places), so containment is exact evidence: a copy whose uuids
+ * are all in another copy is a SHADOW — every record it has is already read
+ * there — and is not parsed. Picking a copy by recency or size instead would
+ * silently drop a real branch when two copies share a prefix and then each
+ * grew. Copies neither of which contains the other are read as the union of
+ * their records (`unionRecords`), so both continuations are drawn.
+ */
+function resolveSource(copies: FileSummary[]): SessionSummary {
+  if (copies.length === 1) return { ...copies[0], copies, parse: copies };
+  const largestFirst = [...copies].sort((a, b) => uuidsOf(b).size - uuidsOf(a).size || b.activeAt - a.activeAt);
+  const kept: FileSummary[] = [];
+  for (const c of largestFirst) if (!kept.some((k) => contains(uuidsOf(k), uuidsOf(c)))) kept.push(c);
+  const parse = kept.sort((a, b) => a.activeAt - b.activeAt);
+  // The session began when its oldest copy did: that orders it among forks.
+  const createdMs = Math.min(...copies.map((c) => c.createdMs));
+  if (parse.length === 1) return { ...parse[0], createdMs, copies, parse };
+
+  const sig = copiesSig(copies);
+  const hit = unionSummaries.get(sig);
+  if (hit) return hit;
+  const primary = parse[parse.length - 1];
+  const s: SessionSummary = {
+    ...summaryOf(parseRecords(primary.id, unionRecords(parse)), primary.file, primary.dirName, primary),
+    createdMs,
+    copies,
+    parse,
+  };
+  unionSummaries.set(sig, s);
+  return s;
+}
+
+/**
+ * The records of diverged copies of one session as one stream: the copy with
+ * the oldest activity whole, then each other copy from its first record the
+ * stream doesn't hold yet, minus the records it does. Every copy starts with
+ * the shared prefix, so each keeps its own order; and the newest copy is read
+ * last, so its titles and cwd win (last one wins in the parser). Copies share
+ * uuids, so the union is exact — nothing is matched by content.
+ */
+function unionRecords(parse: FileSummary[]): { records: RawRecord[]; bad: number } | null {
+  const records: RawRecord[] = [];
+  const held = new Set<string>();
+  let bad = 0;
+  let any = false;
+  for (const c of parse) {
+    const read = readLines(c.file);
+    if (!read) continue;
+    any = true;
+    bad += read.bad;
+    const from = records.length === 0 ? 0 : read.records.findIndex((r) => !!r.uuid && !held.has(r.uuid));
+    if (from < 0) continue;
+    for (const r of read.records.slice(from)) {
+      if (r.uuid && held.has(r.uuid)) continue;
+      records.push(r);
+    }
+    for (const r of records) if (r.uuid) held.add(r.uuid);
+  }
+  return any ? { records, bad } : null;
+}
+
+/** A logical session's records, as the parser reads them — the fork writer's input too. */
+export function readSourceRecords(s: SessionSummary): RawRecord[] | null {
+  return s.parse.length === 1 ? readRecords(s.parse[0].file) : (unionRecords(s.parse)?.records ?? null);
+}
+
+function parseSource(s: SessionSummary): Parsed {
+  return s.parse.length === 1 ? parseFile(s.parse[0].file) : parseRecords(s.id, unionRecords(s.parse));
+}
+
+/**
+ * Every transcript under every project folder, summarised, and resolved into
+ * logical sessions. Warm, this is one stat per file.
+ */
+function scanSources(seen?: Set<string>): { files: FileSummary[]; sources: SessionSummary[] } {
+  const root = claudeProjects();
+  const files: FileSummary[] = [];
+  if (fs.existsSync(root)) {
+    for (const dirName of fs.readdirSync(root)) {
+      try {
+        if (!fs.statSync(path.join(root, dirName)).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      files.push(...summariseDir(dirName, seen));
+    }
+  }
+  const byId = new Map<string, FileSummary[]>();
+  for (const f of files) {
+    const arr = byId.get(f.id);
+    if (arr) arr.push(f);
+    else byId.set(f.id, [f]);
+  }
+  return { files, sources: [...byId.values()].map(resolveSource) };
+}
+
 // ------------------------------------------------------------------ families
 
 /**
- * Group one project directory's transcripts into fork families.
+ * Group sessions into fork families — across ALL project folders: API
+ * message ids are global, and a family's members can live in different
+ * folders (a fork taken after the repo moved).
  *
  * The VS Code extension's "Fork conversation" writes a NEW transcript holding a
  * copy of one chain of its source (fresh uuids, same API message ids, same
@@ -1094,7 +1259,7 @@ function summariseDir(dirName: string, seen?: Set<string>): FileSummary[] {
  * Explicit lineage (`forkedFrom` on SDK/Agentree forks, Agentree's sidecar)
  * links families too.
  */
-function groupFamilies(files: FileSummary[]): FileSummary[][] {
+function groupFamilies(files: SessionSummary[]): SessionSummary[][] {
   const byId = new Map(files.map((f) => [f.id, f]));
   const parent = new Map<string, string>();
   const find = (x: string): string => {
@@ -1121,7 +1286,7 @@ function groupFamilies(files: FileSummary[]): FileSummary[][] {
     }
   }
 
-  const groups = new Map<string, FileSummary[]>();
+  const groups = new Map<string, SessionSummary[]>();
   for (const f of files) {
     if (f.nodeCount === 0) continue;
     const r = find(f.id);
@@ -1241,8 +1406,8 @@ interface Family {
 }
 
 /** Parse, order and stitch one family into a single merged tree. */
-function buildFamily(group: FileSummary[]): Family {
-  const parsed = new Map(group.map((g) => [g.id, parseFile(g.file)]));
+function buildFamily(group: SessionSummary[]): Family {
+  const parsed = new Map(group.map((g) => [g.id, parseSource(g)]));
   const parents: Map<string, Parentage> =
     group.length > 1 ? familyParents(group, parsed) : new Map([[group[0].id, { parent: null }]]);
   const parentOf = (id: string) => parents.get(id)?.parent ?? null;
@@ -1263,16 +1428,16 @@ function buildFamily(group: FileSummary[]): Family {
     activeAt: g.activeAt,
     touchedAt: g.touchedAt,
     entrypoint: g.entrypoint,
+    files: g.copies.map((c) => c.file),
   }));
   return { rootId, nodes, members };
 }
 
-/** Family-level meta cache, keyed by every member file's identity. */
+/** Family-level meta cache, keyed by the identity of every member's every copy. */
 const familyMetas = new Map<string, SessionMeta>();
-const signature = (group: FileSummary[]) =>
-  group.map((g) => `${g.file}:${g.mtimeMs}:${g.size}`).sort().join("|");
+const signature = (group: SessionSummary[]) => copiesSig(group.flatMap((g) => g.copies));
 
-function familyMeta(group: FileSummary[], built?: Family): SessionMeta {
+function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
   const activeAt = Math.max(...group.map((g) => g.activeAt));
   const touchedAt = Math.max(...group.map((g) => g.touchedAt));
 
@@ -1324,33 +1489,43 @@ export const claudeHealth = (): ProviderHealth =>
   lastHealth ?? new HealthScan("claude", claudeProjects()).done();
 
 export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
-  const root = claudeProjects();
-  const health = new HealthScan("claude", root);
-  const out: SessionMeta[] = [];
+  const health = new HealthScan("claude", claudeProjects());
   const seen = new Set<string>();
+  const { files, sources } = scanSources(seen);
 
-  if (fs.existsSync(root)) {
-    for (const dirName of fs.readdirSync(root)) {
-      try {
-        if (!fs.statSync(path.join(root, dirName)).isDirectory()) continue;
-      } catch {
-        continue;
-      }
-      const files = summariseDir(dirName, seen);
-      for (const f of files) {
-        health.file();
-        if (f.problem) health.failed();
-        else if (f.nodeCount === 0) health.skipped();
-        else health.parsed();
-        health.version(f.version ? `claude ${minorVersion(f.version)}` : undefined);
-        health.unknown(f.unknownTypes);
-      }
-      for (const group of groupFamilies(files)) out.push(familyMeta(group));
-    }
+  // Every physical file lands in exactly one health bucket; a shadow copy is
+  // deliberately not read, so it counts as hidden.
+  const shadows = new Set<string>();
+  let copied = 0;
+  let diverged = 0;
+  for (const s of sources) {
+    if (s.copies.length < 2) continue;
+    copied++;
+    if (s.parse.length > 1) diverged++;
+    for (const c of s.copies) if (!s.parse.includes(c)) shadows.add(c.file);
   }
+  for (const f of files) {
+    health.file();
+    if (f.problem) health.failed();
+    else if (shadows.has(f.file) || f.nodeCount === 0) health.skipped();
+    else health.parsed();
+    health.version(f.version ? `claude ${minorVersion(f.version)}` : undefined);
+    health.unknown(f.unknownTypes);
+  }
+  if (copied) {
+    health.warn(
+      `${copied} session${copied === 1 ? " has copies" : "s have copies"} in more than one project folder (a moved repo); each is read as one session` +
+        (diverged ? `, and ${diverged} of them diverged, so both continuations are drawn.` : "."),
+    );
+  }
+
+  const out = groupFamilies(sources).map((group) => familyMeta(group));
 
   // Forget deleted transcripts, so the caches can't outgrow the directory.
   for (const key of summaries.keys()) if (!seen.has(key)) summaries.delete(key);
+  for (const key of uuidCache.keys()) if (!seen.has(key)) uuidCache.delete(key);
+  const live = new Set(sources.filter((s) => s.parse.length > 1).map((s) => copiesSig(s.copies)));
+  for (const key of unionSummaries.keys()) if (!live.has(key)) unionSummaries.delete(key);
   if (familyMetas.size > 500) familyMetas.clear();
 
   health.listed(out.length);
@@ -1359,31 +1534,42 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
   return opts.limit ? out.slice(0, opts.limit) : out;
 }
 
+/** The family holding `sessionId`, across every project folder; null if no such session. */
+function familyOf(sessionId: SessionId): { group: SessionSummary[] | null; self: SessionSummary } | null {
+  if (!isSessionId(sessionId)) return null;
+  const { sources } = scanSources();
+  const self = sources.find((s) => s.id === sessionId);
+  if (!self) return null;
+  return { group: groupFamilies(sources).find((g) => g.includes(self)) ?? null, self };
+}
+
 /** Load the family containing `sessionId` — any member id opens the whole tree. */
 export function loadSession(sessionId: SessionId): SessionDetail | null {
-  const loc = locate(sessionId);
-  if (!loc) return null;
-
-  const files = summariseDir(loc.dirName);
-  const group = groupFamilies(files).find((g) => g.some((f) => f.id === sessionId));
-  if (!group) {
+  const found = familyOf(sessionId);
+  if (!found) return null;
+  if (!found.group) {
     // A transcript with no displayable turn yet (e.g. a fork nobody has
     // spoken in): open it as an empty tree rather than "not found".
-    const s = files.find((f) => f.id === sessionId);
-    if (!s) return null;
-    return {
-      meta: familyMeta([s]),
-      nodes: [],
-      members: [],
-    };
+    return { meta: familyMeta([found.self]), nodes: [], members: [] };
   }
 
-  const fam = buildFamily(group);
+  const fam = buildFamily(found.group);
   applyAnnotations(fam.nodes, fam.members.map((m) => m.id));
 
   return {
-    meta: familyMeta(group, fam),
+    meta: familyMeta(found.group, fam),
     nodes: fam.nodes,
     members: fam.members,
   };
+}
+
+/**
+ * Every folder the live view of `sessionId` must watch: wherever any copy of
+ * any member of its family lives. A family can span folders.
+ */
+export function claudeWatchDirs(sessionId: SessionId): string[] {
+  const found = familyOf(sessionId);
+  if (!found) return [];
+  const group = found.group ?? [found.self];
+  return [...new Set(group.flatMap((g) => g.copies.map((c) => path.dirname(c.file))))];
 }

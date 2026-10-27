@@ -7,7 +7,14 @@ import type {
   SessionId,
   SessionMeta,
 } from "../shared/types.ts";
-import { claudeHealth, claudeResumeArgv, listSessions as listClaude, loadSession as loadClaude, locate as locateClaude } from "./transcripts.ts";
+import {
+  claudeHealth,
+  claudeResumeArgv,
+  claudeWatchDirs,
+  listSessions as listClaude,
+  loadSession as loadClaude,
+  locate as locateClaude,
+} from "./transcripts.ts";
 import { forkClaudeAt } from "./providers/claude-fork.ts";
 import { codexHealth, codexResumeArgv, forkCodexAt, listCodexSessions, loadCodexSession, locateCodex } from "./providers/codex.ts";
 import {
@@ -21,7 +28,6 @@ import {
 import { writeAnnotation } from "./meta.ts";
 import { claudeProjects, codexArchived, codexIndex, codexSessions, copilotState } from "./paths.ts";
 import type { WatchTarget } from "./watch.ts";
-import path from "node:path";
 
 /**
  * One surface over the harnesses. Everything above this file sees only
@@ -202,10 +208,11 @@ export function watchTargets(sessionId: SessionId | null): WatchTarget[] {
       { kind: "dir", path: copilotState(), poll: true },
     ];
   }
-  const loc = locateClaude(sessionId);
-  // The family's whole project directory: a tree grows through any member,
-  // or through a fork file that didn't exist when the view opened.
-  if (loc) return [{ kind: "dir", path: path.dirname(loc.file), poll: false }];
+  // Every project directory a member of the family lives in: a tree grows
+  // through any member, or through a fork file that didn't exist when the
+  // view opened (written next to its source).
+  const dirs = claudeWatchDirs(sessionId);
+  if (dirs.length) return dirs.map((d) => ({ kind: "dir", path: d, poll: false }));
   if (locateCodex(sessionId)) return codexTargets();
   if (locateCopilot(sessionId)) return [{ kind: "dir", path: copilotState(), poll: true }];
   return [];
