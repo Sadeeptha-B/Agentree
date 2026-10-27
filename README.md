@@ -86,9 +86,9 @@ from `vscode-ext/dist`, so re-run `npm run build:vscode` after each change.
    `⑂ n` is the number of branch points, and `N sessions` means a fork family.
    The provider rows above the list are the health check.
 3. **Tree:** drag to pan, wheel to zoom, and use `fit` to re-frame. Click a
-   collapsed chain (`⋯ n`) to expand it. Solid edges are turns within one
-   session; dashed edges enter a fork or a Codex prompt edit. Esc goes back to
-   the list.
+   collapsed chain (a dotted line with an `n` count, meaning n hidden turns) to
+   expand it. Solid edges are turns within one session; long-dashed edges
+   enter a fork or a Codex prompt edit. Esc goes back to the list.
 4. **Panel (right):** "Session" is the session the selected turn belongs to.
    From there:
    - **open in Claude Code / Codex** opens that session in its chat panel;
@@ -106,22 +106,43 @@ from that branch's own page.
 
 ## Desktop app (Electron)
 
+The same app in its own window, with the same list, tree, panel and forks.
+
 ```sh
-npm install
-npm run build
-npm start
+npm install        # also builds the app
+npm start          # or: npm link, then `agentree` from any terminal
 ```
 
-On some npm setups, Electron's postinstall download is blocked ("packages have
-install scripts not yet covered by allowScripts"). Run
-`npm approve-scripts electron` (or `node node_modules/electron/install.js`),
-then `npm start`. `npm run dev` starts the hot-reload setup on every OS. The
-desktop app shows copyable resume/fork commands instead of opening VS Code
-panels.
+If npm warns that "packages have install scripts not yet covered by
+allowScripts", Electron's binary wasn't downloaded. Run
+`npm approve-scripts electron` and then `node node_modules/electron/install.js`
+once. `npm run dev` starts the hot-reload setup (Windows included).
 
-`scripts/install.sh` and `bin/agentree.cjs` (the one-line installer and the
-`agentree` launcher) are **POSIX-only** and install from the upstream
-repository. On Windows, use the steps above.
+The desktop panel has the same actions as the extension, with two
+differences:
+
+- **open in Claude Code / Codex (VS Code)** hands the session to VS Code
+  through the extensions' deep links (`vscode://anthropic.claude-code/open?session=…`,
+  `vscode://openai.chatgpt/local/…`), so VS Code and the extension must be
+  installed.
+- **resume in terminal** opens a new OS terminal window in the session's
+  folder: PowerShell on Windows, Terminal.app on macOS, or the first available
+  emulator on Linux.
+
+After a fork, the desktop app shows the same buttons instead of switching to
+VS Code on its own.
+
+Windows uses the native window frame. On macOS the title bar is inset into
+the app. The launchers clear `ELECTRON_RUN_AS_NODE`, which shells started from
+inside VS Code inherit and which would otherwise make Electron run as plain
+Node.
+
+At launch the app checks whether `main` on the GitHub repo it was built from
+(its git `origin`) has moved past the running build. If it has, a banner
+offers `git pull` + `npm install` in your shell's syntax.
+
+`scripts/install.sh` (the one-line `curl | sh` installer) is POSIX-only and
+installs from the upstream repository. On Windows, use the steps above.
 
 ## Configuration
 
@@ -143,8 +164,8 @@ sends no telemetry. It never edits your transcripts:
 - a Codex fork is made by Codex itself (`codex app-server`).
 
 The only network request is the desktop app's launch-time version check
-against GitHub, which you can turn off as shown above. The VS Code extension
-makes none.
+against the GitHub repo it was built from, which you can turn off as shown
+above. The VS Code extension makes none.
 
 ## Development
 

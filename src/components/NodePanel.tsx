@@ -43,33 +43,46 @@ function toolSummary(tools: string[]): string {
 const NATIVE: Partial<Record<ProviderId, string>> = { claude: "Claude Code", codex: "Codex" };
 
 /**
- * Open / resume buttons for one session. Inside VS Code the session goes to
- * its harness's own chat panel (or an integrated terminal); the desktop app
- * offers the copyable command, spelled for the host OS's shell.
+ * "open in Claude Code / Codex" and "resume in terminal" for one session.
+ * Inside VS Code they use the harness's own chat panel and an integrated
+ * terminal. The desktop app hands the session to VS Code through the
+ * extensions' deep links and opens an OS terminal window.
  */
-function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: string }) {
-  const [status, setStatus] = useState<ActionResult | null>(null);
+function NativeButtons({ ref_, onResult }: { ref_: SessionRef; onResult: (r: ActionResult) => void }) {
   const native = NATIVE[ref_.provider];
   const run = async (fn: () => Promise<ActionResult>) => {
     try {
-      setStatus(await fn());
+      onResult(await fn());
     } catch (e) {
-      setStatus({ ok: false, error: String(e) });
+      onResult({ ok: false, error: String(e) });
     }
   };
   return (
     <>
+      {native && (
+        <button
+          className="copy"
+          title={api.host === "vscode" ? undefined : "Opens the session in VS Code's chat panel"}
+          onClick={() => void run(() => api.openNative(ref_))}
+        >
+          open in {native}
+          {api.host === "vscode" ? "" : " (VS Code)"}
+        </button>
+      )}
+      <button className="copy" onClick={() => void run(() => api.resumeInTerminal(ref_))}>
+        resume in terminal
+      </button>
+    </>
+  );
+}
+
+/** Open / resume / copy for one session. */
+function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: string }) {
+  const [status, setStatus] = useState<ActionResult | null>(null);
+  return (
+    <>
       <div className="copy-row">
-        {api.host === "vscode" && native && (
-          <button className="copy" onClick={() => void run(() => api.openNative(ref_))}>
-            open in {native}
-          </button>
-        )}
-        {api.host === "vscode" && (
-          <button className="copy" onClick={() => void run(() => api.resumeInTerminal(ref_))}>
-            resume in terminal
-          </button>
-        )}
+        <NativeButtons ref_={ref_} onResult={setStatus} />
         <Copy value={resumeCmd} label="copy resume command" />
         <Copy value={ref_.sessionId} label="copy id" />
       </div>
@@ -265,22 +278,15 @@ export function NodePanel() {
                 <div className="fork-result">
                   <p className="small">
                     {opened?.ok
-                      ? `Forked and opened in ${NATIVE[meta.provider]}.`
+                      ? "Forked and opened. It joins this tree as soon as it has a turn of its own."
                       : "Forked into a new session. It joins this tree as soon as it has a turn of its own."}
                   </p>
                   {opened && !opened.ok && <p className="error-text small">{opened.error}</p>}
                   <code className="path fork-cmd">{forkResult.command}</code>
                   <div className="copy-row">
+                    {forkResult.open && <NativeButtons ref_={forkResult.open} onResult={setOpened} />}
                     <Copy value={forkResult.command} label="⑂ copy resume command" />
                     <Copy value={forkResult.id} label="copy session id" />
-                    {api.host === "vscode" && forkResult.open && !opened?.ok && (
-                      <button
-                        className="copy"
-                        onClick={async () => setOpened(await api.resumeInTerminal(forkResult.open!))}
-                      >
-                        resume in terminal
-                      </button>
-                    )}
                   </div>
                   {forkResult.note && <p className="muted small hint">{forkResult.note}</p>}
                 </div>

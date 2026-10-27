@@ -8,6 +8,8 @@ export const CH = {
   patchNode: "sessions:patchNode",
   forkAt: "sessions:forkAt",
   providerHealth: "providers:health",
+  openNative: "sessions:openNative",
+  resumeInTerminal: "sessions:resumeInTerminal",
 
   // Watching is a subscription, so it needs a main→renderer direction too.
   watchStart: "watch:start",
