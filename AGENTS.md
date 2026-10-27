@@ -658,6 +658,9 @@ inside the node's row band: its top is 26px up at most, the row above ends
 29px up. A chain's pill ends just above a tagged chain tail's tag; the chain's
 dotted line, like an edge, may pass behind it (the tag is opaque). A user
 label on the node replaces the tag, and a ★/✕ mark moves inside the tag. A
+title that only repeats its parent's plus "(fork)" (the Claude extension's
+default) is shown as `fork <id8>` instead: it would say nothing the dashed
+edge doesn't. A
 Codex prompt edit (`edit`) gets no tag: it's the same thread. The tooltip
 names the fork in full and says "probably forked from" when the parent was
 inferred.
