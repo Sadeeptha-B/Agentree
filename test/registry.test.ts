@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SessionMeta } from "../shared/types.ts";
 
-const entry = (updatedAt: number, title: string): SessionMeta => ({
+const entry = (activeAt: number, title: string): SessionMeta => ({
   id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   provider: "claude",
   cwd: "",
   project: "",
   title,
-  updatedAt,
+  activeAt,
+  touchedAt: activeAt,
   nodeCount: 1,
   branchPoints: 0,
   resumeCommand: "",

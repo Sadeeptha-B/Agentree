@@ -146,7 +146,16 @@ export interface SessionMeta {
   cwd: string;
   project: string;
   title: string;
-  updatedAt: number;
+  /**
+   * Last conversational activity: the newest record that is part of the
+   * conversation — a message, a tool call or result, a delivered mid-turn
+   * message, a compaction — on any member. Which records count is a
+   * per-harness rule (AGENTS.md, "Welcome screen"); bookkeeping a harness
+   * writes when it merely loads a thread doesn't. The list sorts by this.
+   */
+  activeAt: number;
+  /** Newest timestamp on ANY record of any member ("last file change"). */
+  touchedAt: number;
   nodeCount: number;
   branchPoints: number;
   /**
@@ -176,7 +185,9 @@ export interface MemberInfo {
   parentEvidence?: "explicit" | "inferred";
   cwd: string;
   resumeCommand: string;
-  updatedAt: number;
+  /** See SessionMeta.activeAt / touchedAt; this member's own. */
+  activeAt: number;
+  touchedAt: number;
   archived?: boolean;
   entrypoint?: string;
 }

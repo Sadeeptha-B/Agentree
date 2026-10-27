@@ -105,7 +105,7 @@ export function listAllSessions(): SessionMeta[] {
     failures.delete(p.id);
     out.push(...guarded(p, () => p.list(), []));
   }
-  return dedupeSessions(out).sort((a, b) => b.updatedAt - a.updatedAt);
+  return dedupeSessions(out).sort((a, b) => b.activeAt - a.activeAt);
 }
 
 /**
@@ -121,7 +121,7 @@ export function dedupeSessions(list: SessionMeta[]): SessionMeta[] {
     const key = `${s.provider}:${s.id}`;
     const prev = byKey.get(key);
     if (prev) console.warn(`[agentree] ${key} was listed twice; keeping the newer entry.`);
-    if (!prev || s.updatedAt > prev.updatedAt) byKey.set(key, s);
+    if (!prev || s.activeAt > prev.activeAt) byKey.set(key, s);
   }
   return [...byKey.values()];
 }

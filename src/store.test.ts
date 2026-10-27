@@ -28,7 +28,8 @@ const member = (id: string, parentId: string | null): MemberInfo => ({
   parentId,
   cwd: "",
   resumeCommand: "",
-  updatedAt: 0,
+  activeAt: 0,
+  touchedAt: 0,
 });
 const detail = (rootId: string, nodes: TurnNode[], members: MemberInfo[]): SessionDetail => ({
   meta: {
@@ -37,7 +38,8 @@ const detail = (rootId: string, nodes: TurnNode[], members: MemberInfo[]): Sessi
     cwd: "",
     project: "",
     title: rootId,
-    updatedAt: 0,
+    activeAt: 0,
+    touchedAt: 0,
     nodeCount: nodes.length,
     branchPoints: 0,
     resumeCommand: "",
