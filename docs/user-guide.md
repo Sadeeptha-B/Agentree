@@ -154,6 +154,12 @@ ASSISTANT · depth 22
   [view conversation up to here]
 ```
 
+**"forked from" or "probably forked from"?** Codex records which thread a
+fork came from, and so does Agentree when it makes a Claude fork. The Claude
+Code panel's own "Fork conversation" records nothing: Agentree can tell the
+two chats share history, and works out which came first from when their
+files were created. The panel says "probably" when that's how it knows.
+
 ---
 
 ## 4. Everyday workflows
