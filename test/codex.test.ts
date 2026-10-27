@@ -21,6 +21,7 @@ const T6 = "01900000-0000-7000-8000-000000000006";
 const T7 = "01900000-0000-7000-8000-000000000007";
 const T8 = "01900000-0000-7000-8000-000000000008";
 const T9 = "01900000-0000-7000-8000-00000000000a";
+const T11 = "01900000-0000-7000-8000-00000000000b";
 const G = "01900000-0000-7000-8000-000000000009";
 const L = "01800000-0000-7000-8000-000000000001";
 const turn = (n: number) => `01900000-0000-7000-8000-0000000a${String(n).padStart(4, "0")}`;
@@ -48,7 +49,7 @@ describe("Codex paginated rollouts", () => {
   it("lists families, hides guardian threads, names from session_index", () => {
     const list = listCodexSessions();
     const ids = list.map((s) => s.id).sort();
-    expect(ids).toEqual([L, T1, T4, T5, T8].sort());
+    expect(ids).toEqual([L, T1, T4, T5, T8, T11].sort());
     expect(ids).not.toContain(G);
     expect(ids).not.toContain(T7); // unparseable, so nothing to list
     const fam = list.find((s) => s.id === T1)!;
@@ -62,9 +63,10 @@ describe("Codex paginated rollouts", () => {
     const answerA = find(d, "X is Y.");
     // After turn A: the original B, the edited B', and the fork into T3.
     expect(kidsOf(d, answerA)).toEqual(["Explain differently", "Explain more", "Fork question"]);
-    expect(find(d, "Explain differently").crossSession).toBe(true);
-    expect(find(d, "Fork question").crossSession).toBe(true);
-    expect(find(d, "Explain more").crossSession).toBeUndefined();
+    // A prompt edit is a branch of the SAME thread; a fork is a new thread.
+    expect(find(d, "Explain differently").branchKind).toBe("edit");
+    expect(find(d, "Fork question").branchKind).toBe("fork");
+    expect(find(d, "Explain more").branchKind).toBeUndefined();
     expect(find(d, "Fork question").sourceSessionId).toBe(T3);
 
     const leaf = find(d, "Grandchild answer.");
@@ -84,8 +86,8 @@ describe("Codex paginated rollouts", () => {
     const copied = find(d, "Copied answer.");
     expect(copied.sourceSessionId).toBe(T5);
     expect(kidsOf(d, copied)).toEqual(["Copy goes elsewhere", "Parent goes on"]);
-    expect(find(d, "Copy goes elsewhere")).toMatchObject({ crossSession: true, sourceSessionId: T6 });
-    expect(find(d, "Parent goes on").crossSession).toBeUndefined();
+    expect(find(d, "Copy goes elsewhere")).toMatchObject({ branchKind: "fork", sourceSessionId: T6 });
+    expect(find(d, "Parent goes on").branchKind).toBeUndefined();
     expect(d.members.find((m) => m.id === T6)!.parentId).toBe(T5);
   });
 
@@ -174,6 +176,40 @@ describe("Codex fork anchors", () => {
     const res = await forkCodexAt(T8, x2.id);
     expect(forkThread).toHaveBeenLastCalledWith({ threadId: T9, lastTurnId: turn(12) });
     expect(res.ok && res.note).toMatch(/through a fork/);
+  });
+
+  it("never folds two turns into one node (an aborted prompt and its replacement)", async () => {
+    const d = loadCodexSession(T11)!;
+    const cancelled = find(d, "Cancelled prompt");
+    const replacement = find(d, "Replacement prompt");
+    expect(replacement.parentId).toBe(cancelled.id);
+    expect(cancelled.turnId).not.toBe(replacement.turnId);
+    // The aborted turn ends at its prompt, so that is a whole turn.
+    expect(cancelled.forkBlocked).toBeUndefined();
+    expect(replacement.forkBlocked).toMatch(/whole turns/);
+    forkThread.mockResolvedValueOnce({ ok: true, threadId: "new-thread-4", cwd: "" });
+    await forkCodexAt(T11, find(d, "Replacement answer.").id);
+    expect(forkThread).toHaveBeenLastCalledWith({ threadId: T11, lastTurnId: turn(17) });
+  });
+
+  it("every enabled node in every family ends its turn: a fork never stops before shown text", () => {
+    let checked = 0;
+    for (const s of listCodexSessions()) {
+      const d = loadCodexSession(s.id)!;
+      const map = toNodeMap(d.nodes);
+      for (const n of d.nodes) {
+        if (n.forkBlocked) continue;
+        checked++;
+        // Nothing below it belongs to the same turn...
+        const sameTurnBelow = d.nodes.filter(
+          (m) => m !== n && m.turnId === n.turnId && pathToRoot(m.id, map).includes(n),
+        );
+        expect(sameTurnBelow, n.text).toEqual([]);
+        // ...and the cut it forks at is its own turn's.
+        expect(n.lastRawId).toBe(n.turnId);
+      }
+    }
+    expect(checked).toBeGreaterThan(5);
   });
 
   it("refuses legacy rollouts, which have no turn ids", async () => {

@@ -41,47 +41,97 @@ export function readMeta(sessionId: SessionId): Record<NodeId, NodeMeta> {
   }
 }
 
-export function writeMeta(sessionId: SessionId, nodeId: NodeId, patch: NodeMeta): void {
-  const file = fileFor(sessionId);
-  if (!file) return;
-  fs.mkdirSync(DIR(), { recursive: true });
-
-  const all = readMeta(sessionId);
-  const next: NodeMeta = { ...all[nodeId], ...patch };
-
-  // Drop keys that were cleared so the file doesn't accrete nulls.
+/** Merge a patch into an entry; a cleared field (undefined, null, "") is removed. */
+function merged(prev: NodeMeta | undefined, patch: NodeMeta): NodeMeta | undefined {
+  const next: NodeMeta = { ...prev, ...patch };
   for (const k of Object.keys(next) as (keyof NodeMeta)[]) {
     if (next[k] === undefined || next[k] === null || next[k] === "") delete next[k];
   }
+  return Object.keys(next).length ? next : undefined;
+}
 
-  if (Object.keys(next).length === 0) delete all[nodeId];
-  else all[nodeId] = next;
-
+/**
+ * Apply several entry patches to ONE sidecar in one atomic replacement —
+ * never a rewrite per entry. Atomic per file only: two Agentree processes
+ * (the desktop app and the extension) writing the same sidecar at the same
+ * moment can still lose one side's change. Last writer wins.
+ */
+function updateFile(sessionId: SessionId, patches: Map<string, NodeMeta>): void {
+  const file = fileFor(sessionId);
+  if (!file || patches.size === 0) return;
+  const all = readMeta(sessionId);
+  for (const [key, patch] of patches) {
+    const next = merged(all[key], patch);
+    if (next) all[key] = next;
+    else delete all[key];
+  }
+  fs.mkdirSync(DIR(), { recursive: true });
   // Write-then-rename so a crash can't leave a half-written JSON file.
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(all, null, 1), "utf8");
   fs.renameSync(tmp, file);
 }
 
-/** Every id one drawn node answers to: its own, merged-in turns, and copies in other sessions. */
-const idsOf = (n: TurnNode): NodeId[] => [n.id, ...(n.absorbedIds ?? []), ...(n.aliasIds ?? [])];
+export function writeMeta(sessionId: SessionId, key: string, patch: NodeMeta): void {
+  updateFile(sessionId, new Map([[key, patch]]));
+}
+
+/**
+ * The keys a node's annotation is stored under (v2): its semantic identities,
+ * the same in every session holding a copy, so they outlive any one file.
+ * Codex node ids already are such identities.
+ */
+const stableKeys = (n: TurnNode): string[] => (n.stableIds?.length ? n.stableIds : [n.id]);
+/** The keys entries were stored under before (v1): raw per-file ids. */
+const rawKeys = (n: TurnNode): NodeId[] => [
+  n.id,
+  ...(n.absorbedIds ?? []),
+  ...(n.occurrences ?? []).map((o) => o.id),
+];
 
 /**
  * Overlay a family's annotations onto its nodes.
  *
  * A family's identity isn't stable: it gains members when a fork is found,
- * its root changes when the original is deleted, and a turn can be drawn
- * under a different session's id than the one it was annotated under. So
- * every member's sidecar is read, and a node matches on any of its ids.
+ * its root changes when the original is deleted, and one turn has a
+ * different uuid in each file holding it. So every member's sidecar is read,
+ * and a node matches on its semantic identity (`stableIds`).
+ *
+ * Sidecars written before that identity existed (v1) key entries by raw
+ * uuid, usually in the family root's file only. Those are still found through
+ * the node's own, merged-in and copied ids — and the first time one is, it is
+ * carried forward under the node's stable ids into EVERY member's sidecar, so
+ * it survives the root being deleted later. That carry-forward is the whole
+ * migration: idempotent (a node with a v2 entry never looks for v1), with no
+ * version flag, since the two key spaces can't collide. A v1 entry whose
+ * source transcript was deleted BEFORE this ran can't be mapped to anything
+ * on disk, and is not recovered.
  */
 export function applyAnnotations(nodes: TurnNode[], memberIds: SessionId[]): void {
-  const metas = memberIds.map(readMeta);
+  const ids = [...new Set(memberIds)];
+  const metas = ids.map(readMeta);
+  const carry = new Map<string, NodeMeta>();
   for (const n of nodes) {
+    let hit: NodeMeta | undefined;
     for (const meta of metas) {
-      const hit = idsOf(n).map((id) => meta[id]).find(Boolean);
-      if (hit) {
-        Object.assign(n, hit);
-        break;
+      hit = stableKeys(n).map((k) => meta[k]).find(Boolean);
+      if (hit) break;
+    }
+    if (!hit) {
+      for (const meta of metas) {
+        hit = rawKeys(n).map((k) => meta[k]).find(Boolean);
+        if (hit) break;
+      }
+      if (hit) for (const k of stableKeys(n)) carry.set(k, hit);
+    }
+    if (hit) Object.assign(n, hit);
+  }
+  if (carry.size) {
+    for (const sid of ids) {
+      try {
+        updateFile(sid, carry);
+      } catch {
+        /* read-only home: the v1 entries still resolve; retried next load */
       }
     }
   }
@@ -89,12 +139,15 @@ export function applyAnnotations(nodes: TurnNode[], memberIds: SessionId[]): voi
 
 /**
  * Write an annotation so it survives what `applyAnnotations` has to cope
- * with: into EVERY member's sidecar, under every id the turn has. When the
- * session it was made in is later deleted, a surviving copy still carries it,
- * and clearing a label clears it everywhere an older entry could resurface.
+ * with: into EVERY member's sidecar, under the node's stable ids — one atomic
+ * write per sidecar. Any v1 entry for the node in that sidecar gets the same
+ * patch, so clearing a label can't let an older entry resurface.
  */
 export function writeAnnotation(node: TurnNode, memberIds: SessionId[], patch: NodeMeta): void {
   for (const sid of new Set(memberIds)) {
-    for (const id of idsOf(node)) writeMeta(sid, id, patch);
+    const existing = readMeta(sid);
+    const patches = new Map<string, NodeMeta>(stableKeys(node).map((k) => [k, patch]));
+    for (const k of rawKeys(node)) if (existing[k]) patches.set(k, patch);
+    updateFile(sid, patches);
   }
 }
