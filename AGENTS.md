@@ -640,7 +640,20 @@ The layout is a tidy tree by **subtree extent**, not fixed columns. Two
 subtrees never overlap, so two nodes in the same row never can either, which
 is what lets a labelled node be a variable-width box. Node width comes from
 `nodeWidth()`, deliberately generous because SVG can't measure text before
-rendering. Fuzzed over 300 random trees: zero overlaps.
+rendering. `src/tree-layout.test.ts` fuzzes 300 random trees (labels, fork
+tags, marks, open and closed chains) and checks that no two drawn elements
+(`elementBounds`) overlap.
+
+**Fork tags.** A fork's first turn (`branchKind: "fork"`) carries a small tag
+above it with its session's title (`forkTags`), so the tree says *which* chat
+a dashed edge starts. The tag's width is part of `nodeWidth()`, and it sits
+inside the node's row band: its top is 26px up at most, the row above ends
+29px up. A chain's pill ends just above a tagged chain tail's tag; the chain's
+dotted line, like an edge, may pass behind it (the tag is opaque). A user
+label on the node replaces the tag, and a ★/✕ mark moves inside the tag. A
+Codex prompt edit (`edit`) gets no tag: it's the same thread. The tooltip
+names the fork in full and says "probably forked from" when the parent was
+inferred.
 
 Structural nodes are **roots, branch points, leaves, annotated turns, and a
 fork's first turn** (any `branchKind`). Nothing else is structural.
