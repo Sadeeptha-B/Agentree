@@ -61,7 +61,12 @@ describe("Codex paginated rollouts", () => {
   it("dates a thread by its last item, not by records written when it was merely loaded", () => {
     const s = listCodexSessions().find((x) => x.id === T12)!;
     expect(new Date(s.activeAt).toISOString()).toBe("2026-10-01T10:50:00.000Z");
-    expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T16:40:00.000Z");
+    expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T18:20:00.000Z");
+    // Its quiet fork (no item of its own, reloaded at 18:20) doesn't float
+    // the family up; the fork itself dates from its creation.
+    expect(s.members).toBe(2);
+    const fork = loadCodexSession(T12)!.members.find((m) => m.id !== T12)!;
+    expect(new Date(fork.activeAt).toISOString()).toBe("2026-10-01T11:10:00.000Z");
   });
 
   it("gives each thread its own tip: what its current history ends in", () => {

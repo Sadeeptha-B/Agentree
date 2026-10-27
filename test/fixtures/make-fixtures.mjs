@@ -627,6 +627,14 @@ const T12 = "01900000-0000-7000-8000-00000000000c";
     late({ type: "token_usage_record", payload: { turn_id: turn(19), usage: { input_tokens: 9, output_tokens: 1 } } }),
     late({ type: "event_msg", payload: { type: "task_complete", turn_id: turn(19) } }),
   ]);
+  // A fork of it nobody has spoken in: created at 11:10, then reloaded much
+  // later (a settings record, nothing else). It must not float the family up.
+  const T14 = "01900000-0000-7000-8000-00000000000e";
+  write(`${CODEX}/sessions/2026/10/08/rollout-2026-10-08T11-10-00-${T14}.jsonl`, [
+    { ...meta(T14, { forked_from_id: T12, history_base: { thread_id: T12, end_ordinal_exclusive: o12 } }), timestamp: ts(70) },
+    { timestamp: ts(70), ordinal: o12 + 100, type: "event_msg", payload: { type: "thread_settings_applied" } },
+    { timestamp: ts(500), ordinal: o12 + 101, type: "event_msg", payload: { type: "thread_settings_applied" } },
+  ]);
 }
 
 // A thread the user archived, with no live fork: hidden from the list unless
