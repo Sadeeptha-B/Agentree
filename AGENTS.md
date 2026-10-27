@@ -77,6 +77,10 @@ expected ticks; before, none).
 - Watch targets are resolved in the worker (finding a session's files can mean
   a scan) and watched on the host (`watchLater`).
 - A worker that dies fails the calls in flight and is restarted on the next one.
+  Calls belong to the worker **generation** they were sent to: a dying worker
+  emits `error` and then `exit`, and a retry made on the first event already
+  lives on the replacement, so each worker fails only its own pending calls.
+  `dispose` is final.
 
 ### VS Code extension (the primary product)
 
@@ -121,6 +125,29 @@ SAME sources by `build-vscode.mjs` (`npm run build:vscode`):
 Package with `npm run package` inside `vscode-ext/`. F5 from the repo root
 launches an extension-development host. `npm run typecheck` covers the
 extension too (`tsc -p vscode-ext`).
+
+## One node, several identities
+
+A drawn `TurnNode` stands for three different things at once, and the fields
+keep them apart, because each answers a different question:
+
+| Layer | Field | Answers |
+|---|---|---|
+| **message** (semantic) | `stableIds` | which message is this, in every copy? Claude `m:<message.id>` / `u:<promptId>|<digest>`, Codex `<turnId>:<itemId>`; text-only evidence (no prompt id, Copilot, legacy Codex) is qualified by its parent's identity. Keys annotations, carries a selection across a re-rooted reload |
+| **occurrence** (physical) | `sourceSessionId`, `occurrences` | which sessions hold it, under which id? The drawn one, plus every other member's copy |
+| **vendor turn** | `turnId` | which unit of work can a fork cut after? (Codex turn; Claude records are each an anchor) |
+| **display group** | `absorbedIds`, `lastRawId`, `forkBlocked` | what the same-role merge folded together, and the ONE anchor a fork after it uses |
+| **edge** | `branchKind` | how the branch into it was made: `fork` (a new session) or `edit` (a Codex prompt edit, same thread) |
+
+The rule that ties them: **display grouping never has authority over a fork
+cut.** The merge never folds across vendor turns, and a merged node's anchor
+and verdict are its LAST part's — so an enabled "fork after this turn"
+always includes every message the node shows and nothing after it. (The
+first version fell back to an earlier anchorable part and silently forked
+before a shown mid-turn message or second prompt; two such nodes existed in
+the owner's Codex history.) Physical file locators are per session today
+(`MemberInfo`); the roadmap's A1 (one session id in two project folders)
+moves them onto occurrences.
 
 ## Harnesses, one tree model
 
@@ -237,7 +264,10 @@ built, not on click:
 - **Only a turn's last node is an anchor.** Every other node of the turn (its
   prompt, commentary before a steering message, the steering message itself)
   carries `forkBlocked` explaining that a fork there would include the rest
-  of the turn.
+  of the turn. Nodes carry `turnId`, and the display merge never folds two
+  turns together (an aborted prompt and its replacement stay two nodes), so
+  this holds for every drawn node — a test checks it over every fixture
+  family.
 - **Through a thread whose current history holds the turn.** A thread's
   current history is walked from its newest page down its bases — across
   threads, since a fork continues into its parent's pages — narrowing the cut
@@ -303,25 +333,33 @@ families as the first-id rule did (no false merges; ~7,000 ids in all).
 Explicit lineage (`forkedFrom` on SDK/Agentree forks, the lineage sidecar)
 also links families.
 
-Within a family, the parent is decided in three steps, none of which can
-contradict the one before:
+Shared message ids prove two files share history; they say nothing about
+**direction**, and the extension's own forks record none. Within a family the
+parent is decided in three steps, none of which can contradict the one
+before:
 
 1. **Explicit lineage**, validated: an edge that would close a cycle is
    dropped.
 2. **An order** with every explicit ancestor before its descendants; inside
-   that, by the count of `(fork)` suffixes in the title, then file creation
-   time. Both are weak evidence (a rename drops the suffix, a restored
-   directory resets creation times), so they only order what step 1 left
-   free.
+   that, **chronologically by file creation** — a fork's file is created
+   after its source's, and renaming can't change that. Only among files
+   created within a second of each other (a copied or restored directory,
+   `SAME_BATCH_MS`) does the count of `(fork)` title suffixes decide.
+   (Title-first ordering let a renamed grandchild become its own parent's
+   parent even with intact creation times.)
 3. **Overlap.** A member without explicit lineage takes the earlier member
    whose tree holds the most of its history: `overlap()` in `stitch.ts`
    maps the member onto the candidate with the stitcher's own rule, over
    **every branch of both**, not just the newest chain. A parent that rewound
    after being forked from still overlaps its child fully.
 
-Every edge points backwards in that order, so parentage is a forest. If the
-order itself is wrong (renamed titles AND reset creation times) the tree still
-draws correctly; only which side gets the dashed edge flips.
+Every edge points backwards in that order, so parentage is a forest. Each
+member's link carries its evidence (`MemberInfo.parentEvidence`): `explicit`
+or `inferred`, and the panel says "probably forked from" for the latter. A
+wrong inference is not cosmetic: it decides which member owns the turns
+between the two fork points (`sourceSessionId`, so what "open" and "fork"
+act on) and where the dashed edge goes. It needs a batch-created directory
+AND a renamed title; it can't be ruled out, which is why it's labelled.
 
 ### Stitching (`stitch.ts`)
 
@@ -330,17 +368,20 @@ when both carry the same **match key** and hang off the same tree node (or
 are both roots). Matching can only extend down a path that matched so far, so
 the first unmatched node is the divergence point. Everything below it is the
 fork's own suffix, re-parented onto the last shared turn and marked
-`crossSession` (drawn dashed). Rewinds inside either file survive, and a
+`branchKind: "fork"` (drawn dashed). Rewinds inside either file survive, and a
 parent that grew after the fork just keeps its extra turns.
 
-- Keys: Claude uses `m:<message.id>` for replies and `u:<promptId>|<text gist>`
-  for prompts — never the timestamp, which a fork re-stamps on its last
-  record (older prompts have no `promptId`; under an already-matched parent
-  the text alone is enough). Legacy Codex and Copilot use role + text, which
-  is safe there because the prefix is a byte copy.
-- A copy that merges into an existing node is kept as an **alias**
-  (`aliasIds`): it is the id annotations made while that member stood alone
-  are keyed by.
+- Keys: Claude uses `m:<message.id>` for replies and
+  `u:<promptId>|<digest of the whole text>` for prompts. Never the
+  timestamp, which a fork re-stamps on its last record; never an opening
+  gist, which merged two prompts sharing a long preamble and hung one's
+  answer under the other. Without a `promptId` (older transcripts) two
+  prompts merge only if they are the same text under the same matched
+  parent — then they ARE indistinguishable, and the branch shows at their
+  replies. Legacy Codex and Copilot use role + whole-text digest, safe there
+  because the prefix is a byte copy.
+- A copy that merges into an existing node is recorded as an **occurrence**
+  (`{sessionId, id}`), not dropped.
 - Stitching runs on **unmerged** per-message nodes. The same-role merge runs
   after it, because a merge boundary can differ between a parent (which
   branches mid-run) and its fork (which doesn't).
@@ -361,10 +402,17 @@ summary; a `queued_command` attachment's `source_uuid` is remapped; a
 `summary` for the anchor is carried over. It writes with `wx`, so nothing
 is overwritten.
 
-The parser resolves a boundary's stale `logicalParentUuid` (one that isn't in
-the file) to the record written just before it: copies are written in chain
-order. Without that, a fork of a compacted session parses as two roots and
-its whole history is drawn twice.
+Parser and writer share ONE ancestry rule, `resolveLineage()`: a boundary's
+stale `logicalParentUuid` (one that isn't in the file) resolves to the
+record written just before it, because copies are written in chain order.
+Without that, a fork of a compacted session parses as two roots and its
+history is drawn twice; and when only the parser had it, a fork OF such a
+fork walked the raw field, stopped at the stale reference, and dropped the
+whole pre-compact history. One deliberate difference from the extension:
+Agentree's copy repoints the boundary's `logicalParentUuid` at the copy of
+the pre-compact tip, so its own forks are self-contained. A test forks every
+forkable node of every fixture family and checks that the fork alone draws
+exactly the selected path, and that an unchanged fork adds no node.
 File-history snapshots aren't copied: they're rebuilt from deltas Agentree
 doesn't model, and a stale one would make "rewind code" restore the wrong
 files. The fork is opened in the Claude panel.
@@ -464,7 +512,10 @@ cost branch structure.
 A linear run of consecutive same-role nodes becomes one node: an agent loop
 (assistant → assistant → assistant), or a slash command's several user records.
 It only merges where the parent has exactly one child, never across sessions,
-and never into a fork's first turn. Usage is **summed** here, because each part
+never across vendor turns (`turnId`), and never into a fork's first turn. The
+merged node's fork anchor and `forkBlocked` are its **last** part's, so a run
+ending in a mid-turn attachment is unforkable as a whole ("fork the turn
+after it"). Usage is **summed** here, because each part
 is a distinct API call. That's the opposite of the per-block merge, where every
 record repeats one message's usage. Absorbed ids are retained so sidecar
 annotations still resolve.
@@ -561,13 +612,13 @@ is what lets a labelled node be a variable-width box. Node width comes from
 rendering. Fuzzed over 300 random trees: zero overlaps.
 
 Structural nodes are **roots, branch points, leaves, annotated turns, and a
-fork's first turn** (`crossSession`). Nothing else is structural.
+fork's first turn** (any `branchKind`). Nothing else is structural.
 
 **Selection is styling, never geometry.** `isStructural()` ignores the
 selection, so clicking never re-lays out the tree. Auto-fit runs once per
 session (via a ref), so after the first frame the viewport belongs to the user.
 
-Edges into a `crossSession` node are **long-dashed** (`.edge.cross`), and the
+Edges into a node with a `branchKind` are **long-dashed** (`.edge.cross`), and the
 legend explains them only when the tree has one. Collapsed chains are
 **dotted** (round caps), so "turns hidden here" and "a new session starts here"
 can't be mistaken for each other. They looked alike when both were short
@@ -583,7 +634,16 @@ The tree follows the transcripts on disk.
   root.
 - The watch is on the *directory*, not the inode. A watch on a file goes deaf
   the moment the file is replaced.
-- Watch targets are resolved by the backend worker and watched on the host.
+- Watch targets are resolved by the backend worker and watched on the host
+  (`watchLater`). A failed resolution (worker restarting) is retried with
+  back-off, and once the watch is live it fires one change to reconcile
+  anything written between the read and the watch.
+- The renderer drops results for a view that's gone: every open/close bumps a
+  view generation, and a reload that resolves after a close is discarded.
+- A family can lose its root (its transcript deleted) while a fork survives.
+  The reload then asks for the selected turn's session and every other
+  member it knew, adopts whichever now roots the family, and carries the
+  selection over by `stableIds`. Closing a tree refreshes the list.
 - Codex and Copilot roots (`sessions/` and `archived_sessions/`) are also
   **stat-polled** every second, and so is Codex's `session_index.jsonl`
   (renames). Codex appends were verified invisible to
@@ -624,21 +684,31 @@ mechanisms, both born of a real incident (Electron at 100 GB RSS):
 ## Annotations
 
 Labels, dead-end marks and stars live in `~/.agentree/meta/<sessionId>.json`,
-keyed by node id, and never in the transcripts. A family's identity isn't
-stable — it gains members when a fork is found, its root changes when the
-original is deleted, and a copied turn is drawn under one session's uuid while
-other members hold it under theirs — so:
+never in the transcripts. A family's identity isn't stable — it gains members
+when a fork is found, its root changes when the original is deleted, and one
+turn has a different uuid in every file holding it — so annotations are keyed
+by the turn's **semantic identity** (`stableIds`), not by a uuid:
 
 - **writing** (`registry.annotate` → `writeAnnotation`) loads the family and
-  writes the patch into **every member's** file, under **every id** the turn
-  has (its own, merged-in `absorbedIds`, and the copies' `aliasIds`);
+  writes the patch into **every member's** file under the node's stable ids:
+  one atomic replacement per sidecar, however many ids;
 - **reading** (`applyAnnotations`) checks every member's file for any of
-  those ids.
+  them.
 
-So an annotation survives a fork being found later and the session it was
-made in being deleted (both tested). Annotations made before this scheme sit
-only in the family root's file under one id; they survive re-rooting through
-the aliases, but not the deletion of that root.
+**Migration (v1 → v2).** Sidecars written before stable ids key entries by
+raw uuid, usually in the root's file only. Reading still finds those through
+the node's own, merged-in and copied ids, and the first time one is found it
+is carried forward under the stable ids into every member's file. That is the
+whole migration: lazy, idempotent (a node with a v2 entry never looks for
+v1), no version flag needed because the key spaces can't collide. Writes also
+patch any v1 entry they find, so a cleared label can't resurface. A v1 entry
+whose source transcript was deleted before Agentree ever loaded the family
+with this version has nothing on disk to map to, and is not recovered.
+
+Sidecar writes are atomic per file, not across processes: the desktop app and
+the extension writing the same sidecar at the same moment can lose one side's
+change. A cleared field travels as `null` (the VS Code bridge drops
+`undefined`).
 
 ## Windows
 
@@ -701,6 +771,19 @@ dangling parent, one root per path), not session counts.
   (failed), the IDE wrapper, steering, legacy stitching, and fork anchors
   (whole turns only, refusal of cut-away turns, routing through a fork that
   still holds the turn), with app-server mocked.
+- **Pipeline invariants:** every enabled Claude fork in every fixture family
+  is made and checked (the fork alone draws exactly the selected path; the
+  family gains no node or root); every enabled Codex node ends its own turn.
+  Plus a merged node ending in a mid-turn attachment, two prompts sharing a
+  long preamble, a renamed grandchild with intact creation order, a fork of a
+  compacted fork, an aborted Codex prompt, and a pre-upgrade annotation that
+  outlives its root.
+- **Backend client:** a real worker (`test/fake-worker.cjs`) that crashes;
+  the retry on its replacement must survive the old worker's late `exit`;
+  disposal is final.
+- **Renderer store** (`src/store.test.ts`, in `src/` for the DOM config):
+  a reload resolving after close, a family whose root was deleted, and
+  cleared fields sent as `null`.
 - **App-server client:** the real client against `test/fake-codex` — the
   request shape, a JSON-RPC error, a server exiting mid-request, and on
   Windows a `.cmd` override with a space in its path. The synthetic rollouts
@@ -734,6 +817,12 @@ the parser.
 - VS Code Copilot Chat isn't read yet (next phase; read-only, no fork API).
 - Copilot CLI sessions from before `events.jsonl` aren't listed, and Copilot
   records no per-turn tokens.
+- **One Claude session id can exist in two project folders** (a moved
+  repo). Both copies are listed and only one opens; roadmap A1. Don't fix it
+  by keeping the newest or largest copy without proving the other is a prefix
+  of it: two copies can share a prefix and then diverge.
+- Inferred fork direction (above) can be wrong for a batch-copied directory
+  with renamed titles; it's labelled, not prevented.
 - **Open / resume act on a session, not a branch.** Several branches can live
   in one session (Claude rewinds, Codex prompt edits); opening it continues
   its current path. Continuing an older branch means forking at its leaf.
