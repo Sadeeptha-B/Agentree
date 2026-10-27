@@ -160,6 +160,7 @@ export function NodePanel() {
           Session
           {member.parentId && <span className="fork-badge">fork</span>}
           {member.archived && <span className="fork-badge">archived</span>}
+          {member.entrypoint && <span className="muted small"> · {member.entrypoint}</span>}
         </h3>
         <div className="member-title">{member.title}</div>
         {parentTitle && <p className="muted small hint">forked from “{parentTitle}”</p>}
