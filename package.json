@@ -1,7 +1,7 @@
 {
   "name": "agentree",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Draws your coding-agent conversations — Claude Code and OpenAI Codex (CLI or VS Code), GitHub Copilot CLI — as trees, forks included",
   "license": "MIT",
   "author": "Serban Cercelescu",
