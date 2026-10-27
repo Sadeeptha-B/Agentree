@@ -365,6 +365,55 @@ write(`${CL}/c--work-old/${MV}.jsonl`, [
   { type: "file-history-snapshot", messageId: "mv-a3", snapshot: {}, cwd: "C:\\work\\old" },
 ]);
 
+// One session id in several project folders (a moved repo).
+//
+// c--work-moved-a-old holds the copy left behind; c--work-moved-b-new the
+// same transcript (same uuids) grown on after the move, in the new cwd.
+// c--work-moved-c-third holds a native fork of it, taken in a third folder.
+// The old folder sorts FIRST, so a lookup that takes the first hit opens
+// the stale prefix.
+const MO = "50000000-0000-4000-8000-000000000005";
+const MF = "50000000-0000-4000-8000-000000000006";
+const movedPrefix = [
+  at(user(MO, "mo-u1", null, 0, "mo-1", "Rename the package"), "C:\\work\\atlas"),
+  at(asst(MO, "mo-a1", "mo-u1", 1, "msg_mo1", [text("Renamed to articulation.")]), "C:\\work\\atlas"),
+  { type: "custom-title", sessionId: MO, customTitle: "Package rename" },
+];
+write(`${CL}/c--work-moved-a-old/${MO}.jsonl`, movedPrefix);
+write(`${CL}/c--work-moved-b-new/${MO}.jsonl`, [
+  ...movedPrefix,
+  at(user(MO, "mo-u2", "mo-a1", 10, "mo-2", "Now update the imports"), "C:\\work\\articulation"),
+  at(asst(MO, "mo-a2", "mo-u2", 11, "msg_mo2", [text("Imports updated.")]), "C:\\work\\articulation"),
+]);
+write(`${CL}/c--work-moved-c-third/${MF}.jsonl`, [
+  at(user(MF, "mf-u1", null, 0, "mo-1", "Rename the package"), "C:\\work\\third"),
+  at(asst(MF, "mf-a1", "mf-u1", 1, "msg_mo1", [text("Renamed to articulation.")]), "C:\\work\\third"),
+  at(user(MF, "mf-u2", "mf-a1", 10, "mo-2", "Now update the imports"), "C:\\work\\third"),
+  at(asst(MF, "mf-a2", "mf-u2", 20, "msg_mo2", [text("Imports updated.")]), "C:\\work\\third"),
+  title(MF, "Package rename (fork)"),
+  at(user(MF, "mf-u3", "mf-a2", 21, "mf-3", "Publish it"), "C:\\work\\third"),
+  at(asst(MF, "mf-a3", "mf-u3", 22, "msg_mf3", [text("Published.")]), "C:\\work\\third"),
+]);
+
+// c--work-split-a / -b: two copies of ONE session that share a prefix and
+// then each grew their own continuation. Neither contains the other, so both
+// are real history.
+const SP = "50000000-0000-4000-8000-000000000007";
+const splitPrefix = [
+  user(SP, "sp-u1", null, 0, "sp-1", "Plan the migration"),
+  asst(SP, "sp-a1", "sp-u1", 1, "msg_sp1", [text("Two phases.")]),
+];
+write(`${CL}/c--work-split-a/${SP}.jsonl`, [
+  ...splitPrefix,
+  user(SP, "sa-u2", "sp-a1", 2, "sa-2", "Phase one first"),
+  asst(SP, "sa-a2", "sa-u2", 3, "msg_sa2", [text("Phase one done.")]),
+]);
+write(`${CL}/c--work-split-b/${SP}.jsonl`, [
+  ...splitPrefix,
+  user(SP, "sb-u2", "sp-a1", 5, "sb-2", "Phase two first"),
+  asst(SP, "sb-a2", "sb-u2", 6, "msg_sb2", [text("Phase two done.")]),
+]);
+
 // ------------------------------------------------------------------ Codex
 //
 // CODEX_HOME holding one family of paginated pages:

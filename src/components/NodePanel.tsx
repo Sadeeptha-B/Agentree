@@ -193,6 +193,11 @@ export function NodePanel() {
           <span className="muted small">id</span>
           <code className="id">{member.id}</code>
         </div>
+        {(member.files?.length ?? 0) > 1 && (
+          <p className="muted small hint" title={member.files!.join("\n")}>
+            Stored in {member.files!.length} project folders (the repo moved); read as one session.
+          </p>
+        )}
         <SessionActions ref_={ref_} resumeCmd={member.resumeCommand} />
         <p className="muted small hint">
           Opens or resumes this session where the agent itself would: at the end of its current

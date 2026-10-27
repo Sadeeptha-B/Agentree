@@ -190,6 +190,11 @@ export interface MemberInfo {
   touchedAt: number;
   archived?: boolean;
   entrypoint?: string;
+  /**
+   * Where the session is stored: one transcript, or — a moved repo keeps its
+   * session id — one copy per project folder, read as one session (Claude).
+   */
+  files?: string[];
 }
 
 export interface SessionDetail {

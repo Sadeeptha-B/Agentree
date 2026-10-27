@@ -145,9 +145,10 @@ and verdict are its LAST part's — so an enabled "fork after this turn"
 always includes every message the node shows and nothing after it. (The
 first version fell back to an earlier anchorable part and silently forked
 before a shown mid-turn message or second prompt; two such nodes existed in
-the owner's Codex history.) Physical file locators are per session today
-(`MemberInfo`); the roadmap's A1 (one session id in two project folders)
-moves them onto occurrences.
+the owner's Codex history.) Physical file locators live on the session
+(`MemberInfo.files`), not on occurrences: a session stored in several files
+is read as one record set, so every anchor resolves whichever file holds
+it (see "One session, several folders").
 
 ## Harnesses, one tree model
 
@@ -331,7 +332,31 @@ on, which need not include the file's earliest reply (a regenerated first
 answer). On the target machine the any-id rule gives exactly the same
 families as the first-id rule did (no false merges; ~7,000 ids in all).
 Explicit lineage (`forkedFrom` on SDK/Agentree forks, the lineage sidecar)
-also links families.
+also links families. Grouping runs once over **every project folder**:
+message ids are global, and a fork taken after a repo moved lives in another
+folder than its source.
+
+### One session, several folders
+
+A moved or renamed repo leaves the session's transcript in the old project
+folder and continues it, under the **same session id**, in the new one.
+Verified on the target machine: an 11.8 MB copy in the old folder whose 838
+uuids are all in the 23.5 MB copy in the new one (a record-for-record
+prefix). Session ids are therefore indexed across folders before grouping,
+and one id's copies are resolved by uuid containment (`resolveSource`):
+
+- a copy whose uuids are all in another copy is a **shadow**: never parsed,
+  counted as hidden in health, but kept in the cache signatures and watched,
+  so a shadow that grows is re-resolved;
+- copies neither of which contains the other **diverged** (same prefix, a
+  different suffix each). They are read as the union of their records, the
+  oldest-activity copy first, then each other copy from its first new uuid.
+  Uuids are shared, so the union is exact and both continuations draw.
+
+Never pick a copy by recency or size: that silently drops a real branch.
+The fork writer reads the same union and writes next to the newest copy that
+holds the anchor. Project attribution (the rail, the filter) uses the
+session's last cwd, not the folder a copy happens to sit in.
 
 Shared message ids prove two files share history; they say nothing about
 **direction**, and the extension's own forks record none. Within a family the
@@ -586,7 +611,8 @@ point: before, a wholly malformed file counted as an intentionally empty one
 and raised nothing. The welcome screen shows one row per present provider. It
 warns about any failed file, warns harder when fewer than half of
 parsed + failed succeed, and lists unknown types behind a disclosure. Zero
-failed on the target machine's 358 files. A provider that throws doesn't take the others down
+failed on the target machine's 358 files. A Claude session stored in several
+project folders raises a warning naming how many, and how many diverged. A provider that throws doesn't take the others down
 (`registry.ts` guards each one), and its row says it crashed. This row would
 have flagged the 2026-09 Codex format change, which listed 0 sessions, on day
 one.
@@ -633,8 +659,9 @@ dashes.
 
 The tree follows the transcripts on disk.
 
-- A session watch covers the **directory holding its family**: the Claude
-  project dir, or the Codex/Copilot roots. A tree can grow through any
+- A session watch covers the **directories holding its family**: every
+  Claude project dir a member (or a copy of one) lives in, or the
+  Codex/Copilot roots. A tree can grow through any
   member, or through a brand-new fork file. The welcome screen watches every
   root.
 - The watch is on the *directory*, not the inode. A watch on a file goes deaf
@@ -838,10 +865,9 @@ the parser.
 - VS Code Copilot Chat isn't read yet (next phase; read-only, no fork API).
 - Copilot CLI sessions from before `events.jsonl` aren't listed, and Copilot
   records no per-turn tokens.
-- **One Claude session id can exist in two project folders** (a moved
-  repo). Both copies are listed and only one opens; roadmap A1. Don't fix it
-  by keeping the newest or largest copy without proving the other is a prefix
-  of it: two copies can share a prefix and then diverge.
+- A Claude fork written into a project folder no member uses yet (made from
+  a CLI in another repo) joins an open tree on the next change in a member's
+  folder, or when the tree is reopened; the list picks it up at once.
 - Inferred fork direction (above) can be wrong for a batch-copied directory
   with renamed titles; it's labelled, not prevented.
 - **Open / resume act on a session, not a branch.** Several branches can live
