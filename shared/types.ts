@@ -150,7 +150,7 @@ export interface SessionMeta {
    * Last conversational activity: the newest record that is part of the
    * conversation — a message, a tool call or result, a delivered mid-turn
    * message, a compaction — on any member. Which records count is a
-   * per-harness rule (AGENTS.md, "Welcome screen"); bookkeeping a harness
+   * per-harness rule (docs/design.md, "Welcome screen"); bookkeeping a harness
    * writes when it merely loads a thread doesn't. The list sorts by this.
    */
   activeAt: number;

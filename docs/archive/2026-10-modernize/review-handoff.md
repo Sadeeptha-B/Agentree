@@ -1,5 +1,7 @@
 # Review handoff: Agentree modernization (branch `modernize`, 2026-10-27)
 
+> **Historical handoff, 2026-10.** Retained with its assumptions, implementation corrections and evidence labels. It does not override the [current design notes](../../design.md) or [working instructions](../../../AGENTS.md). The [round 3 review](review-findings-round-3.md) remains open; references below to `AGENTS.md` as the engineering manual describe its role at the time.
+
 > **Status:** reviewed. The findings and their resolution are in
 > [review-findings.md](review-findings.md); several [assumption]s below are
 > now settled there (e.g. fork-by-`path` does not work on codex-cli 0.164,
@@ -20,7 +22,7 @@ It is meant to be read **before** the diff. Read the documents in this order:
 2. [`docs/modernization-handoff.md`](modernization-handoff.md): the brief the work
    started from. Its status note at the top lists the places where
    implementation contradicted it.
-3. [`AGENTS.md`](../AGENTS.md): the design notes, rewritten during this work.
+3. [`AGENTS.md`](../../../AGENTS.md): the design notes, rewritten during this work.
    Treat it as a set of **claims to check**, not as ground truth. It was written
    by the same agent whose work you are reviewing.
 4. The diff: `git diff 58cf671..modernize` (`58cf671` is the pre-work baseline).

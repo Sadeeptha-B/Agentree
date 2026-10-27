@@ -1,5 +1,7 @@
 # Full modernization review, round 2 — 2026-10-27
 
+> **Historical review, `58cf671..0bb38ae`.** Its resolution remains below; the later [round 3 review](review-findings-round-3.md) is still open. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md).
+
 > **Resolution (2026-10-27, same branch).** All eight findings had merit;
 > each was reproduced (on the pre-fix code, by the regression test written
 > for it) before being fixed. Findings 1, 4, 7 and 8 shared the cause the
@@ -28,7 +30,7 @@
 > parents or extra roots; 5 parent links labelled inferred. The roadmap's A1
 > (one session id in two folders), the cross-process sidecar race and the
 > inferred-direction residual are recorded in AGENTS.md "Known gaps" and in
-> [roadmap.md](roadmap.md), which now carries the review's A1/B3/B4/C1
+> [roadmap.md](roadmap-completed.md), which now carries the review's A1/B3/B4/C1
 > cautions.
 
 The branch is substantially better, and the provider/worker/host architecture is suitable for Agentree. I would still hold the merge for the three P1 findings below: enabled fork actions can silently omit displayed instructions, repeated forks of compacted Claude sessions lose ancestry, and prompt matching can hide a distinct branch prompt. The first issue affects two nodes in the owner's existing Codex history.
@@ -52,7 +54,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 1. **[P1] Same-role merging re-enables fork actions at an endpoint before text shown in the selected node. Confirmed in current data and isolated fixtures.**
 
-   Locations: [transcripts.ts:380](../electron/transcripts.ts#L380), [codex.ts:775](../electron/providers/codex.ts#L775), [codex.ts:804](../electron/providers/codex.ts#L804).
+   Locations: [transcripts.ts:380](../../../electron/transcripts.ts#L380), [codex.ts:775](../../../electron/providers/codex.ts#L775), [codex.ts:804](../../../electron/providers/codex.ts#L804).
 
    The provider sets restrictions on semantic messages, but `mergeSameRoleRuns()` subsequently selects the last part *without* `forkBlocked` and clears the merged node's restriction. It can select an earlier part while retaining later blocked parts in the displayed text. The resulting enabled action does not represent a fork after everything the user selected.
 
@@ -66,7 +68,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 2. **[P1] A fork of a compacted Claude fork drops its precompact ancestry and duplicates shared history. Confirmed with an isolated writer reproduction.**
 
-   Locations: [claude-fork.ts:89](../electron/providers/claude-fork.ts#L89), compare the parser's repair at [transcripts.ts:684](../electron/transcripts.ts#L684).
+   Locations: [claude-fork.ts:89](../../../electron/providers/claude-fork.ts#L89), compare the parser's repair at [transcripts.ts:684](../../../electron/transcripts.ts#L684).
 
    The first-generation compaction fix works. It copies the logical chain and deliberately leaves `logicalParentUuid` pointing to the source file's old UUID. The parser repairs that stale reference by file order. The fork writer does not use that repair: it looks up the old UUID only in the copied file's `byUuid` map and stops when it is absent.
 
@@ -78,7 +80,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 3. **[P1] Claude's timestamp-free prompt key merges different long prompts with the same opening. Confirmed with an isolated fixture.**
 
-   Locations: [transcripts.ts:414](../electron/transcripts.ts#L414), [transcripts.ts:873](../electron/transcripts.ts#L873), [stitch.ts](../electron/providers/stitch.ts).
+   Locations: [transcripts.ts:414](../../../electron/transcripts.ts#L414), [transcripts.ts:873](../../../electron/transcripts.ts#L873), [stitch.ts](../../../electron/providers/stitch.ts).
 
    Removing the endpoint timestamp fixes the previous restamping problem, but the fallback still compares only an 80-character text gist. The same-parent rule does not distinguish two alternative prompts under the same parent when their openings match.
 
@@ -88,7 +90,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 4. **[P2] A title-only rename can still reverse native Claude parentage, even with correct file birthtimes. Confirmed with an isolated fixture.**
 
-   Location: [transcripts.ts:1147](../electron/transcripts.ts#L1147).
+   Location: [transcripts.ts:1147](../../../electron/transcripts.ts#L1147).
 
    The explicit-lineage cycle fix is correct, but native extension forks have no explicit lineage. Let P be the root, F its native fork titled `Root (fork)`, and G a native fork of F renamed `Renamed grandchild`. Write the files in the correct P → F → G creation order. Title depth sorts G before F. G is attached to P, then overlap makes F a child of G. Shared F-only turns are attributed to G, and the dashed session boundary moves to the wrong place.
 
@@ -98,7 +100,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 5. **[P2] An old worker's exit event rejects requests already sent to its replacement. Confirmed with a worker-event reproduction.**
 
-   Location: [backend-client.ts:35](../electron/backend-client.ts#L35).
+   Location: [backend-client.ts:35](../../../electron/backend-client.ts#L35).
 
    Both worker handlers call the global `failAll()` even when their emitting worker is no longer current. A crashed worker emits `error` and then `exit`. After `error`, the client clears `worker`, rejects the first request, and allows the caller to retry on a new worker. The old worker's subsequent `exit` rejects the replacement worker's request too. Its eventual successful reply has no pending recipient.
 
@@ -108,7 +110,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 6. **[P2] A pending reload can reopen a conversation after the user closes it. Confirmed with a store reproduction.**
 
-   Locations: [store.ts:157](../src/store.ts#L157), [store.ts:175](../src/store.ts#L175), [store.ts:194](../src/store.ts#L194).
+   Locations: [store.ts:157](../../../src/store.ts#L157), [store.ts:175](../../../src/store.ts#L175), [store.ts:194](../../../src/store.ts#L194).
 
    `reloadSession()` captures the current session, awaits the backend, then unconditionally installs the result. `close()` clears the state but does not invalidate that pending result. Start a reload, close the view, then resolve the reload: the closed conversation reappears.
 
@@ -116,7 +118,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 7. **[P2] Deleting a family root leaves the open view permanently bound to a vanished session ID. Confirmed from provider behavior and a store reproduction.**
 
-   Location: [store.ts:178](../src/store.ts#L178).
+   Location: [store.ts:178](../../../src/store.ts#L178).
 
    The providers can now load a surviving member and reconstruct a re-rooted family. The open view never asks them to: every reload uses `prev.meta.id`, and a null result leaves the old tree untouched. After P is removed while F survives, every later disk notification asks for P again. Changes through F never appear in that open tree.
 
@@ -126,7 +128,7 @@ The tree-invariant checks establish structural validity, not semantic correctnes
 
 8. **[P2] Existing annotation files are not migrated into the new deletion-survival scheme. Confirmed with the committed Claude fixtures.**
 
-   Locations: [meta.ts:77](../electron/meta.ts#L77), [meta.ts:96](../electron/meta.ts#L96).
+   Locations: [meta.ts:77](../../../electron/meta.ts#L77), [meta.ts:96](../../../electron/meta.ts#L96).
 
    Alias-aware reads and replicated **new** writes solve the new-annotation case. Older annotations remain only under the former root's raw UUIDs. Merely loading the upgraded family does not persist aliases or replicate them. Delete the root later and those annotations disappear from the surviving copy.
 
