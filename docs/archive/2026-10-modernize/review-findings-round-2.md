@@ -1,6 +1,6 @@
 # Full modernization review, round 2 — 2026-10-27
 
-> **Historical review, `58cf671..0bb38ae`.** Its resolution remains below; the later [round 3 review](review-findings-round-3.md) is still open. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md).
+> **Historical review, `58cf671..0bb38ae`.** Its resolution remains below; the later [round 3 review](review-findings-round-3.md) and its resolution follow. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md).
 
 > **Resolution (2026-10-27, same branch).** All eight findings had merit;
 > each was reproduced (on the pre-fix code, by the regression test written
