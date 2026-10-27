@@ -38,7 +38,8 @@ function HealthRows({ health }: { health: ProviderHealth[] }) {
             <span className={`provider-chip ${h.provider}`}>{h.provider}</span>
             <span>
               {h.filesSeen} files · {h.sessionsParsed} parsed
-              {h.skipped ? ` · ${h.skipped} hidden` : ""} · {h.listed} listed · {h.backend}
+              {h.skipped ? ` · ${h.skipped} hidden` : ""}
+              {h.failed ? ` · ${h.failed} failed` : ""} · {h.listed} listed · {h.backend}
             </span>
             {unknown.length > 0 && (
               <details>

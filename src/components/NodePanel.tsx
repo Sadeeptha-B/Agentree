@@ -183,8 +183,9 @@ export function NodePanel() {
         </div>
         <SessionActions ref_={ref_} resumeCmd={member.resumeCommand} />
         <p className="muted small hint">
-          Resumes this session at its own latest turn. To branch from an earlier turn, select it
-          and use “⑂ fork after this turn”.
+          Opens or resumes this session where the agent itself would: at the end of its current
+          path, which may not be the branch you selected. To continue from the selected turn, or
+          from an older branch, use “⑂ fork after this turn”.
         </p>
       </section>
 
@@ -245,33 +246,22 @@ export function NodePanel() {
               </button>
             </div>
 
-            {node.injected && (
-              <p className="muted small hint">
-                Sent mid-turn; Claude Code wrote no record for it, so it can't be forked at.
-              </p>
-            )}
-            {node.midTurn && !node.injected && (
-              <p className="muted small hint">
-                {meta.provider === "codex"
-                  ? "Sent while Codex was working; it belongs to the same turn, so a fork here includes that whole turn."
-                  : "Sent mid-turn. Forks of any later turn keep this message; it just can't anchor a fork itself."}
-              </p>
-            )}
-
             <div className="panel-actions">
               <button
                 className="primary"
                 title={
-                  node.injected
-                    ? "No transcript record to fork from"
-                    : "Create a new session holding the conversation up to this turn"
+                  node.forkBlocked ??
+                  "Create a new session holding the conversation up to and including this turn"
                 }
-                disabled={forking || node.injected}
+                disabled={forking || !!node.forkBlocked}
                 onClick={() => void doFork()}
               >
                 {forking ? "forking…" : "⑂ fork after this turn"}
               </button>
             </div>
+            {/* The provider decided this when it built the tree, from what the
+                harness can actually resume — say why rather than fail on click. */}
+            {node.forkBlocked && <p className="muted small hint">{node.forkBlocked}</p>}
 
             {forkResult &&
               (forkResult.ok ? (
@@ -333,7 +323,7 @@ export function NodePanel() {
             <div className="prefix-toggle">
               <button
                 className="ghost"
-                title="Read the whole conversation from the root down to this turn"
+                title="Read the displayed turns from the root down to this one. The agent's own context also held tool results, files and instructions not shown here."
                 onClick={() => setPrefixFor(showPrefix ? null : node.id)}
               >
                 {showPrefix ? "show this turn only" : "view conversation up to here"}

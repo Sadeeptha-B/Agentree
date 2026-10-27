@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { agentreeHome } from "./paths.ts";
-import type { NodeId, NodeMeta, SessionId } from "../shared/types.ts";
+import type { NodeId, NodeMeta, SessionId, TurnNode } from "../shared/types.ts";
 
 /**
  * Agentree's sidecar metadata: labels, dead-end marks, notes.
@@ -61,4 +61,40 @@ export function writeMeta(sessionId: SessionId, nodeId: NodeId, patch: NodeMeta)
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(all, null, 1), "utf8");
   fs.renameSync(tmp, file);
+}
+
+/** Every id one drawn node answers to: its own, merged-in turns, and copies in other sessions. */
+const idsOf = (n: TurnNode): NodeId[] => [n.id, ...(n.absorbedIds ?? []), ...(n.aliasIds ?? [])];
+
+/**
+ * Overlay a family's annotations onto its nodes.
+ *
+ * A family's identity isn't stable: it gains members when a fork is found,
+ * its root changes when the original is deleted, and a turn can be drawn
+ * under a different session's id than the one it was annotated under. So
+ * every member's sidecar is read, and a node matches on any of its ids.
+ */
+export function applyAnnotations(nodes: TurnNode[], memberIds: SessionId[]): void {
+  const metas = memberIds.map(readMeta);
+  for (const n of nodes) {
+    for (const meta of metas) {
+      const hit = idsOf(n).map((id) => meta[id]).find(Boolean);
+      if (hit) {
+        Object.assign(n, hit);
+        break;
+      }
+    }
+  }
+}
+
+/**
+ * Write an annotation so it survives what `applyAnnotations` has to cope
+ * with: into EVERY member's sidecar, under every id the turn has. When the
+ * session it was made in is later deleted, a surviving copy still carries it,
+ * and clearing a label clears it everywhere an older entry could resurface.
+ */
+export function writeAnnotation(node: TurnNode, memberIds: SessionId[], patch: NodeMeta): void {
+  for (const sid of new Set(memberIds)) {
+    for (const id of idsOf(node)) writeMeta(sid, id, patch);
+  }
 }

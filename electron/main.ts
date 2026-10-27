@@ -1,12 +1,12 @@
 import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, shell } from "electron";
 import path from "node:path";
 
-import { allHealth, listAllSessions, loadAnySession, forkAnyAt, providerById } from "./registry.ts";
+import { startBackend } from "./backend-client.ts";
 import { nativeLink } from "./native.ts";
+import { RESUME_ARGV } from "./shell.ts";
 import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
-import { writeMeta } from "./meta.ts";
-import { watchTranscripts, type Watcher } from "./watch.ts";
+import { watchLater, type Watcher } from "./watch.ts";
 import { CH } from "./ipc.ts";
 import type { ActionResult, NodeMeta, SessionRef } from "../shared/types.ts";
 
@@ -21,6 +21,12 @@ const ROOT = () => app.getAppPath();
 const DEV_URL = process.env.AGENTVIEW_DEV_URL;
 
 const iconPath = (name: string) => path.join(ROOT(), "assets", name);
+
+/**
+ * Transcript scanning, parsing and forking run in a worker thread: a cold
+ * scan takes seconds, and on this thread it would freeze the window.
+ */
+const backend = startBackend(path.join(ROOT(), "dist-electron", "worker.cjs"));
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -80,19 +86,19 @@ function createWindow() {
 
 // ------------------------------------------------------------------ handlers
 
-ipcMain.handle(CH.listSessions, () => listAllSessions());
+ipcMain.handle(CH.listSessions, () => backend.listSessions());
 
-ipcMain.handle(CH.getSession, (_e, id: string) => loadAnySession(id));
+ipcMain.handle(CH.getSession, (_e, id: string) => backend.getSession(id));
 
-ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: NodeMeta) => {
-  writeMeta(sessionId, nodeId, patch);
-});
-
-ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
-  forkAnyAt(sessionId, nodeId),
+ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: NodeMeta) =>
+  backend.patchNode(sessionId, nodeId, patch),
 );
 
-ipcMain.handle(CH.providerHealth, () => allHealth());
+ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
+  backend.forkAt(sessionId, nodeId),
+);
+
+ipcMain.handle(CH.providerHealth, () => backend.providerHealth());
 
 // Hand a session to VS Code: the OS routes the vscode:// deep link to the
 // harness's extension, exactly as a click on the link would.
@@ -110,10 +116,10 @@ ipcMain.handle(CH.openNative, async (_e, ref: SessionRef): Promise<ActionResult>
   }
 });
 
-ipcMain.handle(CH.resumeInTerminal, (_e, ref: SessionRef): ActionResult => {
-  const p = providerById(ref.provider);
-  if (!p || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
-  return openTerminal(p.resumeArgv(ref.sessionId), ref.cwd);
+ipcMain.handle(CH.resumeInTerminal, async (_e, ref: SessionRef): Promise<ActionResult> => {
+  const argv = RESUME_ARGV[ref.provider];
+  if (!argv || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
+  return openTerminal(argv(ref.sessionId), ref.cwd);
 });
 
 // ---- live transcript watching ----
@@ -130,7 +136,7 @@ ipcMain.handle(CH.watchStart, (e, token: string, sessionId: string | null) => {
   const sender = e.sender;
   watchers.set(
     key,
-    watchTranscripts(sessionId, () => {
+    watchLater(backend.watchTargets(sessionId), () => {
       if (!sender.isDestroyed()) sender.send(CH.changed, token);
     }),
   );
@@ -169,3 +175,5 @@ void app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+app.on("will-quit", () => backend.dispose());

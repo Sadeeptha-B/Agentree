@@ -5,7 +5,7 @@ import type { NodeId, TurnNode } from "../../shared/types.ts";
  * Stitch a fork family — several sessions that share prefixes — into one tree.
  *
  * Every harness forks by COPYING: Claude's VS Code "fork conversation" writes a
- * new transcript holding the active chain up to the chosen message; Copilot
+ * new transcript holding one chain up to the chosen message; Copilot
  * forks are copy-truncated session dirs; pre-paginated Codex rollouts carried a
  * verbatim prefix. So the tree the user branched exists, just spread across
  * files, encoded as shared prefixes.
@@ -63,9 +63,42 @@ function topo(nodes: TurnNode[]): TurnNode[] {
   return out;
 }
 
+/**
+ * How many of `child`'s nodes map onto `parent`'s tree under the same rule
+ * stitching uses (same key, under a node that already mapped, roots onto
+ * roots). It compares the WHOLE of both DAGs — every branch, not just the
+ * newest chain — so a parent that rewound after it was forked from, or a
+ * child that rewound into its copied prefix, still measures the history the
+ * copy actually preserved. Callers use it to pick a member's parent: a fork
+ * of a fork overlaps its direct parent more than any other member.
+ */
+export function overlap(child: FamilyMember, parent: FamilyMember): number {
+  const keyOfC = child.keyOf ?? textKey;
+  const keyOfP = parent.keyOf ?? textKey;
+  const view = new Map<string, Map<string, NodeId>>();
+  for (const n of parent.nodes) {
+    const slot = n.parentId ?? ROOT_KEY;
+    if (!view.has(slot)) view.set(slot, new Map());
+    const k = keyOfP(n);
+    if (!view.get(slot)!.has(k)) view.get(slot)!.set(k, n.id);
+  }
+  const alias = new Map<NodeId, NodeId>();
+  let count = 0;
+  for (const n of topo(child.nodes)) {
+    const slot = n.parentId === null ? ROOT_KEY : alias.get(n.parentId);
+    if (slot === undefined) continue;
+    const hit = view.get(slot)?.get(keyOfC(n));
+    if (hit === undefined) continue;
+    alias.set(n.id, hit);
+    count++;
+  }
+  return count;
+}
+
 export function stitchFamily(members: FamilyMember[]): TurnNode[] {
   const byId = new Map(members.map((m) => [m.sessionId, m]));
   const out: TurnNode[] = [];
+  const outById = new Map<NodeId, TurnNode>();
   const taken = new Set<NodeId>();
   /**
    * Per processed member: tree parent id → (match key → tree node id), i.e.
@@ -93,20 +126,30 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
       }
       if (treeId !== undefined) {
         matched.add(n.id);
+        // The copy is dropped from the drawing but not from identity: its id
+        // is what annotations made while this member stood alone are keyed by.
+        const kept = outById.get(treeId);
+        if (kept && n.id !== treeId) {
+          kept.aliasIds = [...(kept.aliasIds ?? []), n.id, ...(n.aliasIds ?? [])];
+        }
       } else {
         // COPIES, never the originals: callers keep parsed node arrays in
         // mtime-keyed caches, and the downstream same-role merge rewrites
         // parentIds in place.
         treeId = taken.has(n.id) ? `${m.sessionId}:${n.id}` : n.id;
         taken.add(treeId);
-        out.push({
+        const copy: TurnNode = {
           ...n,
           id: treeId,
           parentId: treeParent,
           sourceSessionId: n.sourceSessionId ?? m.sessionId,
+          // A collision-renamed node still answers to its own id.
+          aliasIds: treeId !== n.id ? [n.id, ...(n.aliasIds ?? [])] : n.aliasIds,
           // First own turn under a shared prefix: the edge into it is the fork.
           crossSession: (parentView !== null && parentMatched && treeParent !== null) || n.crossSession || undefined,
-        });
+        };
+        out.push(copy);
+        outById.set(treeId, copy);
       }
       alias.set(n.id, treeId);
       const slot = treeParent ?? ROOT_KEY;
@@ -137,7 +180,8 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
       progressed = true;
     }
   }
-  // A lineage cycle (corrupt sidecar) — draw the rest standalone, never drop it.
+  // A lineage cycle — callers validate parentage so this shouldn't happen,
+  // but if it does, draw the rest standalone, never drop it.
   for (const m of pending) add(m, null);
 
   return out;

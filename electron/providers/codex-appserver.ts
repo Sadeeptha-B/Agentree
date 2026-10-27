@@ -12,8 +12,10 @@ import path from "node:path";
  * process per call — forks are rare and a resident server would be one more
  * thing to supervise.
  *
- * Protocol facts (codex-cli 0.162, verified): `initialize` → result, then the
- * `initialized` notification, then requests. stderr carries log lines,
+ * Protocol facts (verified on codex-cli 0.162 and 0.164 against real rollouts
+ * in a scratch CODEX_HOME): `initialize` → result, then the `initialized`
+ * notification, then requests. No experimental capability is needed for what
+ * Agentree sends. stderr carries log lines,
  * including an ERROR for unrecognised config keys that is harmless, so stderr
  * is never treated as failure. Exact types for the installed version:
  * `codex app-server generate-ts --out <dir>`.
@@ -25,7 +27,9 @@ import path from "node:path";
  * panel actually runs; otherwise PATH. `AGENTREE_CODEX_BIN` overrides both.
  */
 export function findCodex(): { cmd: string; shell: boolean } | null {
-  if (process.env.AGENTREE_CODEX_BIN) return { cmd: process.env.AGENTREE_CODEX_BIN, shell: false };
+  const override = process.env.AGENTREE_CODEX_BIN;
+  // A .cmd/.bat (npm's Windows shim) only starts through cmd.exe.
+  if (override) return { cmd: override, shell: /\.(cmd|bat)$/i.test(override) };
   const exe = process.platform === "win32" ? "codex.exe" : "codex";
   const plat = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
 
@@ -70,7 +74,11 @@ export function findCodex(): { cmd: string; shell: boolean } | null {
 class RpcClient {
   private buf = "";
   private seq = 0;
-  private waiting = new Map<number, (m: { result?: unknown; error?: { message?: string } }) => void>();
+  private waiting = new Map<
+    number,
+    { settle: (m: { result?: unknown; error?: { message?: string } }) => void; fail: (e: Error) => void }
+  >();
+  private dead: Error | null = null;
 
   constructor(private proc: ChildProcess) {
     proc.stdout!.setEncoding("utf8");
@@ -87,32 +95,51 @@ class RpcClient {
           continue;
         }
         // Responses carry our id; server→client notifications are ignored.
-        if (typeof m.id === "number" && !m.method) {
-          this.waiting.get(m.id)?.(m);
-          this.waiting.delete(m.id);
-        }
+        if (typeof m.id === "number" && !m.method) this.waiting.get(m.id)?.settle(m);
       }
     });
+    // A server that dies mid-request must fail what's outstanding at once —
+    // not leave each caller to its timeout. EPIPE on stdin is the same event
+    // seen from the writing side.
+    proc.stdin!.on("error", (e) => this.failAll(new Error(`codex app-server: ${e.message}`)));
+    proc.once("error", (e) => this.failAll(new Error(`Couldn't start codex app-server: ${e.message}`)));
+    proc.once("exit", (code) => this.failAll(new Error(`codex app-server exited (${code}) before answering`)));
+  }
+
+  private failAll(e: Error): void {
+    this.dead ??= e;
+    for (const w of [...this.waiting.values()]) w.fail(e);
   }
 
   request<T>(method: string, params: unknown, timeoutMs = 60_000): Promise<T> {
+    if (this.dead) return Promise.reject(this.dead);
     const id = ++this.seq;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const done = () => {
+        clearTimeout(timer);
         this.waiting.delete(id);
+      };
+      const timer = setTimeout(() => {
+        done();
         reject(new Error(`codex app-server: ${method} timed out`));
       }, timeoutMs);
-      this.waiting.set(id, (m) => {
-        clearTimeout(timer);
-        if (m.error) reject(new Error(m.error.message ?? `${method} failed`));
-        else resolve(m.result as T);
+      this.waiting.set(id, {
+        settle: (m) => {
+          done();
+          if (m.error) reject(new Error(m.error.message ?? `${method} failed`));
+          else resolve(m.result as T);
+        },
+        fail: (e) => {
+          done();
+          reject(e);
+        },
       });
       this.proc.stdin!.write(JSON.stringify({ id, method, params }) + "\n");
     });
   }
 
   notify(method: string): void {
-    this.proc.stdin!.write(JSON.stringify({ method }) + "\n");
+    if (!this.dead) this.proc.stdin!.write(JSON.stringify({ method }) + "\n");
   }
 }
 
@@ -124,28 +151,18 @@ async function withAppServer<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> {
       "Couldn't find a codex binary (looked in the Codex VS Code extension and on PATH). Set AGENTREE_CODEX_BIN to its path.",
     );
   }
-  const proc = spawn(bin.cmd, ["app-server"], {
+  // Through cmd.exe the command line is re-parsed, so a path with spaces
+  // (C:\Program Files\…) must arrive quoted; the argument is a constant.
+  const proc = spawn(bin.shell ? `"${bin.cmd}"` : bin.cmd, ["app-server"], {
     stdio: ["pipe", "pipe", "ignore"],
     shell: bin.shell,
     windowsHide: true,
   });
-  const exited = new Promise<never>((_, reject) => {
-    proc.once("error", (e) => reject(new Error(`Couldn't start codex app-server: ${e.message}`)));
-    proc.once("exit", (code) => reject(new Error(`codex app-server exited (${code}) before answering`)));
-  });
-  // The kill in `finally` fires "exit" after a successful call; that late
-  // rejection has no listener left and must not surface as unhandled.
-  exited.catch(() => {});
   const client = new RpcClient(proc);
   try {
-    return await Promise.race([
-      (async () => {
-        await client.request("initialize", { clientInfo: { name: "agentree", version: "0.2.0" } });
-        client.notify("initialized");
-        return fn(client);
-      })(),
-      exited,
-    ]);
+    await client.request("initialize", { clientInfo: { name: "agentree", version: "0.2.0" } });
+    client.notify("initialized");
+    return await fn(client);
   } finally {
     proc.kill();
   }
@@ -154,20 +171,17 @@ async function withAppServer<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> {
 export type ForkThreadResult = { ok: true; threadId: string; cwd: string } | { ok: false; error: string };
 
 /**
- * `thread/fork` through `lastTurnId` (inclusive). `path`, when given, forks
- * from that rollout page instead of the thread's current history.
+ * `thread/fork` through `lastTurnId` (inclusive), on a thread whose current
+ * history holds that turn. Deliberately no `path`: on codex-cli 0.164 it needs
+ * the experimentalApi capability and then refuses any page that isn't the
+ * thread's head ("stale path") — it can't reach an abandoned edit branch.
  */
-export async function forkThread(opts: {
-  threadId: string;
-  lastTurnId: string;
-  path?: string;
-}): Promise<ForkThreadResult> {
+export async function forkThread(opts: { threadId: string; lastTurnId: string }): Promise<ForkThreadResult> {
   try {
     const res = await withAppServer((c) =>
       c.request<{ thread?: { id?: string; cwd?: string }; cwd?: string }>("thread/fork", {
         threadId: opts.threadId,
         lastTurnId: opts.lastTurnId,
-        ...(opts.path ? { path: opts.path } : {}),
         excludeTurns: true,
       }),
     );
