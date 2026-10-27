@@ -15,6 +15,7 @@ import type {
 import { HealthScan, minorVersion } from "../health.ts";
 import { applyAnnotations } from "../meta.ts";
 import { codexArchived, codexIndex, codexSessions } from "../paths.ts";
+import { readSettings } from "../settings.ts";
 import { RESUME_ARGV, resumeCommand } from "../shell.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
@@ -616,11 +617,15 @@ function scanPages(): Scan {
 
 /** `session_index.jsonl`: `{id, thread_name}` lines, last one per id wins. */
 let indexCache: { stamp: string; names: Map<string, string> } | null = null;
-/** File identity of the index — part of every family-meta cache key, since a rename lives there. */
+/**
+ * Identity of the index — part of every family-meta cache key, since a rename
+ * lives there. Its path is part of it: a moved CODEX_HOME must not reuse the
+ * old home's names.
+ */
 function indexStamp(): string {
   try {
     const st = fs.statSync(codexIndex());
-    return `${st.mtimeMs}:${st.size}`;
+    return `${codexIndex()}:${st.mtimeMs}:${st.size}`;
   } catch {
     return "none";
   }
@@ -883,6 +888,7 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       members: members.length,
       forks: forkSummaries(members, fam.rootThread),
       entrypoint: "codex",
+      archived: members.every((m) => m.archived) || undefined,
     },
     members,
   };
@@ -901,14 +907,16 @@ export const codexHealth = (): ProviderHealth =>
 const metas = new Map<string, SessionMeta>();
 
 export function listCodexSessions(): SessionMeta[] {
+  const showArchived = readSettings().showArchivedCodex;
   const scan = scanPages();
   const out: SessionMeta[] = [];
   const live = new Set<string>();
   const index = indexStamp();
   for (const fam of families(scan)) {
     // Only conversations the user can still see: an all-archived family stays
-    // reachable as the base of live forks, but gets no entry of its own.
-    if (fam.pages.every((p) => p.archived)) continue;
+    // reachable as the base of live forks, but gets no entry of its own —
+    // unless the settings ask for archived conversations too.
+    if (fam.pages.every((p) => p.archived) && !showArchived) continue;
     if (!fam.pages.some((p) => p.turns.length)) continue;
     const sig =
       fam.pages

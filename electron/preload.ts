@@ -1,7 +1,7 @@
 /// <reference lib="dom" />
 import { contextBridge, ipcRenderer } from "electron";
 import { CH } from "./ipc.ts";
-import type { AgentreeApi, NodeMeta } from "../shared/types.ts";
+import type { AgentreeApi, NodeMeta, SettingsPatch } from "../shared/types.ts";
 
 /**
  * The entire renderer→main surface. Nothing else crosses: no `require`, no
@@ -14,6 +14,8 @@ const api: AgentreeApi = {
     ipcRenderer.invoke(CH.patchNode, sessionId, nodeId, patch),
   forkAt: (sessionId, nodeId) => ipcRenderer.invoke(CH.forkAt, sessionId, nodeId),
   providerHealth: () => ipcRenderer.invoke(CH.providerHealth),
+  getSettings: () => ipcRenderer.invoke(CH.getSettings),
+  setSettings: (patch: SettingsPatch) => ipcRenderer.invoke(CH.setSettings, patch),
 
   host: "electron",
   openNative: (ref) => ipcRenderer.invoke(CH.openNative, ref),

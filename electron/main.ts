@@ -8,7 +8,7 @@ import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { watchLater, type Watcher } from "./watch.ts";
 import { CH } from "./ipc.ts";
-import type { ActionResult, NodeMeta, SessionRef } from "../shared/types.ts";
+import type { ActionResult, NodeMeta, SessionRef, SettingsPatch } from "../shared/types.ts";
 
 /**
  * App root. Using Electron's own resolver rather than __dirname/import.meta
@@ -73,12 +73,16 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  // Update check, once the renderer is listening. Fire-and-forget: the check
-  // is silent on every failure, so nothing here can delay or break startup.
+  // Update check, once the renderer is listening, unless the settings turned
+  // it off. Fire-and-forget: the check is silent on every failure, so nothing
+  // here can delay or break startup.
   win.webContents.once("did-finish-load", () => {
-    void checkForUpdate(ROOT()).then((info) => {
-      if (info && !win.isDestroyed()) win.webContents.send(CH.updateAvailable, info);
-    });
+    void backend
+      .getSettings()
+      .then((s) => (s.settings.updateCheck ? checkForUpdate(ROOT()) : null), () => checkForUpdate(ROOT()))
+      .then((info) => {
+        if (info && !win.isDestroyed()) win.webContents.send(CH.updateAvailable, info);
+      });
   });
 
   return win;
@@ -99,6 +103,9 @@ ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
 );
 
 ipcMain.handle(CH.providerHealth, () => backend.providerHealth());
+
+ipcMain.handle(CH.getSettings, () => backend.getSettings());
+ipcMain.handle(CH.setSettings, (_e, patch: SettingsPatch) => backend.setSettings(patch));
 
 // Hand a session to VS Code: the OS routes the vscode:// deep link to the
 // harness's extension, exactly as a click on the link would.
