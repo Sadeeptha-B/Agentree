@@ -1,5 +1,7 @@
 # Modernization review — 2026-10-27
 
+> **Historical review, `58cf671..91185af`.** Its resolution and subsequent corrections remain below. The [round 3 review](review-findings-round-3.md) is still open. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md); historical references below retain their original context.
+
 > **Resolution (2026-10-27, same branch).** Every finding below was checked
 > against the code and, where possible, the owner's data or the real vendor
 > tool, and all had merit. Each was fixed at the stage that caused it rather
@@ -59,7 +61,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 1. **[P1] Copied-prefix Codex forks using the newer event stream are never joined. Confirmed on existing data and with a synthetic reproduction.**
 
-   Location: [codex.ts:602](../electron/providers/codex.ts#L602), also the legacy-only stitching path at [codex.ts:647](../electron/providers/codex.ts#L647).
+   Location: [codex.ts:602](../../../electron/providers/codex.ts#L602), also the legacy-only stitching path at [codex.ts:647](../../../electron/providers/codex.ts#L647).
 
    `families()` follows `forked_from_id` only when `p.legacy` is true. But the data contains a transitional format: `history_mode: "paginated"`, `item_completed` items, and a copied prefix plus `forked_from_id`, with **no `history_base`**. These files are classified as non-legacy, so their explicit parentage is ignored.
 
@@ -71,7 +73,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 2. **[P1] Claude parent inference loses branches when an intermediate parent later rewinds. Confirmed with a synthetic reproduction.**
 
-   Location: [transcripts.ts:1071](../electron/transcripts.ts#L1071), [transcripts.ts:1083](../electron/transcripts.ts#L1083).
+   Location: [transcripts.ts:1071](../../../electron/transcripts.ts#L1071), [transcripts.ts:1083](../../../electron/transcripts.ts#L1083).
 
    Parent selection compares each member's **newest chain**, although the member can contain other valid branches. Consider root P, its fork F, and a fork G made from F's own reply. If F subsequently rewinds to an earlier point, G's newest path shares only the same short opening with both P and F. The tie selects P. Stitching then compares G only with P's view and cannot recognize the F-only turns that already exist elsewhere in the family.
 
@@ -81,7 +83,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 3. **[P1] The first-assistant-only Claude family key misses legitimate native forks. Confirmed with a synthetic reproduction.**
 
-   Location: [transcripts.ts:1010](../electron/transcripts.ts#L1010).
+   Location: [transcripts.ts:1010](../../../electron/transcripts.ts#L1010).
 
    The first assistant record in a physical file need not be the first assistant on the chain that gets copied. For example, a parent contains the original first answer and a regenerated alternative answer under the same prompt. A native fork from the alternative copies that alternative, not the abandoned original. The fork's first API message ID therefore differs from the parent's first API message ID, even though it shares a real assistant message with the parent.
 
@@ -91,7 +93,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 4. **[P1] A Claude fork after compaction can join the family but duplicate its history as a disconnected root. Confirmed for Agentree's writer with a synthetic reproduction.**
 
-   Location: [claude-fork.ts:75](../electron/providers/claude-fork.ts#L75), [stitch.ts:91](../electron/providers/stitch.ts#L91), and the parser's logical-parent handling at [transcripts.ts:639](../electron/transcripts.ts#L639).
+   Location: [claude-fork.ts:75](../../../electron/providers/claude-fork.ts#L75), [stitch.ts:91](../../../electron/providers/stitch.ts#L91), and the parser's logical-parent handling at [transcripts.ts:639](../../../electron/transcripts.ts#L639).
 
    The original parser follows `logicalParentUuid` across a compact boundary. The writer follows only physical `parentUuid`, so the copied history begins at the compact boundary. The resulting child's first visible postcompact node is a root, whereas the corresponding parent node has the precompact history above it. The stitcher's same-parent matching cannot align them. Explicit `forkedFrom` joins the files into a family but does not repair this structural mismatch.
 
@@ -103,7 +105,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 5. **[P1] Forking an abandoned Codex edit page is unsupported by the current implementation and installed backend. Confirmed with the actual app-server.**
 
-   Location: [codex-appserver.ts:143](../electron/providers/codex-appserver.ts#L143), [codex-appserver.ts:170](../electron/providers/codex-appserver.ts#L170), [codex.ts:853](../electron/providers/codex.ts#L853).
+   Location: [codex-appserver.ts:143](../../../electron/providers/codex-appserver.ts#L143), [codex-appserver.ts:170](../../../electron/providers/codex-appserver.ts#L170), [codex.ts:853](../../../electron/providers/codex.ts#L853).
 
    The first failure is the handshake: Agentree sends `path` without initializing `capabilities.experimentalApi`. The backend rejects the request with `-32600: thread/fork.path requires experimentalApi capability`.
 
@@ -115,7 +117,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 6. **[P1] A Codex fork from a displayed user node can include messages after the selected node. Confirmed by request capture and the installed protocol contract.**
 
-   Location: [codex.ts:368](../electron/providers/codex.ts#L368), [codex.ts:840](../electron/providers/codex.ts#L840), and the promise in the [panel tooltip](../src/components/NodePanel.tsx#L267).
+   Location: [codex.ts:368](../../../electron/providers/codex.ts#L368), [codex.ts:840](../../../electron/providers/codex.ts#L840), and the promise in the [panel tooltip](../../../src/components/NodePanel.tsx#L267).
 
    Every displayed node within a Codex turn gets the same `lastRawId`: the whole turn ID. Selecting its user message and selecting its eventual final answer produce identical `thread/fork` requests. The API's `lastTurnId` is inclusive of that complete turn. A selected prompt therefore brings along the answer that appears below it. An intermediate commentary node before a steering message likewise includes the later steering and final answer.
 
@@ -125,7 +127,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 7. **[P2] Renaming an explicitly linked Claude fork can create a parentage cycle. Confirmed with a synthetic reproduction.**
 
-   Location: [transcripts.ts:1067](../electron/transcripts.ts#L1067), [transcripts.ts:1075](../electron/transcripts.ts#L1075).
+   Location: [transcripts.ts:1067](../../../electron/transcripts.ts#L1067), [transcripts.ts:1075](../../../electron/transcripts.ts#L1075).
 
    Title-based ordering and explicit lineage are applied independently. Let P's title include `(fork)`, and rename child F to remove that suffix. F sorts first and keeps its explicit parent P. P is then allowed to infer F as its own parent. The resulting P ↔ F cycle makes the stitcher fall back to standalone trees, duplicating the prefix. This requires no corrupt sidecar or reset birthtime.
 
@@ -133,7 +135,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 8. **[P2] Merged Claude prefixes lose annotation identities. Confirmed with the committed fixtures.**
 
-   Location: [stitch.ts:94](../electron/providers/stitch.ts#L94), [transcripts.ts:1243](../electron/transcripts.ts#L1243).
+   Location: [stitch.ts:94](../../../electron/providers/stitch.ts#L94), [transcripts.ts:1243](../../../electron/transcripts.ts#L1243).
 
    A matched copied node is dropped without retaining its UUID as an alias of the surviving tree node. Reading every member's annotation file cannot help if the saved UUID no longer exists in `id` or `absorbedIds`.
 
@@ -143,7 +145,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 9. **[P2] Forking a Claude prompt without promptId duplicates the fork anchor. Confirmed with a synthetic reproduction.**
 
-   Location: [transcripts.ts:804](../electron/transcripts.ts#L804), [claude-fork.ts:95](../electron/providers/claude-fork.ts#L95).
+   Location: [transcripts.ts:804](../../../electron/transcripts.ts#L804), [claude-fork.ts:95](../../../electron/providers/claude-fork.ts#L95).
 
    The prompt match key falls back to its timestamp. The writer changes the last copied record's timestamp to the fork time. A fork ending on a prompt with no `promptId` consequently changes its match key, so the copied anchor is drawn as a new branch even though the fork has no new turn.
 
@@ -151,7 +153,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 10. **[P2] Claude parse failures can look like intentionally hidden empty sessions. Confirmed with a synthetic reproduction.**
 
-    Location: [transcripts.ts:1202](../electron/transcripts.ts#L1202), [health.ts:61](../electron/health.ts#L61).
+    Location: [transcripts.ts:1202](../../../electron/transcripts.ts#L1202), [health.ts:61](../../../electron/health.ts#L61).
 
     A readable file containing entirely malformed JSON produces an empty parse, which is counted as `skipped`. The warning denominator subtracts skipped files. One invalid file therefore produces `filesSeen: 1, sessionsParsed: 0, skipped: 1, warnings: []` with no error or unknown-type warning. The same structure can hide a format change that yields no recognized nodes.
 
@@ -159,7 +161,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 11. **[P2] Codex usage before the first assistant prose is discarded. Confirmed in existing data and a synthetic reproduction.**
 
-    Location: [codex.ts:353](../electron/providers/codex.ts#L353).
+    Location: [codex.ts:353](../../../electron/providers/codex.ts#L353).
 
     Usage is assigned only if `b.lastAssistant` already exists. The current store contains five such early usage records whose turns later contain displayed assistant prose, out of 6,040 inspected usage records. Their raw usage totals include 871,804 input tokens, including cached input, and 8,497 output tokens. Those records are never added back when prose appears.
 
@@ -167,7 +169,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 12. **[P2] Codex renames leave the welcome list stale. Confirmed with a synthetic reproduction.**
 
-    Location: [codex.ts:752](../electron/providers/codex.ts#L752), [watch.ts:86](../electron/watch.ts#L86).
+    Location: [codex.ts:752](../../../electron/providers/codex.ts#L752), [watch.ts:86](../../../electron/watch.ts#L86).
 
     Family metadata is cached solely by rollout file identities. Updating `session_index.jsonl` does not invalidate that cache. After appending a new name, a second list call still returns the old title, while loading the family returns the new title. The watcher also covers `sessions/` and `archived_sessions/`, not the index in their parent directory, so a rename alone does not trigger a refresh.
 
@@ -175,7 +177,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 13. **[P2] The advertised minimum runtime cannot read compressed Codex history. Confirmed by the implementation's runtime requirements.**
 
-    Location: [vscode-ext/package.json:17](../vscode-ext/package.json#L17), [README.md:64](../README.md#L64), [codex.ts:134](../electron/providers/codex.ts#L134).
+    Location: [vscode-ext/package.json:17](../../../vscode-ext/package.json#L17), [README.md:64](../../../README.md#L64), [codex.ts:134](../../../electron/providers/codex.ts#L134).
 
     README advertises Node 20+ and VS Code 1.90+, while the parser depends on native zstd support from a substantially newer Node runtime. VS Code's extension host uses its bundled runtime, not the independently installed Node. Installing a new system Node therefore cannot repair an older extension host. Feature detection reports an error but does not deliver the promised history support on those advertised hosts.
 
@@ -183,7 +185,7 @@ The installed extension-bundled Codex binary reports **0.164.0-alpha.11.1**, rat
 
 14. **[P2, documentation] Selecting an abandoned branch's leaf does not make Open resume that branch. Confirmed from the action contract.**
 
-    Location: [user-guide.md](user-guide.md), “Pick up where you left off”; compare the [panel's own caveat](../src/components/NodePanel.tsx#L185).
+    Location: [user-guide.md](../../user-guide.md), “Pick up where you left off”; compare the [panel's own caveat](../../../src/components/NodePanel.tsx#L185).
 
     The guide directs the reader to select the leaf of the desired branch and use Open/Resume, and says Agentree resumes that branch's session. Several branches can belong to the same session: Claude rewinds and Codex prompt edits do. Open only passes the session/thread ID, so it resumes that session's current path, which can be a different leaf. A Codex edit branch also currently cannot use the advertised fork fallback, as finding 5 demonstrates.
 
@@ -193,7 +195,7 @@ The architecture remains a good basis for this product. Keeping raw Codex histor
 
 The principal operational concern is **synchronous scanning on the host event loop**. The measured 2.6-second cold listing runs inside VS Code's extension host or Electron's main process. The synchronous design predates this branch, but the new decompression and family reconstruction make its cost relevant to the primary product. Move scans/parsing into a worker or make the work yield in bounded chunks; retain the existing coalescing and file-identity caches. A warm 20 ms scan does not establish acceptable cold behavior or behavior during a large transcript rewrite.
 
-Lower-impact reliability issues also deserve follow-up. [openTerminal](../electron/terminal.ts#L84) returns success before the asynchronous spawn result and discards the child's error, so the advertised fallback can silently do nothing. [AGENTREE_CODEX_BIN](../electron/providers/codex-appserver.ts#L28) always uses `shell: false`, including a Windows `.cmd` override that needs special handling. The RPC client has no stdin error handler or disposal of outstanding request timers when the process exits; exercising EPIPE, early exit, and timeout behavior would be more valuable than another happy-path mock. The updater's `main` comparison can offer an ineffective pull on a diverged feature branch. These findings are source-level observations; I did not reproduce every OS/process failure path.
+Lower-impact reliability issues also deserve follow-up. [openTerminal](../../../electron/terminal.ts#L84) returns success before the asynchronous spawn result and discards the child's error, so the advertised fallback can silently do nothing. [AGENTREE_CODEX_BIN](../../../electron/providers/codex-appserver.ts#L28) always uses `shell: false`, including a Windows `.cmd` override that needs special handling. The RPC client has no stdin error handler or disposal of outstanding request timers when the process exits; exercising EPIPE, early exit, and timeout behavior would be more valuable than another happy-path mock. The updater's `main` comparison can offer an ineffective pull on a diverged feature branch. These findings are source-level observations; I did not reproduce every OS/process failure path.
 
 Several handoff assumptions can now be narrowed:
 
