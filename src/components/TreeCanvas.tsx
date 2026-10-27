@@ -191,8 +191,8 @@ export function TreeCanvas() {
         <span><i className="lg-dot lg-assistant" /> Agent</span>
         <span><i className="lg-dot lg-tip" style={{ borderColor: tipColor }} /> latest turn</span>
         {hasCross && (
-          <span title="The dashed edge enters a different session: a fork, or a Codex prompt edit">
-            <i className="lg-cross" /> new session (fork / edit)
+          <span title="The dashed edge enters a fork (a new session), or a Codex prompt edit (a new branch of the same thread)">
+            <i className="lg-cross" /> fork / edited branch
           </span>
         )}
       </div>

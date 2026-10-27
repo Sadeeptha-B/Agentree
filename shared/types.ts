@@ -6,7 +6,7 @@ export type SessionId = string;
  *
  * - `claude`   — ~/.claude/projects/**.jsonl, a native DAG (uuid/parentUuid);
  *                a VS Code "fork conversation" is a NEW file holding a copy of
- *                the active chain, matched back to its parent by message ids;
+ *                one chain of the source, matched back to it by API message ids;
  * - `codex`    — ~/.codex/sessions/Y/M/D/rollout-*.jsonl[.zst], paginated:
  *                each page links to the page it continues via `history_base`,
  *                so forks and prompt edits form an exact tree of pages;
@@ -19,10 +19,10 @@ export type NodeStatus = "dead-end" | "favorite";
 export type NodeRole = "user" | "assistant";
 
 /**
- * One turn, projected from a Claude Code transcript record.
+ * One turn, as a provider projects it from a harness's transcript records.
  *
- * The transcript is already a DAG — every record carries `uuid` and
- * `parentUuid` — so we read their lineage rather than maintaining our own.
+ * Lineage comes from the harness's own data (Claude's uuid/parentUuid DAG,
+ * Codex's page graph, Copilot's event chain), never from a store of our own.
  * Everything here except the sidecar metadata is strictly read-only.
  */
 export interface TurnNode {
@@ -73,6 +73,21 @@ export interface TurnNode {
    * and so the panel can say how many turns a node represents.
    */
   absorbedIds?: NodeId[];
+  /**
+   * Ids the SAME turn carries in other sessions of the family: the copies a
+   * fork made of it. Stitching keeps one node per turn, so annotations
+   * written against a copy (before the family was joined, or from a member
+   * that is now the only one left) resolve through these.
+   */
+  aliasIds?: NodeId[];
+  /**
+   * Why a fork can't be anchored at this node — absent when it can. Decided
+   * by the provider while it builds the tree, from what the harness can
+   * actually resume (Claude: no record, or before the last /compact; Codex:
+   * not the end of a whole turn, or a branch no thread still holds). The
+   * panel shows it instead of offering the fork; the fork call refuses with it.
+   */
+  forkBlocked?: string;
   /**
    * uuid of the LAST raw transcript record this node covers.
    *
@@ -167,10 +182,17 @@ export interface ProviderHealth {
   /** Root directory exists at all — false just means "not installed". */
   present: boolean;
   filesSeen: number;
-  /** Files deliberately not listed (guardian reviews, subagents, empty). */
+  /** Files deliberately not listed (guardian reviews, subagents, bookkeeping-only). */
   skipped: number;
   /** Files that produced a session. */
   sessionsParsed: number;
+  /**
+   * Files that SHOULD have produced a session but didn't: unreadable,
+   * malformed, or holding conversation records the parser couldn't turn into
+   * a single turn. Kept apart from `skipped` so a format change can't pass
+   * for intentional emptiness.
+   */
+  failed: number;
   /** Entries on the welcome screen (one per fork family). */
   listed: number;
   /** e.g. {"codex-cli 0.162": 44}. */
@@ -203,11 +225,18 @@ export type NodeMeta = Pick<TurnNode, "label" | "status" | "note">;
 export interface AgentreeApi {
   listSessions(): Promise<SessionMeta[]>;
   getSession(id: string): Promise<SessionDetail | null>;
+  /**
+   * Annotate a turn of the family `sessionId` belongs to. Written to every
+   * member's sidecar under every id the turn has there, so the annotation
+   * survives the family being re-rooted or a member being deleted.
+   */
   patchNode(sessionId: string, nodeId: string, patch: NodeMeta): Promise<void>;
   /**
-   * Fork the session just after `nodeId`: a NEW session holding the prefix,
-   * created in the harness's own fork format (Claude) or through its API
-   * (Codex). Originals are never modified; the family tree picks the fork up.
+   * Fork the session just after `nodeId`: a NEW session holding the prefix up
+   * to and including that node, created in the harness's own fork format
+   * (Claude) or through its API (Codex). Refused when the node carries
+   * `forkBlocked`. Originals are never modified; the family tree picks the
+   * fork up.
    */
   forkAt(sessionId: string, nodeId: string): Promise<ForkResult>;
 

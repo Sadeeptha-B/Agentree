@@ -12,11 +12,11 @@ import type {
   TurnNode,
 } from "../../shared/types.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
-import { readMeta } from "../meta.ts";
+import { applyAnnotations } from "../meta.ts";
 import { HealthScan } from "../health.ts";
 import { readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
-import { resumeCommand } from "../shell.ts";
+import { RESUME_ARGV, resumeCommand } from "../shell.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
 
@@ -240,7 +240,7 @@ function stitched(fam: Family): TurnNode[] {
   return mergeSameRoleRuns(stitchFamily(members));
 }
 
-export const copilotResumeArgv = (id: string) => ["copilot", `--resume=${id}`];
+export const copilotResumeArgv = RESUME_ARGV.copilot;
 const resumeCmd = (id: string, cwd: string) => resumeCommand(cwd, copilotResumeArgv(id));
 
 function metaFor(fam: Family): SessionMeta | null {
@@ -326,13 +326,7 @@ export function loadCopilotSession(sessionId: SessionId): SessionDetail | null {
   if (!meta) return null;
 
   const nodes = stitched(fam);
-  for (const m of fam.members) {
-    const annotations = readMeta(m.ws.id);
-    for (const n of nodes) {
-      const a = annotations[n.id] ?? n.absorbedIds?.map((id) => annotations[id]).find(Boolean);
-      if (a) Object.assign(n, a);
-    }
-  }
+  applyAnnotations(nodes, fam.members.map((m) => m.ws.id));
   return { meta, nodes, members: membersOf(fam) };
 }
 

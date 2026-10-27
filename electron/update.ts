@@ -11,11 +11,13 @@ import { quote } from "./shell.ts";
  * app's way: every failure path — offline, rate-limited, an unpushed dev
  * build GitHub has never heard of — resolves to `null`, silently.
  *
- * The build stamps its git commit and its `origin` repository into
- * dist-electron/build-info.json; the compare API then answers precisely "is
- * main ahead of the running build?" for the repo it was built from — a fork
- * checks itself, never upstream. A tarball built without git falls back to
- * comparing package.json versions against this repository.
+ * The build stamps its git commit, its `origin` repository and its branch
+ * into dist-electron/build-info.json; the compare API then answers precisely
+ * "has this branch moved past the running build?" for the repo it was built
+ * from. A fork checks itself, never upstream; a feature branch compares with
+ * itself, so the offered `git pull` is one that actually brings the update.
+ * An unpushed branch is unknown to GitHub and stays silent. A tarball built
+ * without git falls back to comparing package.json versions on `main`.
  */
 const FALLBACK_REPO = "Sadeeptha-B/Agentree";
 const TIMEOUT_MS = 6000;
@@ -25,6 +27,8 @@ interface BuildInfo {
   commit?: string | null;
   /** "owner/name" of the checkout's GitHub origin. */
   repo?: string | null;
+  /** Branch the build was made from; null when detached. */
+  branch?: string | null;
 }
 
 /** Update in place: pull, then reinstall (npm install's prepare step rebuilds). */
@@ -66,17 +70,17 @@ function newerVersion(remote: string, local: string): boolean {
 
 export async function checkForUpdate(appRoot: string): Promise<UpdateInfo | null> {
   if (process.env.AGENTREE_NO_UPDATE_CHECK) return null;
-  const { version, commit, repo } = readBuildInfo(appRoot);
+  const { version, commit, repo, branch } = readBuildInfo(appRoot);
   const REPO = repo || FALLBACK_REPO;
   const UPDATE_COMMAND = updateCommand(appRoot);
 
   try {
     if (commit) {
       const cmp = (await get(
-        `https://api.github.com/repos/${REPO}/compare/${commit}...main`,
+        `https://api.github.com/repos/${REPO}/compare/${commit}...${(branch || "main").split("/").map(encodeURIComponent).join("/")}`,
       )) as { status?: string; commits?: { sha: string }[] };
-      // "ahead": main moved past this build. "diverged": main moved AND this
-      // build has local commits — still means a newer upstream exists.
+      // "ahead": the branch moved past this build. "diverged": it moved AND
+      // this build has local commits — `git pull` still brings the new ones.
       if (cmp.status !== "ahead" && cmp.status !== "diverged") return null;
       const latest = cmp.commits?.[cmp.commits.length - 1]?.sha ?? "latest";
       return {
