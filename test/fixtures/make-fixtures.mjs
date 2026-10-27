@@ -349,6 +349,22 @@ write(`${CL}/c--work-toolloop/${TL}.jsonl`, [
   { type: "permission-mode", permissionMode: "acceptEdits", sessionId: TL, timestamp: ts(300) },
 ]);
 
+// c--work-old: a session that moved directory partway, recording the new
+// one in three spellings (trailing separator, lower-case drive, Git Bash).
+// It continues in the new directory; a bookkeeping record with the old cwd
+// at the end must not move it back.
+const MV = "50000000-0000-4000-8000-000000000004";
+const at = (rec, cwd) => ({ ...rec, cwd });
+write(`${CL}/c--work-old/${MV}.jsonl`, [
+  at(user(MV, "mv-u1", null, 0, "mv-1", "Start here"), "C:\\work\\old"),
+  at(asst(MV, "mv-a1", "mv-u1", 1, "msg_mv1", [text("Started.")]), "C:\\work\\old"),
+  at(user(MV, "mv-u2", "mv-a1", 2, "mv-2", "Moved the repo"), "c:\\work\\new\\"),
+  at(asst(MV, "mv-a2", "mv-u2", 3, "msg_mv2", [text("Noted.")]), "C:\\work\\new"),
+  at(user(MV, "mv-u3", "mv-a2", 4, "mv-3", "From Git Bash now"), "/c/work/new"),
+  at(asst(MV, "mv-a3", "mv-u3", 5, "msg_mv3", [text("Still here.")]), "/c/work/new"),
+  { type: "file-history-snapshot", messageId: "mv-a3", snapshot: {}, cwd: "C:\\work\\old" },
+]);
+
 // ------------------------------------------------------------------ Codex
 //
 // CODEX_HOME holding one family of paginated pages:
