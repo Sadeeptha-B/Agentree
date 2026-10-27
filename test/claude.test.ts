@@ -29,6 +29,7 @@ const PB = "4eeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const P3 = "4fffffff-ffff-4fff-8fff-ffffffffffff";
 const F3 = "50000000-0000-4000-8000-000000000001";
 const G3 = "50000000-0000-4000-8000-000000000002";
+const TL = "50000000-0000-4000-8000-000000000003";
 let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
@@ -143,12 +144,19 @@ describe("Claude transcripts", () => {
     expect(one(d, "Found four issues.").forkBlocked).toMatch(/compact/);
   });
 
+  it("dates a session by its newest conversation record, not its newest bookkeeping", () => {
+    const s = listSessions().find((x) => x.id === TL)!;
+    // The tool loop ran until 10:09; the mode change at 15:00 is a file change only.
+    expect(new Date(s.activeAt).toISOString()).toBe("2026-10-01T10:09:00.000Z");
+    expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T15:00:00.000Z");
+  });
+
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(17);
+    expect(h.filesSeen).toBe(18);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(16);
+    expect(h.sessionsParsed).toBe(17);
     expect(h.skipped).toBe(0);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
     expect(h.unknownRecordTypes).toEqual({});

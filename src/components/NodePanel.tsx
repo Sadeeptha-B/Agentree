@@ -129,7 +129,8 @@ export function NodePanel() {
       parentId: null,
       cwd: meta.cwd,
       resumeCommand: meta.resumeCommand,
-      updatedAt: meta.updatedAt,
+      activeAt: meta.activeAt,
+      touchedAt: meta.touchedAt,
     };
   const parentTitle = member.parentId ? members.find((m) => m.id === member.parentId)?.title : null;
   const ref_: SessionRef = { provider: meta.provider, sessionId: member.id, cwd: member.cwd };

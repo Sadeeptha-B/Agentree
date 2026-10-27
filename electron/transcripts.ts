@@ -531,6 +531,8 @@ export interface Parsed {
   title: string;
   /** Newest timestamp on ANY record, displayed or not. 0 if none carried one. */
   touchedAt: number;
+  /** Newest timestamp on a conversation record (`isActivity`). 0 if none. */
+  activeAt: number;
   cwd: string;
   entrypoint?: string;
   version?: string;
@@ -547,6 +549,7 @@ const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
   problem,
   title: "",
   touchedAt: 0,
+  activeAt: 0,
   cwd: "",
   unknownTypes: {},
 });
@@ -621,6 +624,19 @@ const BLOCK = {
     "This turn is from before the session's last /compact. Claude Code resumes a compacted session from its summary, so Agentree only forks after the compaction.",
 };
 
+/**
+ * A record that is part of the conversation, for "last activity": every
+ * user/assistant record — tool-only replies and tool results included, so a
+ * session in a long tool loop stays live — a delivered mid-turn message, and
+ * a compaction. Not titles, `last-prompt`, mode changes, file-history or
+ * request-capture bookkeeping, which the CLI also writes when nobody talks.
+ */
+const isActivity = (rec: RawRecord) =>
+  rec.type === "user" ||
+  rec.type === "assistant" ||
+  (rec.type === "attachment" && rec.attachment?.type === "queued_command") ||
+  (rec.type === "system" && rec.subtype === "compact_boundary");
+
 /** Project a transcript file into the node list. Read-only — we never write here. */
 export function parseFile(file: string): Parsed {
   const sessionId = path.basename(file).replace(/\.jsonl$/, "");
@@ -639,6 +655,7 @@ export function parseFile(file: string): Parsed {
   const parentOf = new Map<string, string | null>();
   const records: RawRecord[] = [];
   let touchedAt = 0;
+  let activeAt = 0;
   let cwd = "";
   let entrypoint: string | undefined;
   let version: string | undefined;
@@ -664,6 +681,7 @@ export function parseFile(file: string): Parsed {
     if (rec.timestamp) {
       const t = Date.parse(rec.timestamp);
       if (t > touchedAt) touchedAt = t;
+      if (t > activeAt && isActivity(rec)) activeAt = t;
     }
     if (!cwd && rec.cwd) cwd = rec.cwd;
     if (!entrypoint && rec.entrypoint) entrypoint = rec.entrypoint;
@@ -917,6 +935,7 @@ export function parseFile(file: string): Parsed {
       aiTitle.trim() ||
       (titleDraft?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90),
     touchedAt,
+    activeAt,
     cwd,
     entrypoint,
     version,
@@ -996,7 +1015,8 @@ interface FileSummary {
   createdMs: number;
   title: string;
   cwd: string;
-  updatedAt: number;
+  activeAt: number;
+  touchedAt: number;
   nodeCount: number;
   branchPoints: number;
   entrypoint?: string;
@@ -1031,11 +1051,12 @@ function summarise(file: string, dirName: string): FileSummary | null {
     createdMs: stat.birthtimeMs || parsed.nodes[0]?.timestamp || stat.mtimeMs,
     title: parsed.title,
     cwd: parsed.cwd,
-    // The newest record's own timestamp, not the file's mtime (which moves
-    // when the CLI rewrites bookkeeping for a session nobody is talking in),
-    // and not the newest *displayed* turn (which stands still through a long
-    // tool loop, making an actively-running session look minutes stale).
-    updatedAt: parsed.touchedAt || stat.mtimeMs,
+    // Record timestamps, not the file's mtime (which moves when the CLI
+    // rewrites bookkeeping for a session nobody is talking in). Activity is
+    // not the newest *displayed* turn either: that stands still through a
+    // long tool loop, making a running session look minutes stale.
+    touchedAt: parsed.touchedAt || stat.mtimeMs,
+    activeAt: parsed.activeAt || parsed.touchedAt || stat.mtimeMs,
     nodeCount: merged.length,
     branchPoints: countBranchPoints(childIndex(merged)),
     entrypoint: parsed.entrypoint,
@@ -1250,7 +1271,8 @@ function buildFamily(group: FileSummary[]): Family {
     parentEvidence: parents.get(g.id)?.evidence,
     cwd: g.cwd,
     resumeCommand: claudeResume(g.id, g.cwd),
-    updatedAt: g.updatedAt,
+    activeAt: g.activeAt,
+    touchedAt: g.touchedAt,
     entrypoint: g.entrypoint,
   }));
   return { rootId, nodes, members };
@@ -1262,7 +1284,8 @@ const signature = (group: FileSummary[]) =>
   group.map((g) => `${g.file}:${g.mtimeMs}:${g.size}`).sort().join("|");
 
 function familyMeta(group: FileSummary[], built?: Family): SessionMeta {
-  const updatedAt = Math.max(...group.map((g) => g.updatedAt));
+  const activeAt = Math.max(...group.map((g) => g.activeAt));
+  const touchedAt = Math.max(...group.map((g) => g.touchedAt));
 
   if (group.length === 1) {
     const g = group[0];
@@ -1272,7 +1295,8 @@ function familyMeta(group: FileSummary[], built?: Family): SessionMeta {
       cwd: g.cwd,
       project: g.cwd ? baseName(g.cwd) : decodeProjectName(g.dirName),
       title: g.title || "Untitled",
-      updatedAt,
+      activeAt,
+      touchedAt,
       nodeCount: g.nodeCount,
       branchPoints: g.branchPoints,
       resumeCommand: claudeResume(g.id, g.cwd),
@@ -1292,7 +1316,8 @@ function familyMeta(group: FileSummary[], built?: Family): SessionMeta {
     cwd: r.cwd,
     project: r.cwd ? baseName(r.cwd) : decodeProjectName(r.dirName),
     title: r.title || "Untitled",
-    updatedAt,
+    activeAt,
+    touchedAt,
     nodeCount: fam.nodes.length,
     branchPoints: countBranchPoints(childIndex(fam.nodes)),
     resumeCommand: claudeResume(fam.rootId, r.cwd),
@@ -1341,7 +1366,7 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
 
   health.listed(out.length);
   lastHealth = health.done();
-  out.sort((a, b) => b.updatedAt - a.updatedAt);
+  out.sort((a, b) => b.activeAt - a.activeAt);
   return opts.limit ? out.slice(0, opts.limit) : out;
 }
 

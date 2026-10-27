@@ -81,7 +81,7 @@ export function Welcome() {
     const count = new Map<string, number>();
     for (const s of sessions) {
       if (!s.cwd) continue;
-      latest.set(s.cwd, Math.max(latest.get(s.cwd) ?? 0, s.updatedAt));
+      latest.set(s.cwd, Math.max(latest.get(s.cwd) ?? 0, s.activeAt));
       count.set(s.cwd, (count.get(s.cwd) ?? 0) + 1);
     }
     return [...latest.entries()]
@@ -102,7 +102,7 @@ export function Welcome() {
     });
     // Newest interaction first. `listSessions` already sorts this way, but the
     // ordering is the point of this screen, so don't rely on it holding.
-    return [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+    return [...list].sort((a, b) => b.activeAt - a.activeAt);
   }, [sessions, filter, cwdFilter]);
 
   return (
@@ -249,7 +249,9 @@ export function Welcome() {
                     </span>
                   )}
                   {" · "}
-                  {when(s.updatedAt)}
+                  <span title={`Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`}>
+                    {when(s.activeAt)}
+                  </span>
                   {" · "}
                   <code className="id-short">{s.id.slice(0, 8)}</code>
                 </span>
