@@ -1,20 +1,33 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { childIndex, countBranchPoints } from "../shared/render.ts";
-import type { NodeId, SessionDetail, SessionId, SessionMeta, TurnNode } from "../shared/types.ts";
+import type {
+  MemberInfo,
+  NodeId,
+  ProviderHealth,
+  SessionDetail,
+  SessionId,
+  SessionMeta,
+  TurnNode,
+} from "../shared/types.ts";
+import { HealthScan, minorVersion } from "./health.ts";
+import { readLineage } from "./lineage.ts";
 import { readMeta } from "./meta.ts";
-
-const PROJECTS = path.join(os.homedir(), ".claude", "projects");
+import { claudeProjects } from "./paths.ts";
+import { resumeCommand } from "./shell.ts";
+import { stitchFamily, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
   const parts = dirName.split("-").filter(Boolean);
   return parts.length ? parts[parts.length - 1] : dirName;
 }
 
+/** Last path segment of a POSIX or Windows path. */
+const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+
 // ------------------------------------------------------------------ parsing
 
-interface RawRecord {
+export interface RawRecord {
   type?: string;
   uuid?: string;
   parentUuid?: string | null;
@@ -29,12 +42,26 @@ interface RawRecord {
   timestamp?: string;
   isSidechain?: boolean;
   cwd?: string;
+  sessionId?: string;
+  /** CLI version that wrote the record. */
+  version?: string;
+  /** "claude-vscode" | "cli" | … — which front end drove the session. */
+  entrypoint?: string;
+  /** Shared by the prompt record and every tool_result of that prompt. */
+  promptId?: string;
+  /**
+   * Written by forks made through the Agent SDK's `forkSession` and by
+   * Agentree's own fork: the parent session and the message forked after.
+   */
+  forkedFrom?: { sessionId?: string; messageUuid?: string };
   /** `queue-operation` only: enqueue | dequeue | remove. */
   operation?: string;
   /** `queue-operation` only: the text the user typed. */
   content?: unknown;
-  /** `custom-title` only: the name set with `/rename`. */
+  /** `custom-title` only: the name set with `/rename` (or "<title> (fork)"). */
   customTitle?: string;
+  /** `ai-title` only: the CLI's own generated title. */
+  aiTitle?: string;
   /**
    * `attachment` records. `type: "queued_command"` ones are the harness's OWN
    * splice of a delivered mid-turn message into the lineage — real uuid, real
@@ -60,12 +87,55 @@ interface RawRecord {
   };
 }
 
+/**
+ * Record types this parser has met and knows to be either a turn or
+ * bookkeeping it can ignore. Anything else is counted in the health row — not
+ * an error (the lineage pass tolerates any type), but the first sign of a
+ * format change.
+ */
+const KNOWN_TYPES = new Set([
+  "user",
+  "assistant",
+  "attachment",
+  "system",
+  "summary",
+  "progress",
+  "queue-operation",
+  "custom-title",
+  "ai-title",
+  "agent-name",
+  "tag",
+  "last-prompt",
+  "mode",
+  "permission-mode",
+  "file-history-snapshot",
+  "file-history-delta",
+  // Request-capture bookkeeping. `api-request-blob` carries `message` content
+  // blocks but is NOT a turn — only user/assistant records ever become nodes.
+  "api-request",
+  "api-request-blob",
+  "api-request-shape",
+  "bridge-session",
+  "atis-latch",
+  "cost-state",
+  "pr-link",
+  "frame-link",
+  "artifact-autoreact-ledger",
+  "artifact-comment-monitor",
+]);
+
 // Claude Code plumbing that leaks into `user` records as literal markup.
 const ESC = String.fromCharCode(27);
 /** CSI sequences — `\e[1m` and friends — from command output captured verbatim. */
 const ANSI = new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, "g");
-/** Boilerplate addressed to the model, never written or read by the user. */
-const DROP_BLOCKS = /<(local-command-caveat|system-reminder)>[\s\S]*?<\/\1>/g;
+/**
+ * Boilerplate addressed to the model, never written or read by the user. The
+ * `ide_*` blocks are the VS Code extension's context injection ("The user
+ * opened the file … in the IDE"); left in, they became most sessions' titles.
+ */
+const DROP_TAGS =
+  "local-command-caveat|system-reminder|ide_opened_file|ide_selection|ide_diagnostics";
+const DROP_BLOCKS = new RegExp(`<(${DROP_TAGS})>[\\s\\S]*?<\\/\\1>`, "g");
 /**
  * A reminder can OPEN in one record and CLOSE in the next; when adjacent
  * records merge, the rejoined pair is caught by DROP_BLOCKS — but at a branch
@@ -75,8 +145,8 @@ const DROP_BLOCKS = /<(local-command-caveat|system-reminder)>[\s\S]*?<\/\1>/g;
  * discussing the tag (`` `<system-reminder>` ``), which this repo's own
  * sessions are full of.
  */
-const DROP_OPEN_TAIL = /(?<!`)<(?:local-command-caveat|system-reminder)>[\s\S]*$/;
-const DROP_CLOSE_HEAD = /^[\s\S]*?<\/(?:local-command-caveat|system-reminder)>(?!`)/;
+const DROP_OPEN_TAIL = new RegExp("(?<!`)<(?:" + DROP_TAGS + ")>[\\s\\S]*$");
+const DROP_CLOSE_HEAD = new RegExp("^[\\s\\S]*?<\\/(?:" + DROP_TAGS + ")>(?!`)");
 const WRAPPERS = [
   "local-command-stdout",
   "local-command-stderr",
@@ -136,7 +206,7 @@ const UNWRAP_STRAY = new RegExp(`</?(?:${WRAPPERS})>`, "g");
  * markup inside code samples and quoted XML, and eating those would corrupt the
  * content it's meant to clean.
  */
-function cleanText(s: string): { text: string; synthetic: boolean } {
+export function cleanText(s: string): { text: string; synthetic: boolean } {
   let out = s
     .replace(ANSI, "")
     .replace(DROP_BLOCKS, "")
@@ -227,7 +297,9 @@ function textOf(content: unknown): {
  *
  * Either way the result is the alternating user↔assistant tree you want to look
  * at. Only merges where the parent has EXACTLY one child, so branch points are
- * never collapsed — a branch below the run simply re-parents onto the head.
+ * never collapsed — a branch below the run simply re-parents onto the head. Nor
+ * does a run cross from one session into another: a fork's first turn must
+ * stay its own node, or the fork point (and its resume target) disappears.
  */
 export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
   const kids = new Map<string, TurnNode[]>();
@@ -250,6 +322,7 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
     for (;;) {
       const cs = kids.get(cur.id) ?? [];
       if (cs.length !== 1 || cs[0].role !== head.role) break;
+      if (cs[0].crossSession || cs[0].sourceSessionId !== head.sourceSessionId) break;
       cur = cs[0];
       parts.push(cur);
       absorbed.add(cur.id);
@@ -290,15 +363,15 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       ),
       // Context size at the end of the run lives in the LAST call's usage —
       // see TurnNode.lastUsage. Parts are unmerged single calls here.
-      lastUsage: last.usage,
+      lastUsage: last.lastUsage ?? last.usage,
       model: last.model ?? head.model,
       stopReason: last.stopReason ?? null,
-      absorbedIds: parts.slice(1).map((p) => p.id),
+      absorbedIds: parts.slice(1).flatMap((p) => [p.id, ...(p.absorbedIds ?? [])]),
       // The merged turn ends where its last ANCHORABLE part ends — that's the
       // record a fork has to resume after. An injected tail has no transcript
       // record at all, and a mid-turn attachment's uuid is a record the CLI's
       // resume loader doesn't index; either one becoming the anchor produces
-      // a --resume-session-at the CLI can only reject.
+      // a fork the CLI can only reject.
       ...(() => {
         const lastReal = [...parts].reverse().find((p) => !p.injected && !p.midTurn);
         return {
@@ -332,10 +405,10 @@ interface Interjection {
 }
 
 /** Synthetic uuid prefix. Never collides: real uuids are hex-and-dashes. */
-const INJECTED_PREFIX = "queued:";
+export const INJECTED_PREFIX = "queued:";
 
 /** Normalised prefix, for matching an interjection against a real record. */
-const gist = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 80);
+const gist = (s: string, n = 80) => s.replace(/\s+/g, " ").trim().slice(0, n);
 
 /**
  * Give the user's mid-turn interjections a place in the tree.
@@ -357,6 +430,7 @@ const gist = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 80);
  * rewound or branched in between, and inventing a link would misreport history.
  */
 function spliceInterjections(
+  sessionId: string,
   queued: Interjection[],
   records: RawRecord[],
   parentOf: Map<string, string | null>,
@@ -390,7 +464,8 @@ function spliceInterjections(
 
     const key = q.afterUuid ?? "\0root";
     const parent = tip.get(key) ?? q.afterUuid;
-    const uuid = `${INJECTED_PREFIX}${n++}`;
+    // Session-qualified: a family tree holds several transcripts' interjections.
+    const uuid = `${INJECTED_PREFIX}${sessionId.slice(0, 8)}:${n++}`;
 
     parentOf.set(uuid, parent);
     for (let k = q.seqAt; k < seq.length; k++) {
@@ -419,26 +494,70 @@ function spliceInterjections(
   }
 }
 
-interface Parsed {
-  nodes: TurnNode[];
+export interface Parsed {
+  sessionId: string;
   /**
-   * First user turn that is actually a prompt. Computed BEFORE merging: a
-   * merged node can start with slash-command plumbing followed by the real
-   * question, and titling from the merged text surfaces the plumbing.
+   * One node per API message / user record — NOT yet folded by
+   * mergeSameRoleRuns, because family stitching must match turn-for-turn
+   * before runs are merged (a merge boundary can differ between a parent,
+   * which branches mid-run, and its fork, which doesn't).
+   */
+  nodes: TurnNode[];
+  /** Stitch evidence per node id: `m:<message.id>` / `u:<promptId>|<gist>`. */
+  keys: Map<NodeId, string>;
+  /**
+   * custom-title (last) > ai-title (last) > first real prompt. The prompt is
+   * computed BEFORE merging: a merged node can start with slash-command
+   * plumbing followed by the real question.
    */
   title: string;
   /** Newest timestamp on ANY record, displayed or not. 0 if none carried one. */
   touchedAt: number;
+  cwd: string;
+  entrypoint?: string;
+  version?: string;
+  /** First assistant API message id — shared by every copy-fork of this session. */
+  firstMessageId?: string;
+  /** Explicit lineage stamped by SDK / Agentree forks. */
+  forkedFrom?: string;
+  unknownTypes: Record<string, number>;
 }
 
-/** Project a transcript file into the node list. Read-only — we never write here. */
-function parseFile(file: string): Parsed {
+const EMPTY = (sessionId: string): Parsed => ({
+  sessionId,
+  nodes: [],
+  keys: new Map(),
+  title: "",
+  touchedAt: 0,
+  cwd: "",
+  unknownTypes: {},
+});
+
+/** Read a transcript's records. Torn lines (a session mid-append) are skipped. */
+export function readRecords(file: string): RawRecord[] | null {
   let raw: string;
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch {
-    return { nodes: [], title: "", touchedAt: 0 };
+    return null;
   }
+  const out: RawRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as RawRecord);
+    } catch {
+      /* torn line */
+    }
+  }
+  return out;
+}
+
+/** Project a transcript file into the node list. Read-only — we never write here. */
+export function parseFile(file: string): Parsed {
+  const sessionId = path.basename(file).replace(/\.jsonl$/, "");
+  const all = readRecords(file);
+  if (!all) return EMPTY(sessionId);
 
   // Pass 1: the FULL lineage, including record types we don't display.
   //
@@ -449,35 +568,44 @@ function parseFile(file: string): Parsed {
   const parentOf = new Map<string, string | null>();
   const records: RawRecord[] = [];
   let touchedAt = 0;
+  let cwd = "";
+  let entrypoint: string | undefined;
+  let version: string | undefined;
+  let forkedFrom: string | undefined;
+  const unknownTypes: Record<string, number> = {};
 
   /** uuids in file order, so an interjection can be spliced at the right point. */
   const seq: string[] = [];
   const queued: Interjection[] = [];
-  /** Name set with `/rename`. Last one wins — a session can be renamed twice. */
+  /** Name set with `/rename` or by a fork. Last one wins. */
   let customTitle = "";
+  let aiTitle = "";
   /**
    * Everything recorded before the LAST `/compact` boundary. The CLI's loader
    * only indexes messages after it, so these uuids cannot anchor a fork.
    */
   const preCompact = new Set<string>();
 
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
-    let rec: RawRecord;
-    try {
-      rec = JSON.parse(line) as RawRecord;
-    } catch {
-      continue; // tolerate a torn line from a session still being written
+  for (const rec of all) {
+    if (rec.type && !KNOWN_TYPES.has(rec.type)) {
+      unknownTypes[rec.type] = (unknownTypes[rec.type] ?? 0) + 1;
     }
     if (rec.timestamp) {
       const t = Date.parse(rec.timestamp);
       if (t > touchedAt) touchedAt = t;
     }
+    if (!cwd && rec.cwd) cwd = rec.cwd;
+    if (!entrypoint && rec.entrypoint) entrypoint = rec.entrypoint;
+    if (rec.version) version = rec.version;
+    if (!forkedFrom && rec.forkedFrom?.sessionId) forkedFrom = rec.forkedFrom.sessionId;
 
-    // `/rename` appends a uuid-less `custom-title` record, so this has to run
-    // before the `!rec.uuid` bail below.
+    // Titles are uuid-less records, so this has to run before the `!rec.uuid` bail.
     if (rec.type === "custom-title" && typeof rec.customTitle === "string") {
       customTitle = rec.customTitle;
+      continue;
+    }
+    if (rec.type === "ai-title" && typeof rec.aiTitle === "string") {
+      aiTitle = rec.aiTitle;
       continue;
     }
 
@@ -536,6 +664,7 @@ function parseFile(file: string): Parsed {
         parentUuid: rec.parentUuid,
         timestamp: rec.timestamp,
         isSidechain: rec.isSidechain,
+        promptId: rec.promptId,
         message: { role: "user", content: rec.attachment.prompt },
         agentreeMidTurn: true,
       });
@@ -545,7 +674,7 @@ function parseFile(file: string): Parsed {
   // Queue-operation reconstruction covers only transcripts old enough to lack
   // queued_command attachments; spliceInterjections' content dedup (`said`)
   // sees the attachment-projected user records above and drops duplicates.
-  spliceInterjections(queued, records, parentOf, seq);
+  spliceInterjections(sessionId, queued, records, parentOf, seq);
 
   // Pass 1b: coalesce each assistant turn back into a single node.
   //
@@ -556,10 +685,12 @@ function parseFile(file: string): Parsed {
   // group; `resolveParent` below then re-links children past the absorbed ones.
   const groups: RawRecord[][] = [];
   const groupOfKey = new Map<string, RawRecord[]>();
+  let firstMessageId: string | undefined;
 
   for (const rec of records) {
     const key =
       rec.type === "assistant" && rec.message?.id ? `msg:${rec.message.id}` : null;
+    if (key && !firstMessageId) firstMessageId = rec.message!.id;
     const existing = key ? groupOfKey.get(key) : undefined;
     if (existing) {
       existing.push(rec);
@@ -627,18 +758,21 @@ function parseFile(file: string): Parsed {
 
   // Pass 2: project the surviving turns.
   const nodes: TurnNode[] = [];
+  const keys = new Map<NodeId, string>();
   for (const { head, last, text, thinking, tools } of visible) {
     // Every record in a group repeats the same message-level usage, so take one
     // rather than summing — summing would multiply a turn's cost by its block
     // count and wreck the overlays.
     const u = last.message?.usage ?? head.message?.usage;
+    const id = head.uuid!;
 
     nodes.push({
-      id: head.uuid!,
-      parentId: resolveParent(head.uuid!),
+      id,
+      parentId: resolveParent(id),
       // Last record of the message group: a reply is written one record per
       // content block, and a fork must anchor on the block the turn ends with.
       lastRawId: last.uuid!,
+      sourceSessionId: sessionId,
       role: head.type as TurnNode["role"],
       text,
       thinking: thinking || undefined,
@@ -648,7 +782,7 @@ function parseFile(file: string): Parsed {
       stopReason: last.message?.stop_reason ?? null,
       isSidechain: head.isSidechain || undefined,
       // No transcript record backs this turn — see spliceInterjections.
-      injected: head.uuid!.startsWith(INJECTED_PREFIX) || undefined,
+      injected: id.startsWith(INJECTED_PREFIX) || undefined,
       // Backed by a queued_command attachment — real record, but not a valid
       // resume anchor itself.
       midTurn: head.agentreeMidTurn || undefined,
@@ -664,33 +798,38 @@ function parseFile(file: string): Parsed {
           }
         : undefined,
     });
+
+    // Stitch evidence a copy-fork preserves verbatim (uuids are NOT preserved):
+    // the API message id for replies, the prompt id plus text for prompts.
+    keys.set(
+      id,
+      head.type === "assistant" && head.message?.id
+        ? `m:${head.message.id}`
+        : `u:${head.promptId ?? head.timestamp ?? ""}|${gist(text)}`,
+    );
   }
   const titleDraft = visible.find(
     (d) => d.head.type === "user" && !d.synthetic && !d.text.startsWith("[Request interrupted"),
   );
 
   return {
-    nodes: mergeSameRoleRuns(nodes),
-    // A name the user chose with `/rename` beats anything inferred from the
-    // first prompt — it is the only title they actually asked for.
+    sessionId,
+    nodes,
+    keys,
+    // A name the user chose with `/rename` beats the CLI's generated title,
+    // which beats anything inferred from the first prompt.
     title:
       customTitle.trim() ||
+      aiTitle.trim() ||
       (titleDraft?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90),
     touchedAt,
+    cwd,
+    entrypoint,
+    version,
+    firstMessageId,
+    forkedFrom,
+    unknownTypes,
   };
-}
-
-/**
- * When the conversation was last touched.
- *
- * The newest record's own timestamp, not the file's mtime, and not the newest
- * *displayed* turn either. mtime moves when the CLI rewrites bookkeeping for a
- * session nobody is talking in; the newest displayed turn stands still through
- * a long tool loop, making an actively-running session look minutes stale. The
- * newest record of any kind is the one that tracks real activity.
- */
-function lastInteraction(parsed: Parsed, mtimeMs: number): number {
-  return parsed.touchedAt || mtimeMs;
 }
 
 // ------------------------------------------------------------------ lookup
@@ -701,90 +840,82 @@ interface Located {
   dirName: string;
 }
 
-/** Index of sessionId -> file, rebuilt on demand (cheap: a readdir per project). */
-export function locate(sessionId: SessionId): Located | null {
-  if (!/^[a-zA-Z0-9-]{8,64}$/.test(sessionId)) return null;
-  if (!fs.existsSync(PROJECTS)) return null;
+const isSessionId = (id: string) => /^[a-zA-Z0-9-]{8,64}$/.test(id);
 
-  for (const dirName of fs.readdirSync(PROJECTS)) {
-    const file = path.join(PROJECTS, dirName, `${sessionId}.jsonl`);
-    if (fs.existsSync(file)) {
-      // The cwd recorded inside the transcript is authoritative; the directory
-      // name is a lossy encoding (both / and . collapse to -).
-      const nodes = fs.readFileSync(file, "utf8").split("\n", 40);
-      let cwd = "";
-      for (const l of nodes) {
-        try {
-          const o = JSON.parse(l) as RawRecord;
-          if (o.cwd) {
-            cwd = o.cwd;
-            break;
-          }
-        } catch {
-          /* keep scanning */
-        }
-      }
-      return { file, cwd, dirName };
-    }
+/** Find a session's transcript (cheap: one existsSync per project dir). */
+export function locate(sessionId: SessionId): Located | null {
+  if (!isSessionId(sessionId)) return null;
+  const root = claudeProjects();
+  if (!fs.existsSync(root)) return null;
+
+  for (const dirName of fs.readdirSync(root)) {
+    const file = path.join(root, dirName, `${sessionId}.jsonl`);
+    if (fs.existsSync(file)) return { file, cwd: readCwd(file), dirName };
   }
   return null;
 }
 
-export function loadSession(sessionId: SessionId): SessionDetail | null {
-  const loc = locate(sessionId);
-  if (!loc) return null;
-
-  const parsed = parseFile(loc.file);
-  const { nodes, title } = parsed;
-  const meta = readMeta(sessionId);
-  for (const n of nodes) {
-    const m = meta[n.id] ?? n.absorbedIds?.map((id) => meta[id]).find(Boolean);
-    if (m) Object.assign(n, m);
+function readCwd(file: string): string {
+  // The cwd recorded inside the transcript is authoritative; the directory
+  // name is a lossy encoding (/, \, : and . all collapse to -).
+  try {
+    for (const l of fs.readFileSync(file, "utf8").split("\n", 40)) {
+      if (!l.trim()) continue;
+      try {
+        const o = JSON.parse(l) as RawRecord;
+        if (o.cwd) return o.cwd;
+      } catch {
+        /* keep scanning */
+      }
+    }
+  } catch {
+    /* fall through */
   }
-
-  const children = childIndex(nodes);
-  const stat = fs.statSync(loc.file);
-
-  return {
-    meta: {
-      id: sessionId,
-      provider: "claude",
-      cwd: loc.cwd,
-      project: loc.cwd ? path.basename(loc.cwd) : decodeProjectName(loc.dirName),
-      title: title || "Untitled",
-      updatedAt: lastInteraction(parsed, stat.mtimeMs),
-      nodeCount: nodes.length,
-      branchPoints: countBranchPoints(children),
-      resumeCommand: claudeResume(sessionId, loc.cwd),
-    },
-    nodes,
-  };
+  return "";
 }
 
-/** Sessions are per-directory, so the cd is part of the command. */
-function claudeResume(sessionId: SessionId, cwd: string): string {
-  const resume = `claude --resume ${sessionId}`;
-  return cwd ? `cd ${JSON.stringify(cwd)} && ${resume}` : resume;
-}
+export const claudeResumeArgv = (sessionId: SessionId) => ["claude", "--resume", sessionId];
+
+/** Sessions are per-directory, so the change of directory is part of the command. */
+const claudeResume = (sessionId: SessionId, cwd: string) =>
+  resumeCommand(cwd, claudeResumeArgv(sessionId));
+
+// ------------------------------------------------------------------ summaries
 
 /**
- * Lightweight listing for the welcome screen. Parses each transcript, so it is
- * O(all sessions) — fine at a few hundred files, worth an index beyond that.
- */
-/**
- * Summary cache, keyed by file identity (mtime + size).
+ * Per-file summary cache, keyed by file identity (mtime + size).
  *
  * The welcome screen scans every transcript, and there are hundreds of them
  * totalling hundreds of MB — one full scan is ~700ms and a few hundred MB of
  * garbage. With a live watcher that scan reruns whenever *any* session changes,
- * so re-parsing the ~284 files that didn't change is nearly all of the cost.
+ * so re-parsing the files that didn't change is nearly all of the cost.
  *
- * Only the SessionMeta is cached, never the node array: keeping every session's
- * turns resident would trade a CPU problem for a much worse memory one.
+ * Only metadata is cached, never the node array: keeping every session's turns
+ * resident would trade a CPU problem for a much worse memory one.
  */
-const summaries = new Map<string, { mtimeMs: number; size: number; meta: SessionMeta }>();
+interface FileSummary {
+  file: string;
+  dirName: string;
+  id: SessionId;
+  mtimeMs: number;
+  size: number;
+  /** File creation time — orders a fork after the session it was copied from. */
+  createdMs: number;
+  title: string;
+  cwd: string;
+  updatedAt: number;
+  nodeCount: number;
+  branchPoints: number;
+  entrypoint?: string;
+  version?: string;
+  firstMessageId?: string;
+  forkedFrom?: string;
+  unknownTypes: Record<string, number>;
+}
 
-function summarise(file: string, dirName: string): SessionMeta | null {
+const summaries = new Map<string, FileSummary>();
+
+function summarise(file: string, dirName: string): FileSummary | null {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(file);
@@ -793,71 +924,333 @@ function summarise(file: string, dirName: string): SessionMeta | null {
   }
 
   const hit = summaries.get(file);
-  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit.meta;
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
 
   const parsed = parseFile(file);
-  const { nodes, title } = parsed;
-  if (nodes.length === 0) {
-    summaries.delete(file);
-    return null;
+  const merged = mergeSameRoleRuns(parsed.nodes);
+  const s: FileSummary = {
+    file,
+    dirName,
+    id: parsed.sessionId,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    createdMs: stat.birthtimeMs || parsed.nodes[0]?.timestamp || stat.mtimeMs,
+    title: parsed.title,
+    cwd: parsed.cwd,
+    // The newest record's own timestamp, not the file's mtime (which moves
+    // when the CLI rewrites bookkeeping for a session nobody is talking in),
+    // and not the newest *displayed* turn (which stands still through a long
+    // tool loop, making an actively-running session look minutes stale).
+    updatedAt: parsed.touchedAt || stat.mtimeMs,
+    nodeCount: merged.length,
+    branchPoints: countBranchPoints(childIndex(merged)),
+    entrypoint: parsed.entrypoint,
+    version: parsed.version,
+    firstMessageId: parsed.firstMessageId,
+    forkedFrom: parsed.forkedFrom,
+    unknownTypes: parsed.unknownTypes,
+  };
+  summaries.set(file, s);
+  return s;
+}
+
+/** Every transcript in one project directory, summarised. */
+function summariseDir(dirName: string, seen?: Set<string>): FileSummary[] {
+  const dir = path.join(claudeProjects(), dirName);
+  const out: FileSummary[] = [];
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const f of entries) {
+    if (!f.endsWith(".jsonl")) continue;
+    const file = path.join(dir, f);
+    seen?.add(file);
+    const s = summarise(file, dirName);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ families
+
+/**
+ * Group one project directory's transcripts into fork families.
+ *
+ * The VS Code extension's "Fork conversation" writes a NEW transcript holding a
+ * copy of the active chain (fresh uuids, same API message ids, same prompt
+ * ids, same timestamps) and records no lineage at all. Every such copy starts
+ * with the same first assistant message id as its source — a value the API
+ * mints once per response, so two independent sessions never share it, no
+ * matter how similar their opening prompts. Explicit lineage (`forkedFrom` on
+ * SDK/Agentree forks, Agentree's sidecar) links families too.
+ */
+function groupFamilies(files: FileSummary[]): FileSummary[][] {
+  const byId = new Map(files.map((f) => [f.id, f]));
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    while (parent.has(x) && parent.get(x) !== x) x = parent.get(x)!;
+    return x;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  const lineage = readLineage();
+  const byFirst = new Map<string, string>();
+  for (const f of files) {
+    if (f.nodeCount === 0) continue;
+    if (f.forkedFrom && byId.has(f.forkedFrom)) union(f.id, f.forkedFrom);
+    const side = lineage[f.id];
+    if (side && byId.has(side)) union(f.id, side);
+    if (f.firstMessageId) {
+      const other = byFirst.get(f.firstMessageId);
+      if (other) union(f.id, other);
+      else byFirst.set(f.firstMessageId, f.id);
+    }
   }
 
-  const cwd = readCwd(file);
-  const id = path.basename(file).slice(0, -6);
+  const groups = new Map<string, FileSummary[]>();
+  for (const f of files) {
+    if (f.nodeCount === 0) continue;
+    const r = find(f.id);
+    const g = groups.get(r);
+    if (g) g.push(f);
+    else groups.set(r, [f]);
+  }
+  return [...groups.values()];
+}
+
+/** How many leading keys two root-first key paths share. */
+function sharedPrefix(a: string[], b: string[]): number {
+  let k = 0;
+  while (k < a.length && k < b.length && a[k] === b[k]) k++;
+  return k;
+}
+
+/** Root-first key path along a parse's newest chain (its active conversation). */
+function activeKeys(p: Parsed): string[] {
+  const kids = childIndex(p.nodes);
+  const byId = new Map(p.nodes.map((n) => [n.id, n]));
+  let leaf: TurnNode | undefined;
+  for (const n of p.nodes) {
+    if (!kids.has(n.id) && (!leaf || n.timestamp >= leaf.timestamp)) leaf = n;
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let cur = leaf;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    out.push(p.keys.get(cur.id) ?? "");
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return out.reverse();
+}
+
+/**
+ * Decide who forked from whom inside one family.
+ *
+ * Explicit lineage wins. Otherwise members are ordered by how many " (fork)"
+ * suffixes the extension stamped on their titles, then by file creation time
+ * (a fork's file is created after its source's — but a copied or restored
+ * directory resets creation times, so the title evidence goes first). Each
+ * member's parent is the EARLIER member it shares the longest prefix with: a
+ * fork of a fork shares more with its direct parent than with the root.
+ */
+function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<string, string | null> {
+  const lineage = readLineage();
+  const ids = new Set(group.map((g) => g.id));
+  const forkDepth = (t: string) => (t.match(/\(fork\)/g) ?? []).length;
+  const order = [...group].sort(
+    (a, b) => forkDepth(a.title) - forkDepth(b.title) || a.createdMs - b.createdMs,
+  );
+  const keys = new Map(order.map((g) => [g.id, activeKeys(parsed.get(g.id)!)]));
+
+  const out = new Map<string, string | null>();
+  order.forEach((m, i) => {
+    const explicit = [m.forkedFrom, lineage[m.id]].find((p) => p && ids.has(p) && p !== m.id);
+    if (explicit) {
+      out.set(m.id, explicit);
+      return;
+    }
+    let best: string | null = null;
+    let bestLen = 0;
+    for (let j = 0; j < i; j++) {
+      const len = sharedPrefix(keys.get(m.id)!, keys.get(order[j].id)!);
+      if (len > bestLen) {
+        bestLen = len;
+        best = order[j].id;
+      }
+    }
+    out.set(m.id, best);
+  });
+  return out;
+}
+
+interface Family {
+  rootId: string;
+  nodes: TurnNode[];
+  members: MemberInfo[];
+}
+
+/** Parse, order and stitch one family into a single merged tree. */
+function buildFamily(group: FileSummary[]): Family {
+  const parsed = new Map(group.map((g) => [g.id, parseFile(g.file)]));
+  const parents = group.length > 1 ? familyParents(group, parsed) : new Map([[group[0].id, null]]);
+  const rootId =
+    group.find((g) => !parents.get(g.id))?.id ??
+    [...group].sort((a, b) => a.createdMs - b.createdMs)[0].id;
+
+  const fm: FamilyMember[] = group.map((g) => {
+    const p = parsed.get(g.id)!;
+    return {
+      sessionId: g.id,
+      parentSessionId: parents.get(g.id) ?? null,
+      nodes: p.nodes,
+      keyOf: (n) => p.keys.get(n.id) ?? n.id,
+    };
+  });
+  // Root first so its node ids are the ones the shared prefix keeps.
+  fm.sort((a, b) => (a.sessionId === rootId ? -1 : b.sessionId === rootId ? 1 : 0));
+
+  const nodes = mergeSameRoleRuns(group.length > 1 ? stitchFamily(fm) : parsed.get(group[0].id)!.nodes.map((n) => ({ ...n })));
+  const members: MemberInfo[] = group.map((g) => ({
+    id: g.id,
+    title: g.title || "Untitled",
+    parentId: parents.get(g.id) ?? null,
+    cwd: g.cwd,
+    resumeCommand: claudeResume(g.id, g.cwd),
+    updatedAt: g.updatedAt,
+    entrypoint: g.entrypoint,
+  }));
+  return { rootId, nodes, members };
+}
+
+/** Family-level meta cache, keyed by every member file's identity. */
+const familyMetas = new Map<string, SessionMeta>();
+const signature = (group: FileSummary[]) =>
+  group.map((g) => `${g.file}:${g.mtimeMs}:${g.size}`).sort().join("|");
+
+function familyMeta(group: FileSummary[], built?: Family): SessionMeta {
+  const updatedAt = Math.max(...group.map((g) => g.updatedAt));
+
+  if (group.length === 1) {
+    const g = group[0];
+    return {
+      id: g.id,
+      provider: "claude",
+      cwd: g.cwd,
+      project: g.cwd ? baseName(g.cwd) : decodeProjectName(g.dirName),
+      title: g.title || "Untitled",
+      updatedAt,
+      nodeCount: g.nodeCount,
+      branchPoints: g.branchPoints,
+      resumeCommand: claudeResume(g.id, g.cwd),
+      members: 1,
+      entrypoint: g.entrypoint,
+    };
+  }
+
+  const sig = signature(group);
+  const hit = familyMetas.get(sig);
+  if (hit) return hit;
+  const fam = built ?? buildFamily(group);
+  const r = group.find((g) => g.id === fam.rootId)!;
   const meta: SessionMeta = {
-    id,
+    id: fam.rootId,
     provider: "claude",
-    cwd,
-    project: cwd ? path.basename(cwd) : decodeProjectName(dirName),
-    title: title || "Untitled",
-    updatedAt: lastInteraction(parsed, stat.mtimeMs),
-    nodeCount: nodes.length,
-    branchPoints: countBranchPoints(childIndex(nodes)),
-    resumeCommand: claudeResume(id, cwd),
+    cwd: r.cwd,
+    project: r.cwd ? baseName(r.cwd) : decodeProjectName(r.dirName),
+    title: r.title || "Untitled",
+    updatedAt,
+    nodeCount: fam.nodes.length,
+    branchPoints: countBranchPoints(childIndex(fam.nodes)),
+    resumeCommand: claudeResume(fam.rootId, r.cwd),
+    members: group.length,
+    entrypoint: r.entrypoint,
   };
-  summaries.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, meta });
+  familyMetas.set(sig, meta);
   return meta;
 }
 
+// ------------------------------------------------------------------ API
+
+let lastHealth: ProviderHealth | null = null;
+export const claudeHealth = (): ProviderHealth =>
+  lastHealth ?? new HealthScan("claude", claudeProjects()).done();
+
 export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
-  if (!fs.existsSync(PROJECTS)) return [];
+  const root = claudeProjects();
+  const health = new HealthScan("claude", root);
   const out: SessionMeta[] = [];
   const seen = new Set<string>();
 
-  for (const dirName of fs.readdirSync(PROJECTS)) {
-    const dir = path.join(PROJECTS, dirName);
-    try {
-      if (!fs.statSync(dir).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith(".jsonl")) continue;
-      const file = path.join(dir, f);
-      seen.add(file);
-      const meta = summarise(file, dirName);
-      if (!meta) continue;
-      out.push(meta);
+  if (fs.existsSync(root)) {
+    for (const dirName of fs.readdirSync(root)) {
+      try {
+        if (!fs.statSync(path.join(root, dirName)).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      const files = summariseDir(dirName, seen);
+      for (const f of files) {
+        health.file();
+        if (f.nodeCount === 0) health.skipped();
+        else health.parsed();
+        health.version(f.version ? `claude ${minorVersion(f.version)}` : undefined);
+        health.unknown(f.unknownTypes);
+      }
+      for (const group of groupFamilies(files)) out.push(familyMeta(group));
     }
   }
 
-  // Forget deleted transcripts, so the cache can't outgrow the directory.
+  // Forget deleted transcripts, so the caches can't outgrow the directory.
   for (const key of summaries.keys()) if (!seen.has(key)) summaries.delete(key);
+  if (familyMetas.size > 500) familyMetas.clear();
 
+  health.listed(out.length);
+  lastHealth = health.done();
   out.sort((a, b) => b.updatedAt - a.updatedAt);
   return opts.limit ? out.slice(0, opts.limit) : out;
 }
 
-function readCwd(file: string): string {
-  try {
-    for (const l of fs.readFileSync(file, "utf8").split("\n", 40)) {
-      if (!l.trim()) continue;
-      const o = JSON.parse(l) as RawRecord;
-      if (o.cwd) return o.cwd;
-    }
-  } catch {
-    /* fall through */
+/** Load the family containing `sessionId` — any member id opens the whole tree. */
+export function loadSession(sessionId: SessionId): SessionDetail | null {
+  const loc = locate(sessionId);
+  if (!loc) return null;
+
+  const files = summariseDir(loc.dirName);
+  const group = groupFamilies(files).find((g) => g.some((f) => f.id === sessionId));
+  if (!group) {
+    // A transcript with no displayable turn yet (e.g. a fork nobody has
+    // spoken in): open it as an empty tree rather than "not found".
+    const s = files.find((f) => f.id === sessionId);
+    if (!s) return null;
+    return {
+      meta: familyMeta([s]),
+      nodes: [],
+      members: [],
+    };
   }
-  return "";
+
+  const fam = buildFamily(group);
+  // Annotations are written under the family root's id, but a family's root
+  // can change (a fork found later, a root deleted) — read every member's.
+  for (const m of fam.members) {
+    const meta = readMeta(m.id);
+    for (const n of fam.nodes) {
+      const mm = meta[n.id] ?? n.absorbedIds?.map((id) => meta[id]).find(Boolean);
+      if (mm) Object.assign(n, mm);
+    }
+  }
+
+  return {
+    meta: familyMeta(group, fam),
+    nodes: fam.nodes,
+    members: fam.members,
+  };
 }
