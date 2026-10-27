@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, forkSummaries } from "../../shared/render.ts";
 import type {
   ForkResult,
   MemberInfo,
@@ -19,7 +19,8 @@ import { readSettings } from "../settings.ts";
 import { RESUME_ARGV, resumeCommand } from "../shell.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
-import { assignStableIds, stitchFamily, textKey, type FamilyMember } from "./stitch.ts";
+import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
+import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
 /**
  * Codex rollouts, paginated format (codex-cli ≥ ~0.151, 2026-09 on).
@@ -536,7 +537,7 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
   // Its node ids are per-file, so identity comes from the text chain, the
   // same in a verbatim copy.
   for (const n of nodes) n.turnId = `${sid}#legacy`;
-  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false }));
+  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, legacyKey: foldedTextKey(n) }));
   page.turns = nodes.length ? [{ id: `${sid}#legacy`, firstOrdinal: 0, nodes }] : [];
 }
 
@@ -969,13 +970,13 @@ export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
   // A thread holds what its current history holds — its own turns and the
   // ones it continues by reference (a fork copies nothing). Legacy rollouts
   // have no turn ids; their copies are stitched, so occurrences say it.
-  for (const m of members) {
-    const turns = held.get(m.id);
-    const copy = holdsCopy(m.id);
-    m.tipId =
-      heldTip(nodes, (n) => (n.turnId?.endsWith("#legacy") ? copy(n) : !!n.turnId && !!turns?.has(n.turnId))) ??
-      undefined;
+  const threads = [...held];
+  for (const n of nodes) {
+    n.heldBy = n.turnId?.endsWith("#legacy")
+      ? copyHolders(n)
+      : threads.filter(([, turns]) => !!n.turnId && turns.has(n.turnId)).map(([id]) => id);
   }
+  assignTips(nodes, members);
   return { meta, nodes, members };
 }
 

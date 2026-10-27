@@ -2,13 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { childIndex, cwdKey, pathToRoot, toNodeMap } from "../shared/render.ts";
+import { actionTarget, childIndex, cwdKey, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
 import { claudeHealth, claudeWatchDirs, listSessions, loadSession, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
 import { readLineage } from "../electron/lineage.ts";
 import { annotate } from "../electron/registry.ts";
-import { writeMeta } from "../electron/meta.ts";
+import { readMeta, writeMeta } from "../electron/meta.ts";
+import { digest, foldedDigest, qualify } from "../electron/identity.ts";
 
 const P = "11111111-1111-4111-8111-111111111111";
 const F = "22222222-2222-4222-8222-222222222222";
@@ -35,6 +36,19 @@ const MO = "50000000-0000-4000-8000-000000000005";
 const MF = "50000000-0000-4000-8000-000000000006";
 const SP = "50000000-0000-4000-8000-000000000007";
 const CD = "50000000-0000-4000-8000-000000000008";
+const WP = "50000000-0000-4000-8000-000000000009";
+const WF = "50000000-0000-4000-8000-00000000000a";
+const EP = "50000000-0000-4000-8000-00000000000b";
+const EF = "50000000-0000-4000-8000-00000000000c";
+const UP = "50000000-0000-4000-8000-00000000000d";
+const UF = "50000000-0000-4000-8000-00000000000e";
+const GP = "50000000-0000-4000-8000-00000000000f";
+const GF = "50000000-0000-4000-8000-000000000010";
+const RNS = "50000000-0000-4000-8000-000000000011";
+const DV = "50000000-0000-4000-8000-000000000012";
+const GUARD_OUT = "Change it:\n\n```python\nif ready:\n    send()\ncancel()\n```";
+const GUARD_IN = "Change it:\n\n```python\nif ready:\n    send()\n    cancel()\n```";
+const EP_PROMPT = "Summarise the log\n\n  - errors only";
 let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
@@ -180,9 +194,9 @@ describe("Claude transcripts", () => {
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(25);
+    expect(h.filesSeen).toBe(31);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(23);
+    expect(h.sessionsParsed).toBe(29);
     // The moved session's old copy: every record is in the new one.
     expect(h.skipped).toBe(1);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
@@ -264,6 +278,69 @@ describe("Claude display merge and fork endpoints", () => {
     const redis = d.nodes.find((n) => n.text.endsWith("use Redis"))!;
     expect(one(d, "Redis answer.").parentId).toBe(redis.id);
     expect(redis.branchKind).toBe("fork");
+  });
+});
+
+describe("Claude prompt identity", () => {
+  it("keeps prompts apart that differ only in indentation, each with its own reply", () => {
+    const d = loadSession(WF)!;
+    expectTree(d);
+    expect(d.meta.id).toBe(WP);
+    const out = one(d, GUARD_OUT);
+    const inside = one(d, GUARD_IN);
+    expect(kidsOf(d, one(d, "Here is the guard."))).toEqual([GUARD_OUT, GUARD_IN].sort());
+    expect(one(d, "Unconditional cancel.").parentId).toBe(out.id);
+    expect(one(d, "Conditional cancel.").parentId).toBe(inside.id);
+    expect(inside).toMatchObject({ branchKind: "fork", sourceSessionId: WF });
+    expect(out.stableIds).not.toEqual(inside.stableIds);
+  });
+});
+
+describe("Claude quiet fork endpoints", () => {
+  it("ends a quiet fork at its own last reply, not inside the parent's merged run", () => {
+    // Alone, the parent draws its agent loop as one reply...
+    const alone = mergeSameRoleRuns(parseFile(path.join(projectDir("c--work-endpoint"), `${EP}.jsonl`)).nodes);
+    expect(alone.map((n) => n.text)).toContain("First prose.\n\nLater prose.");
+    // ...but the fork holds only the first part, so the family keeps them apart.
+    const d = loadSession(EF)!;
+    expectTree(d);
+    const first = one(d, "First prose.");
+    const later = one(d, "Later prose.");
+    expect(later.parentId).toBe(first.id);
+    expect(new Set(first.heldBy)).toEqual(new Set([EP, EF]));
+    expect(later.heldBy).toEqual([EP]);
+    expect(d.members.find((m) => m.id === EF)!.tipId).toBe(first.id);
+    expect(d.members.find((m) => m.id === EP)!.tipId).toBe(later.id);
+    // A fork at the quiet fork's endpoint cannot take in what it never had.
+    expect(first.forkBlocked).toBeUndefined();
+    const res = forkClaudeAt(EP, first.id);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const file = path.join(projectDir("c--work-endpoint"), `${res.id}.jsonl`);
+    expect(mergeSameRoleRuns(parseFile(file).nodes).map((n) => n.text)).toEqual([EP_PROMPT, "First prose."]);
+    fs.rmSync(file);
+  });
+
+  it("ends a quiet fork at the first of two user records", () => {
+    const d = loadSession(UF)!;
+    expectTree(d);
+    expect(d.meta.id).toBe(UP);
+    const first = one(d, "First ask");
+    expect(one(d, "Second ask").parentId).toBe(first.id);
+    expect(d.members.find((m) => m.id === UF)).toMatchObject({ parentId: UP, parentEvidence: "explicit", tipId: first.id });
+  });
+
+  it("opens and resumes the focused quiet fork on the history it shares, and the parent elsewhere", () => {
+    const d = loadSession(EP)!;
+    const first = one(d, "First prose.");
+    const later = one(d, "Later prose.");
+    // The shared reply is drawn as the parent's, but the fork holds it too.
+    expect(first.sourceSessionId).toBe(EP);
+    expect(actionTarget(d, first, EF).ref).toEqual({ provider: "claude", sessionId: EF, cwd: "C:\\work\\demo" });
+    expect(actionTarget(d, first, EF).member.resumeCommand).toContain(EF);
+    // Opened on the parent, or on a turn the fork doesn't hold: the parent.
+    expect(actionTarget(d, first, null).ref.sessionId).toBe(EP);
+    expect(actionTarget(d, later, EF).ref.sessionId).toBe(EP);
   });
 });
 
@@ -386,6 +463,92 @@ describe("Claude fork", () => {
   });
 });
 
+describe("Claude annotations across identity schemes and membership", () => {
+  const sidecar = (id: string) => readMeta(id);
+
+  it("finds labels saved under the previous identity scheme, and carries them forward", () => {
+    // Scheme 2 folded whitespace in a prompt's digest...
+    const folded = `u:ep-1|${foldedDigest(EP_PROMPT)}`;
+    writeMeta(EP, folded, { label: "folded key" });
+    // ...and wrote a prompt without a promptId as a literal chain.
+    const literal = `u:|${foldedDigest("Second question")}@m:msg_n1`;
+    writeMeta(NP, literal, { label: "literal chain" });
+
+    expect(one(loadSession(EP)!, EP_PROMPT).label).toBe("folded key");
+    expect(one(loadSession(NP)!, "Second question").label).toBe("literal chain");
+    // Carried forward under the current keys, into every member's sidecar.
+    for (const id of [EP, EF]) expect(sidecar(id)[`u:ep-1|${digest(EP_PROMPT)}`]).toEqual({ label: "folded key" });
+    expect(sidecar(NP)[qualify(`u:|${digest("Second question")}`, "m:msg_n1")]).toEqual({ label: "literal chain" });
+
+    // Clearing it clears the old entries too: nothing resurfaces.
+    annotate(EP, one(loadSession(EP)!, EP_PROMPT).id, { label: null as unknown as undefined });
+    expect(sidecar(EP)[folded]).toBeUndefined();
+    expect(one(loadSession(EP)!, EP_PROMPT).label).toBeUndefined();
+  });
+
+  it("gives an old key two prompts shared to neither of them", () => {
+    // Scheme 2 keyed the two indentations alike; that entry is ambiguous.
+    writeMeta(WP, `u:|${foldedDigest(GUARD_OUT)}@m:msg_wi1`, { label: "which one?" });
+    const d = loadSession(WP)!;
+    expect(one(d, GUARD_OUT).label).toBeUndefined();
+    expect(one(d, GUARD_IN).label).toBeUndefined();
+  });
+
+  it("keeps a label made before a fork existed once the original is deleted", () => {
+    const dir = projectDir("c--work-growth");
+    fs.mkdirSync(dir, { recursive: true });
+    const src = path.join(claudeRoot, "growth-src", "c--work-growth");
+    fs.copyFileSync(path.join(src, `${GP}.jsonl`), path.join(dir, `${GP}.jsonl`));
+    annotate(GP, one(loadSession(GP)!, "Postgres.").id, { label: "chosen" });
+    expect(sidecar(GF)).toEqual({});
+
+    // The fork appears; loading the family gives its sidecar the label too.
+    fs.copyFileSync(path.join(src, `${GF}.jsonl`), path.join(dir, `${GF}.jsonl`));
+    expect(loadSession(GP)!.members.map((m) => m.id).sort()).toEqual([GP, GF].sort());
+    expect(sidecar(GF)).toEqual({ "m:msg_gr1": { label: "chosen" } });
+    // Once the sidecars agree, a load writes nothing.
+    const stamp = () => [GP, GF].map((id) => fs.statSync(path.join(process.env.AGENTREE_HOME!, "meta", `${id}.json`)).mtimeMs);
+    const before = stamp();
+    loadSession(GF);
+    expect(stamp()).toEqual(before);
+
+    fs.rmSync(path.join(dir, `${GP}.jsonl`));
+    const d = loadSession(GF)!;
+    expect(d.meta.id).toBe(GF);
+    expect(one(d, "Postgres.").label).toBe("chosen");
+  });
+});
+
+describe("Claude metadata across copies of one session", () => {
+  /** Copy a session's copies into projects/, oldest write first. */
+  const place = (id: string, dirs: string[]) => {
+    const t = Date.now() / 1000 - 3600;
+    dirs.forEach((name, i) => {
+      fs.mkdirSync(projectDir(name), { recursive: true });
+      const to = path.join(projectDir(name), `${id}.jsonl`);
+      fs.copyFileSync(path.join(claudeRoot, "copies-src", name, `${id}.jsonl`), to);
+      fs.utimesSync(to, t + i * 60, t + i * 60);
+    });
+  };
+
+  it("takes a rename from the copy written last, though every record it has is in the other", () => {
+    place(RNS, ["c--work-rn-old", "c--work-rn-new"]);
+    expect(listSessions().filter((s) => s.id === RNS)).toEqual([expect.objectContaining({ title: "Renamed in copy" })]);
+    const d = loadSession(RNS)!;
+    expectTree(d);
+    // The conversation is still the larger copy's.
+    one(d, "Done too.");
+  });
+
+  it("keeps a diverged copy's rename made before its first new record", () => {
+    place(DV, ["c--work-dv-a", "c--work-dv-b"]);
+    expect(listSessions().find((s) => s.id === DV)!.title).toBe("Named before diverging");
+    const d = loadSession(DV)!;
+    expectTree(d);
+    expect(kidsOf(d, one(d, "Drafted."))).toEqual(["Longer", "Shorter"]);
+  });
+});
+
 describe("Claude parentage evidence", () => {
   it("keeps creation order over a renamed title, and says the direction is inferred", async () => {
     // Created P3 → F3 → G3, a second apart; G3 was renamed, so its title
@@ -437,7 +600,7 @@ describe("Fork invariants over every fixture family", () => {
       }
     }
     expect(checked).toBeGreaterThan(30);
-  });
+  }, 60_000);
 
   it("a fork of a compacted fork keeps the pre-compact history (second generation)", () => {
     // KN is the extension's fork of compacted KP: its boundary's logical

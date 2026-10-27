@@ -1,6 +1,6 @@
-import crypto from "node:crypto";
 import { childIndex, ROOT_KEY } from "../../shared/render.ts";
 import type { NodeId, TurnNode } from "../../shared/types.ts";
+import { textKey } from "../identity.ts";
 
 /**
  * Stitch a fork family — several sessions that share prefixes — into one tree.
@@ -27,8 +27,9 @@ import type { NodeId, TurnNode } from "../../shared/types.ts";
  * The keys must be EVIDENCE the copy preserved, never a guess: Claude uses the
  * API message id and prompt id (copied verbatim; uuids are not), legacy Codex
  * and Copilot use role + text, safe there because the prefix is a byte copy.
- * Text is compared WHOLE (as a digest), never by an opening gist: two prompts
- * that share a long preamble and differ at the end are different prompts.
+ * Text is compared WHOLE and EXACT (as a digest, `identity.ts`), never by an
+ * opening gist or with whitespace folded: two prompts that share a long
+ * preamble, or differ only in a line's indentation, are different prompts.
  * A shared opening prompt alone never merges two sessions — the families are
  * chosen by the caller from lineage, and keys only align their prefixes.
  */
@@ -40,48 +41,6 @@ export interface FamilyMember {
   nodes: TurnNode[];
   /** Match key for one of this member's nodes. Defaults to role + full-text digest. */
   keyOf?: (n: TurnNode) => string;
-}
-
-/** Whitespace-normalised digest of the WHOLE text — an identity, unlike a display gist. */
-export const digest = (s: string) =>
-  crypto.createHash("sha1").update(s.replace(/\s+/g, " ").trim()).digest("hex").slice(0, 20);
-export const textKey = (n: TurnNode) => `${n.role}:${digest(n.text)}`;
-
-/**
- * Give every node its semantic identity (`TurnNode.stableIds[0]`), the same in
- * every session holding a copy of it. `own` returns the node's key and whether
- * that key is unique on its own (an API message id, a prompt id, a Codex turn
- * id). A weak key — text alone — is qualified by its parent's identity: a
- * copy repeats the whole prefix, so the chain is the same there.
- */
-export function assignStableIds(nodes: TurnNode[], own: (n: TurnNode) => { key: string; strong: boolean }): void {
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const done = new Map<NodeId, string>();
-  for (const start of nodes) {
-    // Iterative: a text-keyed (Copilot, legacy Codex) chain is as deep as the
-    // conversation is long.
-    const path: TurnNode[] = [];
-    const onPath = new Set<NodeId>();
-    let base = "root";
-    for (let cur: TurnNode | undefined = start; cur; ) {
-      const hit = done.get(cur.id);
-      if (hit) {
-        base = hit;
-        break;
-      }
-      if (onPath.has(cur.id)) break; // malformed (cyclic) transcript
-      onPath.add(cur.id);
-      path.push(cur);
-      if (own(cur).strong) break;
-      cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-    }
-    for (let i = path.length - 1; i >= 0; i--) {
-      const { key, strong } = own(path[i]);
-      base = strong ? key : `${key}@${base}`;
-      done.set(path[i].id, base);
-    }
-  }
-  for (const n of nodes) n.stableIds = [done.get(n.id)!];
 }
 
 /** Parents before children, siblings in file order. */
