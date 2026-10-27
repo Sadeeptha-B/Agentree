@@ -17,7 +17,7 @@ interface State {
   /** One row per provider from the last scan — shown above the list. */
   health: ProviderHealth[];
   filter: string;
-  /** Show only sessions from this working directory. Empty means all of them. */
+  /** Show only sessions from this working directory (a `cwdKey`). Empty means all of them. */
   cwdFilter: string;
 
   session: SessionDetail | null;

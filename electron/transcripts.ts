@@ -657,6 +657,7 @@ export function parseFile(file: string): Parsed {
   let touchedAt = 0;
   let activeAt = 0;
   let cwd = "";
+  let lastCwd = "";
   let entrypoint: string | undefined;
   let version: string | undefined;
   let forkedFrom: string | undefined;
@@ -683,7 +684,13 @@ export function parseFile(file: string): Parsed {
       if (t > touchedAt) touchedAt = t;
       if (t > activeAt && isActivity(rec)) activeAt = t;
     }
-    if (!cwd && rec.cwd) cwd = rec.cwd;
+    // Where the session CONTINUES: the last directory a conversation record
+    // ran in (a moved repo keeps one session id across folders). Any
+    // record's first cwd is only the fallback.
+    if (rec.cwd) {
+      if (!cwd) cwd = rec.cwd;
+      if (rec.type === "user" || rec.type === "assistant") lastCwd = rec.cwd;
+    }
     if (!entrypoint && rec.entrypoint) entrypoint = rec.entrypoint;
     if (rec.version) version = rec.version;
     if (!forkedFrom && rec.forkedFrom?.sessionId) forkedFrom = rec.forkedFrom.sessionId;
@@ -936,7 +943,7 @@ export function parseFile(file: string): Parsed {
       (titleDraft?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90),
     touchedAt,
     activeAt,
-    cwd,
+    cwd: lastCwd || cwd,
     entrypoint,
     version,
     forkedFrom,
@@ -962,28 +969,10 @@ export function locate(sessionId: SessionId): Located | null {
 
   for (const dirName of fs.readdirSync(root)) {
     const file = path.join(root, dirName, `${sessionId}.jsonl`);
-    if (fs.existsSync(file)) return { file, cwd: readCwd(file), dirName };
+    // The parse summary's cwd: where the session continues (cached per file).
+    if (fs.existsSync(file)) return { file, cwd: summarise(file, dirName)?.cwd ?? "", dirName };
   }
   return null;
-}
-
-function readCwd(file: string): string {
-  // The cwd recorded inside the transcript is authoritative; the directory
-  // name is a lossy encoding (/, \, : and . all collapse to -).
-  try {
-    for (const l of fs.readFileSync(file, "utf8").split("\n", 40)) {
-      if (!l.trim()) continue;
-      try {
-        const o = JSON.parse(l) as RawRecord;
-        if (o.cwd) return o.cwd;
-      } catch {
-        /* keep scanning */
-      }
-    }
-  } catch {
-    /* fall through */
-  }
-  return "";
 }
 
 export const claudeResumeArgv = RESUME_ARGV.claude;

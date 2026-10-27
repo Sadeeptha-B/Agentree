@@ -369,6 +369,8 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
       page.activeAt = ts;
     }
     if (r.type === "turn_context" && p.model) model = p.model;
+    // Each turn records where it ran; the last one is where the thread is.
+    if (r.type === "turn_context" && p.cwd) page.cwd = p.cwd;
     if (r.type === "event_msg" && p.type && !KNOWN_EVENTS.has(p.type)) bump(`event_msg/${p.type}`);
     if (!p.turn_id) continue;
     turnRecords++;
@@ -854,8 +856,9 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
     parentId: ps.find((p) => p.forkedFrom)?.forkedFrom ?? null,
     // Codex records every fork's source itself.
     parentEvidence: ps.some((p) => p.forkedFrom) ? "explicit" : undefined,
-    cwd: ps[0].cwd,
-    resumeCommand: resumeCmd(id, ps[0].cwd),
+    // The newest page is where the thread continues (pages are oldest first).
+    cwd: ps[ps.length - 1].cwd,
+    resumeCommand: resumeCmd(id, ps[ps.length - 1].cwd),
     activeAt: Math.max(...ps.map((p) => p.activeAt || p.touchedAt)),
     touchedAt: Math.max(...ps.map((p) => p.touchedAt)),
     archived: ps.every((p) => p.archived) || undefined,

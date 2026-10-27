@@ -157,6 +157,24 @@ export function sumCost(nodes: TurnNode[]): CostBreakdown {
   );
 }
 
+// ------------------------------------------------------------------ paths
+
+/**
+ * A working directory as a comparison key, never for display. One session
+ * records the same folder as `c:\…`, `C:\…` and `/c/…` (Git Bash), with or
+ * without a trailing separator; all of them are one directory. Only the
+ * drive letter is case-folded — the rest of a path can be case-sensitive.
+ */
+export function cwdKey(p: string): string {
+  let s = p.trim().replace(/\\/g, "/");
+  const msys = /^\/([a-zA-Z])(\/|$)/.exec(s);
+  if (msys) s = `${msys[1]}:/${s.slice(3)}`;
+  s = s.replace(/^([a-zA-Z]):/, (_m, d: string) => `${d.toLowerCase()}:`);
+  s = s.replace(/\/+$/, "");
+  // A bare root keeps its separator: "c:/" and "/" are directories too.
+  return /^[a-z]:$/.test(s) ? `${s}/` : s || (p.trim() ? "/" : "");
+}
+
 // ------------------------------------------------------------------ text
 
 export function shortLabel(node: TurnNode, max = 48): string {
