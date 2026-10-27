@@ -9,9 +9,9 @@ import {
   INJECTED_PREFIX,
   loadSession,
   locate,
-  parseFile,
-  readRecords,
+  readSourceRecords,
   resolveLineage,
+  uuidsOf,
   type RawRecord,
 } from "../transcripts.ts";
 
@@ -73,7 +73,9 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
   if (!loc) return { ok: false, error: "That turn's transcript is no longer on disk." };
   const anchor = node.lastRawId ?? node.id;
 
-  const records = readRecords(loc.file);
+  // Every copy of the session, as the parser read it: a session that lives in
+  // two project folders forks from whichever copy holds the turn.
+  const records = readSourceRecords(loc.source);
   if (!records) return { ok: false, error: "Could not read the transcript." };
 
   // Later records with the same uuid win (the CLI rewrites a few in place).
@@ -136,10 +138,12 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
     (r) => r.type === "summary" && (r as { leafUuid?: string }).leafUuid === copied[copied.length - 1].uuid,
   ) as { summary?: string } | undefined;
   if (summary?.summary) lines.push(JSON.stringify({ type: "summary", leafUuid: prev, summary: summary.summary }));
-  const title = `${parseFile(loc.file).title || "Forked session"} (fork)`;
+  const title = `${loc.source.title || "Forked session"} (fork)`;
   lines.push(JSON.stringify({ type: "custom-title", sessionId: newId, customTitle: title }));
 
-  const file = path.join(path.dirname(loc.file), `${newId}.jsonl`);
+  // Next to the newest copy that holds the turn: where the session lives now.
+  const holder = [...loc.source.parse].reverse().find((c) => uuidsOf(c).has(anchor)) ?? loc.source;
+  const file = path.join(path.dirname(holder.file), `${newId}.jsonl`);
   try {
     fs.writeFileSync(file, lines.join("\n") + "\n", { flag: "wx" });
   } catch (e) {
