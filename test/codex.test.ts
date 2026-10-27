@@ -64,6 +64,17 @@ describe("Codex paginated rollouts", () => {
     expect(new Date(s.touchedAt).toISOString()).toBe("2026-10-01T16:40:00.000Z");
   });
 
+  it("gives each thread its own tip: what its current history ends in", () => {
+    const d = loadCodexSession(T1)!;
+    const tip = (id: string) => d.nodes.find((n) => n.id === d.members.find((m) => m.id === id)!.tipId)?.text;
+    // After the steering message: the turn's last reply.
+    expect(tip(T2)).toBe("Grandchild answer.");
+    expect(tip(T3)).toBe("Forking.\n\nFork answer.");
+    // T1's head is its prompt-edit page: the edited branch, not the cut one.
+    expect(tip(T1)).toBe("Rethinking.\n\nDifferent detail.");
+    expect(listCodexSessions().find((s) => s.id === T1)!.forks!.map((f) => f.id).sort()).toEqual([T2, T3].sort());
+  });
+
   it("builds forks AND prompt edits into one exact tree", () => {
     const d = loadCodexSession(T2)!;
     expect(d.meta.id).toBe(T1);
