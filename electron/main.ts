@@ -1,12 +1,14 @@
 import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, shell } from "electron";
 import path from "node:path";
 
-import { allHealth, listAllSessions, loadAnySession, forkAnyAt } from "./registry.ts";
+import { allHealth, listAllSessions, loadAnySession, forkAnyAt, providerById } from "./registry.ts";
+import { nativeLink } from "./native.ts";
+import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { writeMeta } from "./meta.ts";
 import { watchTranscripts, type Watcher } from "./watch.ts";
 import { CH } from "./ipc.ts";
-import type { NodeMeta } from "../shared/types.ts";
+import type { ActionResult, NodeMeta, SessionRef } from "../shared/types.ts";
 
 /**
  * App root. Using Electron's own resolver rather than __dirname/import.meta
@@ -29,8 +31,12 @@ function createWindow() {
     title: "Agentree",
     // Window icon matters on Windows/Linux; macOS uses the dock icon below.
     icon: nativeImage.createFromPath(iconPath("logo-512.png")),
-    // Chrome-less title bar with the traffic lights inset over our toolbar.
-    titleBarStyle: "hiddenInset",
+    // macOS: chrome-less title bar with the traffic lights inset over our
+    // toolbar. Elsewhere "hiddenInset" means NO window controls at all, so
+    // Windows/Linux keep the native frame (the renderer drops the insets).
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const }
+      : { autoHideMenuBar: true }),
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#12100e" : "#faf8f5",
     webPreferences: {
       preload: path.join(ROOT(), "dist-electron", "preload.cjs"),
@@ -87,6 +93,28 @@ ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
 );
 
 ipcMain.handle(CH.providerHealth, () => allHealth());
+
+// Hand a session to VS Code: the OS routes the vscode:// deep link to the
+// harness's extension, exactly as a click on the link would.
+ipcMain.handle(CH.openNative, async (_e, ref: SessionRef): Promise<ActionResult> => {
+  const link = nativeLink(ref);
+  if (!link) return { ok: false, error: "This harness has no VS Code extension to open sessions in." };
+  try {
+    await shell.openExternal(link);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Couldn't hand the session to VS Code (is it installed?): ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+});
+
+ipcMain.handle(CH.resumeInTerminal, (_e, ref: SessionRef): ActionResult => {
+  const p = providerById(ref.provider);
+  if (!p || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
+  return openTerminal(p.resumeArgv(ref.sessionId), ref.cwd);
+});
 
 // ---- live transcript watching ----
 //

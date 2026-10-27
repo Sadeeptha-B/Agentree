@@ -8,7 +8,9 @@ import {
   providerById,
 } from "../../electron/registry.ts";
 import { writeMeta } from "../../electron/meta.ts";
+import { nativeLink } from "../../electron/native.ts";
 import { quote } from "../../electron/shell.ts";
+import { usableCwd } from "../../electron/terminal.ts";
 import { watchTranscripts, type Watcher } from "../../electron/watch.ts";
 import type { ActionResult, NodeMeta, SessionRef } from "../../shared/types.ts";
 
@@ -136,7 +138,7 @@ async function openNative(ref: SessionRef): Promise<ActionResult> {
       if (!vscode.extensions.getExtension("openai.chatgpt")) {
         return { ok: false, error: "The Codex extension (openai.chatgpt) isn't installed in this VS Code." };
       }
-      const uri = vscode.Uri.parse(`${vscode.env.uriScheme}://openai.chatgpt/local/${id}`);
+      const uri = vscode.Uri.parse(nativeLink(ref, vscode.env.uriScheme)!);
       const ok = await vscode.env.openExternal(uri);
       return ok ? { ok: true } : { ok: false, error: "VS Code declined to open the Codex link." };
     }
@@ -152,7 +154,8 @@ function resumeInTerminal(ref: SessionRef): ActionResult {
   if (!p) return { ok: false, error: "Unknown harness." };
   const term = vscode.window.createTerminal({
     name: `${ref.provider} ${ref.sessionId.slice(0, 8)}`,
-    cwd: ref.cwd || undefined,
+    // A session's folder can be gone (repo moved); the CLI still finds the session.
+    cwd: usableCwd(ref.cwd),
   });
   term.show();
   term.sendText(p.resumeArgv(ref.sessionId).map((a) => quote(a)).join(" "));

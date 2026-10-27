@@ -1,3 +1,4 @@
+/// <reference lib="dom" />
 import { contextBridge, ipcRenderer } from "electron";
 import { CH } from "./ipc.ts";
 import type { AgentreeApi, NodeMeta } from "../shared/types.ts";
@@ -14,11 +15,9 @@ const api: AgentreeApi = {
   forkAt: (sessionId, nodeId) => ipcRenderer.invoke(CH.forkAt, sessionId, nodeId),
   providerHealth: () => ipcRenderer.invoke(CH.providerHealth),
 
-  // The desktop app has no harness extension to hand a session to; the panel
-  // offers the copyable resume command instead.
   host: "electron",
-  openNative: async () => ({ ok: false, error: "Opening in the harness's extension needs the VS Code extension." }),
-  resumeInTerminal: async () => ({ ok: false, error: "Copy the resume command and run it in a terminal." }),
+  openNative: (ref) => ipcRenderer.invoke(CH.openNative, ref),
+  resumeInTerminal: (ref) => ipcRenderer.invoke(CH.resumeInTerminal, ref),
 
   onUpdateAvailable: (cb) => {
     const listener = (_e: unknown, info: Parameters<typeof cb>[0]) => cb(info);
@@ -44,5 +43,11 @@ const api: AgentreeApi = {
 };
 
 let watchSeq = 0;
+
+// The page styles for the OS it runs on — macOS reserves room for the inset
+// traffic lights, which other platforms don't have.
+window.addEventListener("DOMContentLoaded", () => {
+  document.documentElement.dataset.platform = process.platform;
+});
 
 contextBridge.exposeInMainWorld("agentree", api);

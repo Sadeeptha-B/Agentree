@@ -26,6 +26,9 @@ electron/preload.ts            contextBridge → window.agentree, and nothing el
 electron/registry.ts           Provider interface; routes by "who owns this id"; health
 electron/paths.ts              every root, lazily, honouring CLAUDE_CONFIG_DIR / CODEX_HOME / AGENTREE_HOME
 electron/shell.ts              resume commands in the host shell's syntax (PowerShell / POSIX)
+electron/native.ts             vscode:// deep links into the Claude Code / Codex extensions
+electron/terminal.ts           desktop "resume in terminal": a new OS terminal window
+electron/update.ts             desktop launch-time update check against the build's own origin
 electron/health.ts             per-scan counters for the welcome screen's status rows
 electron/transcripts.ts        Claude Code provider: parse, fork families, list/load
 electron/providers/claude-fork.ts   Claude fork-at-turn (writes the extension's fork format)
@@ -58,15 +61,22 @@ SAME sources by `build-vscode.mjs` (`npm run build:vscode`):
   implements the exact `window.agentree` surface over `postMessage`. It is
   loaded as a classic script before the module bundle, because `src/api.ts`
   reads `window.agentree` at module-eval time.
-- `api.host` (`"vscode"` | `"electron"`) decides which actions the panel
-  offers. Only the extension host implements:
-  - `openNative`: Claude runs `claude-vscode.editor.open(sessionId)`, the
-    command the Claude extension's own `vscode://anthropic.claude-code/open?session=`
-    handler calls. Codex opens `${vscode.env.uriScheme}://openai.chatgpt/local/<threadId>`,
-    because the Codex extension's URI handler forwards the path to its webview
-    router, which routes threads at `/local/<id>`.
-  - `resumeInTerminal`: an integrated terminal in the session's cwd, running
-    the provider's resume argv.
+- Both hosts implement the same two hand-off actions, each in its own way:
+
+  | | VS Code extension | Desktop app (Electron main) |
+  |---|---|---|
+  | `openNative` | Claude: `claude-vscode.editor.open(sessionId)` in-process. Codex: `openExternal(${uriScheme}://openai.chatgpt/local/<id>)` | `shell.openExternal(nativeLink(ref))`, the same `vscode://` deep links. Windows routes them to `Code.exe --open-url` |
+  | `resumeInTerminal` | integrated terminal in the session's cwd | a new OS terminal window (`terminal.ts`) |
+
+  The links come from the extensions' own URI handlers.
+  `anthropic.claude-code` handles `/open?session=<id>` by calling
+  `claude-vscode.primaryEditor.open`. `openai.chatgpt` forwards the path to
+  its webview router, which routes threads at `/local/<id>`. A session whose
+  cwd no longer exists resumes from the home directory; the CLIs still find
+  it by id.
+- `api.host` (`"vscode"` | `"electron"`) only tunes wording and one
+  behaviour: in VS Code a fresh fork opens itself in the chat panel, while the
+  desktop app shows the buttons instead of switching apps unasked.
 - Host-side watchers are token-keyed like the ipcMain map and closed on panel
   dispose.
 - The webview HTML links `index.css` by hand (Vite has no index.html to inject
@@ -434,8 +444,11 @@ fork's first turn** (`crossSession`). Nothing else is structural.
 selection, so clicking never re-lays out the tree. Auto-fit runs once per
 session (via a ref), so after the first frame the viewport belongs to the user.
 
-Edges into a `crossSession` node are dashed (`.edge.cross`), and the legend
-explains them only when the tree has one.
+Edges into a `crossSession` node are **long-dashed** (`.edge.cross`), and the
+legend explains them only when the tree has one. Collapsed chains are
+**dotted** (round caps), so "turns hidden here" and "a new session starts here"
+can't be mistaken for each other. They looked alike when both were short
+dashes.
 
 ## Live view
 
@@ -492,11 +505,28 @@ a family that gets re-rooted (a fork found later, a root deleted) keeps them.
 - Resume commands are emitted in the host shell's syntax by `shell.ts`:
   `Set-Location -LiteralPath '<cwd>'; claude --resume <id>` on win32
   (PowerShell 5.1 has no `&&`), and `cd '<cwd>' && …` elsewhere.
-- `npm run dev:app` is a Node launcher (`scripts/dev-app.mjs`), not
-  `VAR=value electron .`.
-- `bin/agentree.cjs` and `scripts/install.sh` are POSIX-only.
+- **`ELECTRON_RUN_AS_NODE=1` leaks into shells started from inside VS Code**
+  (its extension host sets it, and agent tools' shells inherit it). Under it,
+  `electron.exe` runs as plain Node and the app dies on `ipcMain` being
+  undefined. Every launcher strips it: `npm start` / `npm run dev:app` go
+  through `scripts/electron.mjs`, and `bin/agentree.cjs` does the same. Never
+  put a bare `electron .` back in package.json.
+- The window keeps the native frame on Windows/Linux (`hiddenInset` there
+  means no window controls at all). The preload stamps
+  `<html data-platform>`, and CSS drops the macOS traffic-light insets
+  elsewhere.
+- "Resume in terminal" on Windows runs `cmd /d /c start "" /D "<cwd>" powershell.exe -NoExit -Command "<argv>"`
+  with `windowsVerbatimArguments`. Node's `detached` maps to
+  `DETACHED_PROCESS`, which gives a console program *no* console, so a direct
+  spawn never appears (verified). `start` gives it a new window. It was
+  verified with a cwd containing a space and `&`.
+- The desktop update check follows the build's own `origin` (stamped into
+  `dist-electron/build-info.json`), so a fork compares against itself. It
+  offers `git pull` + `npm install` in the host shell's syntax.
+- `scripts/install.sh` is POSIX-only. `bin/agentree.cjs` is plain Node and
+  works anywhere `npm link` does.
 - npm's allow-scripts policy can block Electron's binary download. Run
-  `npm approve-scripts electron` or `node node_modules/electron/install.js`.
+  `npm approve-scripts electron` and then `node node_modules/electron/install.js`.
 - With `core.autocrlf=true`, test fixtures are protected by
   `test/fixtures/.gitattributes` (`-text`).
 
@@ -516,7 +546,9 @@ point providers at the fixtures through `CLAUDE_CONFIG_DIR` / `CODEX_HOME` /
   guardian thread, a missing base, the IDE wrapper, steering, legacy stitching,
   and fork-target selection (by thread vs. by page file), with app-server
   mocked.
-- **Shell quoting** on both platforms.
+- **Shell quoting** on both platforms; **desktop hand-off**: deep links and the
+  per-OS terminal launch (Windows `start` quoting, AppleScript escaping, Linux
+  emulator choice, missing-cwd fallback).
 
 When a harness changes format, add a fixture for the new shape before changing
 the parser.
@@ -548,4 +580,5 @@ the parser.
   extension's source but not yet confirmed visually.
 - A Codex fork through app-server takes ~10 s (process startup + scan).
 - Subagent turns are dimmed but not given their own lane.
-- The Electron app isn't packaged (`npm start` only).
+- The Electron app isn't packaged as an installer (`npm start`, or `agentree`
+  after `npm link`).

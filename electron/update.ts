@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { UpdateInfo } from "../shared/types.ts";
+import { quote } from "./shell.ts";
 
 /**
  * Launch-time update check against GitHub.
@@ -10,17 +11,27 @@ import type { UpdateInfo } from "../shared/types.ts";
  * app's way: every failure path — offline, rate-limited, an unpushed dev
  * build GitHub has never heard of — resolves to `null`, silently.
  *
- * The build stamps its git commit into dist-electron/build-info.json; the
- * compare API then answers precisely "is main ahead of the running build?".
- * A tarball built without git falls back to comparing package.json versions.
+ * The build stamps its git commit and its `origin` repository into
+ * dist-electron/build-info.json; the compare API then answers precisely "is
+ * main ahead of the running build?" for the repo it was built from — a fork
+ * checks itself, never upstream. A tarball built without git falls back to
+ * comparing package.json versions against this repository.
  */
-const REPO = "serban-cercelescu/Agentree";
-const UPDATE_COMMAND = `curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | sh`;
+const FALLBACK_REPO = "Sadeeptha-B/Agentree";
 const TIMEOUT_MS = 6000;
 
 interface BuildInfo {
   version?: string;
   commit?: string | null;
+  /** "owner/name" of the checkout's GitHub origin. */
+  repo?: string | null;
+}
+
+/** Update in place: pull, then reinstall (npm install's prepare step rebuilds). */
+function updateCommand(root: string): string {
+  return process.platform === "win32"
+    ? `Set-Location -LiteralPath ${quote(root, "win32")}; git pull; npm install`
+    : `cd ${quote(root, "posix")} && git pull && npm install`;
 }
 
 function readBuildInfo(root: string): BuildInfo {
@@ -55,7 +66,9 @@ function newerVersion(remote: string, local: string): boolean {
 
 export async function checkForUpdate(appRoot: string): Promise<UpdateInfo | null> {
   if (process.env.AGENTREE_NO_UPDATE_CHECK) return null;
-  const { version, commit } = readBuildInfo(appRoot);
+  const { version, commit, repo } = readBuildInfo(appRoot);
+  const REPO = repo || FALLBACK_REPO;
+  const UPDATE_COMMAND = updateCommand(appRoot);
 
   try {
     if (commit) {
