@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { cwdKey } from "../shared/render.ts";
 import type { SessionMeta } from "../shared/types.ts";
-import { filterSessions, ofProvider, railDirs } from "./list.ts";
+import { filterSessions, focusFor, ofProvider, railDirs, shownForks } from "./list.ts";
 
 const meta = (id: string, cwd: string, activeAt: number, extra: Partial<SessionMeta> = {}): SessionMeta => ({
   id,
@@ -64,5 +64,38 @@ describe("agent filter", () => {
       expect(filterSessions(all, { query: "", cwd: d.key, provider: "codex" })).toHaveLength(d.n);
     }
     expect(filterSessions(all, { query: "", cwd: "", provider: "" })).toHaveLength(4);
+  });
+});
+
+describe("forks on the list", () => {
+  const fam = meta("root", "/work/a", 9, {
+    title: "Build walkthrough",
+    forks: [
+      { id: "f1", title: "Try rollup instead", activeAt: 8, cwd: "/work/b" },
+      { id: "f2", title: "Build walkthrough (fork)", activeAt: 7, cwd: "/work/a" },
+      { id: "f3", title: "Benchmarks", activeAt: 6, cwd: "/work/a" },
+      { id: "f4", title: "Docs pass", activeAt: 5, cwd: "/work/a" },
+    ],
+  });
+
+  it("finds a family by a fork's title, and opens it on that fork", () => {
+    expect(filterSessions([fam], { query: "docs", cwd: "", provider: "" })).toHaveLength(1);
+    expect(focusFor(fam, "docs")).toBe("f4");
+    // A match on the root opens the family as usual.
+    expect(focusFor(fam, "walkthrough")).toBeUndefined();
+    expect(focusFor(fam, "")).toBeUndefined();
+  });
+
+  it("puts a matched fork first, so it never hides behind +N", () => {
+    const { shown, more, matched } = shownForks(fam, "docs");
+    expect(shown.map((f) => f.id)).toEqual(["f4", "f1", "f2"]);
+    expect(more).toBe(1);
+    expect([...matched]).toEqual(["f4"]);
+    expect(shownForks(fam, "").shown.map((f) => f.id)).toEqual(["f1", "f2", "f3"]);
+  });
+
+  it("files a family under every member's directory", () => {
+    expect(railDirs([fam]).map((d) => d.path).sort()).toEqual(["/work/a", "/work/b"]);
+    expect(filterSessions([fam], { query: "", cwd: cwdKey("/work/b"), provider: "" })).toHaveLength(1);
   });
 });

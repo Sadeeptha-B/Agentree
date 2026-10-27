@@ -165,8 +165,22 @@ export interface SessionMeta {
   resumeCommand: string;
   /** Sessions stitched into this entry's tree (1 when it was never forked). */
   members?: number;
+  /**
+   * The family's other sessions — its forks, and forks of forks — newest
+   * activity first. Enough for the card to name them and for search to
+   * find them, without loading the tree.
+   */
+  forks?: ForkSummary[];
   /** Where the session was driven from, e.g. "claude-vscode" or "cli". */
   entrypoint?: string;
+}
+
+/** A non-root member of a fork family, as the welcome list needs it. */
+export interface ForkSummary {
+  id: SessionId;
+  title: string;
+  activeAt: number;
+  cwd: string;
 }
 
 /** One session of a fork family, as listed in the panel. */
@@ -195,6 +209,14 @@ export interface MemberInfo {
    * session id — one copy per project folder, read as one session (Claude).
    */
   files?: string[];
+  /**
+   * The node to land on when the tree is opened on this session: the newest
+   * leaf among the turns it holds — its own, or copied (or, in Codex,
+   * inherited) from its parent. A fork with no turn of its own yet lands on
+   * the turn it was forked at. Decided by the provider, which knows what a
+   * session holds.
+   */
+  tipId?: NodeId;
 }
 
 export interface SessionDetail {

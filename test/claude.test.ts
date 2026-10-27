@@ -78,6 +78,17 @@ describe("Claude transcripts", () => {
     expect(list.find((s) => s.id === S)!.members).toBe(1);
   });
 
+  it("names a family's forks on its list entry, and gives each member its own tip", () => {
+    expect(listSessions().find((s) => s.id === P)!.forks).toEqual([
+      expect.objectContaining({ id: F, title: "Build walkthrough (fork)", cwd: "C:\\work\\demo" }),
+    ]);
+    const d = loadSession(P)!;
+    const tip = (id: string) => d.nodes.find((n) => n.id === d.members.find((m) => m.id === id)!.tipId)?.text;
+    expect(tip(F)).toBe("Switched to rollup.");
+    // P's own newest leaf, not the family's (F's turns aren't P's).
+    expect(tip(P)).toBe("Waiting.");
+  });
+
   it("titles from ai-title, never the IDE wrapper", () => {
     const fam = listSessions().find((s) => s.id === P)!;
     expect(fam.title).toBe("Build walkthrough");
@@ -190,7 +201,10 @@ describe("Claude sessions stored in several project folders", () => {
       expect(one(d, "Publish it")).toMatchObject({ branchKind: "fork", sourceSessionId: MF });
       expect(d.members.find((m) => m.id === MO)!.files).toHaveLength(2);
       expect(d.members.find((m) => m.id === MF)!.parentId).toBe(MO);
+      expect(d.nodes.find((n) => n.id === d.members.find((m) => m.id === MF)!.tipId)?.text).toBe("Published.");
     }
+    // The family is filed under the fork's folder too.
+    expect(list[0].forks).toEqual([expect.objectContaining({ id: MF, cwd: "C:\\work\\third" })]);
     // The live view watches every folder the family lives in.
     expect(claudeWatchDirs(MF).map((d) => path.basename(d)).sort()).toEqual([
       "c--work-moved-a-old",
@@ -287,6 +301,8 @@ describe("Claude fork", () => {
     expectTree(after);
     expect(after.members.map((m) => m.id)).toContain(res.id);
     expect(after.nodes.length).toBe(before.nodes.length);
+    // ...and opening the tree on it lands on the turn it was forked at.
+    expect(after.members.find((m) => m.id === res.id)!.tipId).toBe(shipped.id);
     // ...and the original transcript is untouched.
     expect(fs.readFileSync(path.join(projectDir(), `${P}.jsonl`), "utf8")).not.toContain(res.id);
   });

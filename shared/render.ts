@@ -1,4 +1,4 @@
-import type { NodeId, TurnNode, UsageSnapshot } from "./types.ts";
+import type { ForkSummary, MemberInfo, NodeId, TurnNode, UsageSnapshot } from "./types.ts";
 
 export type NodeMap = Map<NodeId, TurnNode>;
 export const ROOT_KEY = "\0root";
@@ -64,6 +64,35 @@ export function newestLeaf(nodes: TurnNode[], children: Map<string, TurnNode[]>)
     list.reduce((a, b) => (a.timestamp >= b.timestamp ? a : b)).id;
   const withText = leaves.filter((n) => n.text.trim().length > 0);
   return withText.length > 0 ? newest(withText) : newest(leaves);
+}
+
+/**
+ * The newest leaf among the nodes `holds` accepts — a leaf of that subset,
+ * not of the whole tree (a turn whose only children belong to other
+ * sessions is still where this one ends). Same text preference as
+ * `newestLeaf`.
+ */
+export function heldTip(nodes: TurnNode[], holds: (n: TurnNode) => boolean): NodeId | null {
+  const held = nodes.filter(holds);
+  const ids = new Set(held.map((n) => n.id));
+  const continued = new Set(held.filter((n) => n.parentId && ids.has(n.parentId)).map((n) => n.parentId!));
+  const leaves = held.filter((n) => !continued.has(n.id));
+  if (leaves.length === 0) return null;
+  const newest = (list: TurnNode[]) => list.reduce((a, b) => (a.timestamp >= b.timestamp ? a : b)).id;
+  const withText = leaves.filter((n) => n.text.trim().length > 0);
+  return withText.length > 0 ? newest(withText) : newest(leaves);
+}
+
+/** A node `sessionId` holds a copy of: drawn as its own, or recorded as an occurrence. */
+export const holdsCopy = (sessionId: string) => (n: TurnNode) =>
+  n.sourceSessionId === sessionId || !!n.occurrences?.some((o) => o.sessionId === sessionId);
+
+/** A family's members as the welcome list shows them: every one but the root, newest first. */
+export function forkSummaries(members: MemberInfo[], rootId: string): ForkSummary[] {
+  return members
+    .filter((m) => m.id !== rootId)
+    .map(({ id, title, activeAt, cwd }) => ({ id, title, activeAt, cwd }))
+    .sort((a, b) => b.activeAt - a.activeAt);
 }
 
 export function countBranchPoints(children: Map<string, TurnNode[]>): number {
