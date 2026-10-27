@@ -15,7 +15,7 @@ import { readLineage } from "./lineage.ts";
 import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
 import { RESUME_ARGV, resumeCommand } from "./shell.ts";
-import { overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
+import { assignStableIds, digest, overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
   const parts = dirName.split("-").filter(Boolean);
@@ -322,7 +322,10 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
     for (;;) {
       const cs = kids.get(cur.id) ?? [];
       if (cs.length !== 1 || cs[0].role !== head.role) break;
-      if (cs[0].crossSession || cs[0].sourceSessionId !== head.sourceSessionId) break;
+      if (cs[0].branchKind || cs[0].sourceSessionId !== head.sourceSessionId) break;
+      // Nor across the harness's own turns (Codex): a fork cuts only between
+      // them, so a node spanning two could never be forked after all it shows.
+      if (cs[0].turnId !== head.turnId) break;
       cur = cs[0];
       parts.push(cur);
       absorbed.add(cur.id);
@@ -367,23 +370,20 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       model: last.model ?? head.model,
       stopReason: last.stopReason ?? null,
       absorbedIds: parts.slice(1).flatMap((p) => [p.id, ...(p.absorbedIds ?? [])]),
-      aliasIds: parts.flatMap((p) => p.aliasIds ?? []).length
-        ? parts.flatMap((p) => p.aliasIds ?? [])
+      stableIds: parts.flatMap((p) => p.stableIds ?? []),
+      occurrences: parts.some((p) => p.occurrences?.length)
+        ? parts.flatMap((p) => p.occurrences ?? [])
         : undefined,
-      // The merged turn ends where its last ANCHORABLE part ends — that's the
-      // record a fork has to resume after. An injected tail has no transcript
-      // record at all, and a mid-turn attachment's uuid is a record the CLI's
-      // resume loader doesn't index; either one becoming the anchor produces
-      // a fork the CLI can only reject. With no anchorable part at all, the
-      // last part's reason stands for the whole run.
-      ...(() => {
-        const anchor = [...parts].reverse().find((p) => !p.forkBlocked);
-        return anchor
-          ? { lastRawId: anchor.lastRawId ?? anchor.id, preCompact: anchor.preCompact, forkBlocked: undefined }
-          : { lastRawId: last.lastRawId ?? last.id, preCompact: last.preCompact, forkBlocked: last.forkBlocked };
-      })(),
-      // Only wholly-synthetic runs are unforkable; one real record in the run
-      // gives the merged turn a resume point.
+      // The fork anchor is the LAST part's, and so is its verdict. "Fork after
+      // this turn" must include everything the node shows; falling back to an
+      // earlier, anchorable part would silently cut before the later text (a
+      // mid-turn message, a second prompt). A run whose last part can't
+      // anchor (an injected or attachment tail) is unforkable as a whole —
+      // the turn after it is where to fork, and that keeps the message.
+      lastRawId: last.lastRawId ?? last.id,
+      preCompact: last.preCompact,
+      forkBlocked: last.forkBlocked,
+      // Drawn hollow only when every part is synthetic.
       injected: parts.every((p) => p.injected) || undefined,
       midTurn: parts.every((p) => p.midTurn) || undefined,
     });
@@ -410,8 +410,11 @@ interface Interjection {
 /** Synthetic uuid prefix. Never collides: real uuids are hex-and-dashes. */
 export const INJECTED_PREFIX = "queued:";
 
-/** Normalised prefix, for matching an interjection against a real record. */
-const gist = (s: string, n = 80) => s.replace(/\s+/g, " ").trim().slice(0, n);
+/**
+ * Whole-text identity, for matching an interjection against a real record. Not
+ * an opening gist: messages that share a long preamble are still different.
+ */
+const gist = digest;
 
 /**
  * Give the user's mid-turn interjections a place in the tree.
@@ -578,13 +581,42 @@ function readLines(file: string): { records: RawRecord[]; bad: number } | null {
 export const readRecords = (file: string): RawRecord[] | null => readLines(file)?.records ?? null;
 
 /**
+ * Every record's parent, over ALL records (displayed or not) — the one
+ * ancestry rule that both the parser and the fork writer use, so what is drawn
+ * and what a fork copies can't disagree.
+ *
+ * `parentUuid` is the parent, except across a `/compact` boundary: its
+ * physical parent is null and `logicalParentUuid` names the pre-compact tip.
+ * Without following it a compacted session falls apart into a forest. In a
+ * copy-fork that reference is STALE: the extension's fork gives every record
+ * a fresh uuid but leaves the field pointing into the source's file (read
+ * from its forkSession, 2.1.310). A copy is written in chain order, so the
+ * record just before the boundary is that logical parent. Later records with
+ * the same uuid win (the CLI rewrites a few in place).
+ */
+export function resolveLineage(records: RawRecord[]): Map<string, string | null> {
+  const parentOf = new Map<string, string | null>();
+  let prev: string | null = null;
+  for (const rec of records) {
+    if (!rec.uuid) continue;
+    let parent = rec.parentUuid ?? null;
+    if (parent === null && rec.logicalParentUuid) {
+      parent = parentOf.has(rec.logicalParentUuid) ? rec.logicalParentUuid : prev;
+    }
+    parentOf.set(rec.uuid, parent);
+    prev = rec.uuid;
+  }
+  return parentOf;
+}
+
+/**
  * Why a fork can't anchor at a turn — one place, so the panel and the fork
  * writer can't disagree.
  */
 const BLOCK = {
   injected: "This message was delivered mid-turn and Claude Code wrote no record for it, so there is nothing to fork at.",
   midTurn:
-    "This mid-turn message can't anchor a fork itself. Fork the turn after it — forks that pass this point keep the message.",
+    "This ends with a message sent mid-turn, which can't anchor a fork itself. Fork the turn after it — forks that pass this point keep the message.",
   preCompact:
     "This turn is from before the session's last /compact. Claude Code resumes a compacted session from its summary, so Agentree only forks after the compaction.",
 };
@@ -603,6 +635,7 @@ export function parseFile(file: string): Parsed {
   // and friends into the same parent chain. Filtering them out without
   // re-linking leaves most parentUuid pointers dangling, which collapses the
   // whole tree to a handful of reachable nodes.
+  const lineage = resolveLineage(all);
   const parentOf = new Map<string, string | null>();
   const records: RawRecord[] = [];
   let touchedAt = 0;
@@ -672,22 +705,7 @@ export function parseFile(file: string): Parsed {
     if (!rec.uuid) continue;
     // Lineage is recorded for EVERY record, displayable or not, so that
     // resolveParent can re-link children across whatever we filter out.
-    //
-    // `logicalParentUuid` bridges a compact boundary's physical null parent —
-    // without it a compacted session falls apart into a forest. In a
-    // copy-fork it is STALE: the extension's fork gives every record a fresh
-    // uuid but leaves this field pointing into the parent's file (read from
-    // its forkSession, 2.1.310). A copy is written in chain order, so the
-    // record just before the boundary is that logical parent.
-    let parent = rec.parentUuid ?? null;
-    if (parent === null && rec.logicalParentUuid) {
-      parent = parentOf.has(rec.logicalParentUuid)
-        ? rec.logicalParentUuid
-        : seq.length
-          ? seq[seq.length - 1]
-          : null;
-    }
-    parentOf.set(rec.uuid, parent);
+    parentOf.set(rec.uuid, lineage.get(rec.uuid) ?? null);
     seq.push(rec.uuid);
 
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
@@ -810,6 +828,7 @@ export function parseFile(file: string): Parsed {
   // Pass 2: project the surviving turns.
   const nodes: TurnNode[] = [];
   const keys = new Map<NodeId, string>();
+  const strongKeys = new Set<NodeId>();
   for (const { head, last, text, thinking, tools } of visible) {
     // Every record in a group repeats the same message-level usage, so take one
     // rather than summing — summing would multiply a turn's cost by its block
@@ -861,18 +880,19 @@ export function parseFile(file: string): Parsed {
     });
 
     // Stitch evidence a copy-fork preserves verbatim (uuids are NOT preserved):
-    // the API message id for replies, the prompt id plus text for prompts.
-    // NOT the timestamp: a fork re-stamps its last copied record, so a fork
-    // ending on a prompt without a promptId (older transcripts) would no
-    // longer match its own source. Stitching only matches under an already
-    // matched parent, which is what keeps the text alone safe there.
-    keys.set(
-      id,
-      head.type === "assistant" && head.message?.id
-        ? `m:${head.message.id}`
-        : `u:${head.promptId ?? ""}|${gist(text)}`,
-    );
+    // the API message id for replies, the prompt id plus the WHOLE text (as a
+    // digest) for prompts. NOT the timestamp: a fork re-stamps its last copied
+    // record, so a fork ending on a prompt without a promptId (older
+    // transcripts) would no longer match its own source. Stitching only
+    // matches under an already matched parent, so without a promptId two
+    // prompts merge only if they are the same text in the same place.
+    const strong = head.type === "assistant" && !!head.message?.id;
+    keys.set(id, strong ? `m:${head.message!.id}` : `u:${head.promptId ?? ""}|${digest(text)}`);
+    if (strong || head.promptId) strongKeys.add(id);
   }
+  // Identity for annotations and selection: the key itself where it's unique
+  // (a message id, a prompt id), else qualified by the parent's identity.
+  assignStableIds(nodes, (n) => ({ key: keys.get(n.id)!, strong: strongKeys.has(n.id) }));
   // Conversation records that produced nothing is what a changed record shape
   // looks like — as opposed to a file of pure bookkeeping, which has none.
   const problem = nodes.length === 0 && records.some((r) => r.type === "user" || r.type === "assistant")
@@ -1110,25 +1130,42 @@ const asMember = (id: string, p: Parsed, parentSessionId: string | null = null):
 });
 
 /**
- * Decide who forked from whom inside one family. Three steps, each unable to
- * contradict the one before:
+ * Files created within this long of each other were created together — a
+ * copied or restored directory, not a user forking. Their creation order
+ * says nothing about who forked whom.
+ */
+const SAME_BATCH_MS = 1000;
+
+interface Parentage {
+  parent: string | null;
+  evidence?: MemberInfo["parentEvidence"];
+}
+
+/**
+ * Decide who forked from whom inside one family.
+ *
+ * Shared API message ids prove two transcripts share history; they say
+ * nothing about direction. The extension's own forks record no lineage, so
+ * direction comes from the weakest evidence there is, and is labelled as
+ * inferred. Three steps, none able to contradict the one before:
  *
  *  1. Explicit lineage (`forkedFrom`, the sidecar) — an edge that would close
  *     a cycle is dropped rather than trusted.
  *  2. An order with every explicit ancestor before its descendants; inside
- *     that, by how many " (fork)" suffixes the extension stamped on titles,
- *     then by file creation time. Both are weak (a rename drops the suffix, a
- *     restored directory resets creation times), which is why they only order
- *     what step 1 left free.
+ *     that, chronologically by file creation — a fork's file is created after
+ *     its source's, and a rename can't change that. Only among files created
+ *     together (a copied or restored directory, see SAME_BATCH_MS) does the
+ *     count of " (fork)" suffixes the extension stamped on titles decide.
  *  3. A member without explicit lineage takes the EARLIER member whose tree
  *     holds the most of its history (`overlap`, over every branch of both): a
  *     fork of a fork overlaps its direct parent more than the root, even after
  *     that parent rewound. Every edge points backwards in the order, so the
  *     result is a forest — never a cycle.
  */
-function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<string, string | null> {
+function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<string, Parentage> {
   const lineage = readLineage();
   const ids = new Set(group.map((g) => g.id));
+  const byCreation = [...group].sort((a, b) => a.createdMs - b.createdMs);
 
   const explicit = new Map<string, string>();
   const isAncestor = (a: string, of: string) => {
@@ -1139,33 +1176,38 @@ function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<s
     }
     return false;
   };
-  for (const m of [...group].sort((a, b) => a.createdMs - b.createdMs)) {
+  for (const m of byCreation) {
     const p = [m.forkedFrom, lineage[m.id]].find((x) => x && ids.has(x) && x !== m.id);
-    if (p && p !== m.id && !isAncestor(m.id, p)) explicit.set(m.id, p);
+    if (p && !isAncestor(m.id, p)) explicit.set(m.id, p);
   }
 
+  // Chronological, with each same-batch run re-ordered by title evidence.
   const forkDepth = (t: string) => (t.match(/\(fork\)/g) ?? []).length;
-  const remaining = [...group].sort(
-    (a, b) => forkDepth(a.title) - forkDepth(b.title) || a.createdMs - b.createdMs,
-  );
+  const chrono: FileSummary[] = [];
+  for (let i = 0; i < byCreation.length; ) {
+    let j = i + 1;
+    while (j < byCreation.length && byCreation[j].createdMs - byCreation[j - 1].createdMs < SAME_BATCH_MS) j++;
+    chrono.push(...byCreation.slice(i, j).sort((a, b) => forkDepth(a.title) - forkDepth(b.title)));
+    i = j;
+  }
   const order: FileSummary[] = [];
   const placed = new Set<string>();
-  while (remaining.length) {
+  while (chrono.length) {
     const i = Math.max(
       0,
-      remaining.findIndex((m) => !explicit.has(m.id) || placed.has(explicit.get(m.id)!)),
+      chrono.findIndex((m) => !explicit.has(m.id) || placed.has(explicit.get(m.id)!)),
     );
-    const [m] = remaining.splice(i, 1);
+    const [m] = chrono.splice(i, 1);
     order.push(m);
     placed.add(m.id);
   }
 
   const fm = new Map(group.map((g) => [g.id, asMember(g.id, parsed.get(g.id)!)]));
-  const out = new Map<string, string | null>();
+  const out = new Map<string, Parentage>();
   order.forEach((m, i) => {
     const e = explicit.get(m.id);
     if (e) {
-      out.set(m.id, e);
+      out.set(m.id, { parent: e, evidence: "explicit" });
       return;
     }
     let best: string | null = null;
@@ -1177,7 +1219,7 @@ function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<s
         best = order[j].id;
       }
     }
-    out.set(m.id, best);
+    out.set(m.id, best ? { parent: best, evidence: "inferred" } : { parent: null });
   });
   return out;
 }
@@ -1191,12 +1233,12 @@ interface Family {
 /** Parse, order and stitch one family into a single merged tree. */
 function buildFamily(group: FileSummary[]): Family {
   const parsed = new Map(group.map((g) => [g.id, parseFile(g.file)]));
-  const parents = group.length > 1 ? familyParents(group, parsed) : new Map([[group[0].id, null]]);
-  const rootId = [...group]
-    .sort((a, b) => a.createdMs - b.createdMs)
-    .find((g) => !parents.get(g.id))!.id;
+  const parents: Map<string, Parentage> =
+    group.length > 1 ? familyParents(group, parsed) : new Map([[group[0].id, { parent: null }]]);
+  const parentOf = (id: string) => parents.get(id)?.parent ?? null;
+  const rootId = [...group].sort((a, b) => a.createdMs - b.createdMs).find((g) => !parentOf(g.id))!.id;
 
-  const fm = group.map((g) => asMember(g.id, parsed.get(g.id)!, parents.get(g.id) ?? null));
+  const fm = group.map((g) => asMember(g.id, parsed.get(g.id)!, parentOf(g.id)));
   // Root first so its node ids are the ones the shared prefix keeps.
   fm.sort((a, b) => (a.sessionId === rootId ? -1 : b.sessionId === rootId ? 1 : 0));
 
@@ -1204,7 +1246,8 @@ function buildFamily(group: FileSummary[]): Family {
   const members: MemberInfo[] = group.map((g) => ({
     id: g.id,
     title: g.title || "Untitled",
-    parentId: parents.get(g.id) ?? null,
+    parentId: parentOf(g.id),
+    parentEvidence: parents.get(g.id)?.evidence,
     cwd: g.cwd,
     resumeCommand: claudeResume(g.id, g.cwd),
     updatedAt: g.updatedAt,

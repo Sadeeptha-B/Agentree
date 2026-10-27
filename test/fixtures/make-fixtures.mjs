@@ -250,8 +250,85 @@ write(`${CL}/c--work-noprompt/${NP}.jsonl`, [
 fs.mkdirSync(path.join(ROOT, CL, "c--work-broken"), { recursive: true });
 fs.writeFileSync(
   path.join(ROOT, CL, "c--work-broken", "4bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"),
-  "{not json\n<<<<<<< merge conflict\n",
+  "{not json\nnor is this\n",
 );
+
+// c--work-attach: a prompt, a tools-only reply (no node), then a mid-turn
+// message the user typed (a real queued_command attachment), then the reply.
+// The prompt and the attachment fold into one drawn node; forking it must not
+// fall back to the prompt's anchor and silently drop the message it shows.
+const AT = "4ccccccc-cccc-4ccc-8ccc-cccccccccccc";
+write(`${CL}/c--work-attach/${AT}.jsonl`, [
+  user(AT, "at-u1", null, 0, "at-1", "Run the migration"),
+  asst(AT, "at-a1", "at-u1", 1, "msg_at1", [{ type: "tool_use", id: "tu_1", name: "Bash", input: { command: "migrate" } }]),
+  { ...user(AT, "at-r1", "at-a1", 2, "at-1", [{ type: "tool_result", tool_use_id: "tu_1", content: "ok" }]) },
+  {
+    parentUuid: "at-r1",
+    ...common(AT),
+    promptId: "at-1",
+    type: "attachment",
+    attachment: { type: "queued_command", prompt: "also back up first", commandMode: "prompt", origin: { kind: "human" } },
+    uuid: "at-q1",
+    timestamp: ts(3),
+  },
+  asst(AT, "at-a2", "at-q1", 4, "msg_at2", [text("Backed up, then migrated.")]),
+]);
+
+// c--work-preamble: two prompts with no promptId that share a long opening
+// and differ only at the end, in a native fork pair. They are different
+// prompts; neither may stand in for the other.
+const PA = "4ddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const PB = "4eeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const PREAMBLE =
+  "Context: we are building the order service, it must stay backwards compatible with v1 clients, and ";
+const pre = (sid, px, min) => [
+  user(sid, `${px}-u1`, null, min, "pa-1", "Design the cache layer"),
+  asst(sid, `${px}-a1`, `${px}-u1`, min + 1, "msg_pa1", [text("Two options.")]),
+];
+write(`${CL}/c--work-preamble/${PA}.jsonl`, [
+  ...pre(PA, "pa", 0),
+  user(PA, "pa-u2", "pa-a1", 2, undefined, `${PREAMBLE}use SQLite`),
+  asst(PA, "pa-a2", "pa-u2", 3, "msg_sql", [text("SQLite answer.")]),
+]);
+write(`${CL}/c--work-preamble/${PB}.jsonl`, [
+  ...pre(PB, "pb", 0),
+  title(PB, "Cache (fork)"),
+  user(PB, "pb-u2", "pb-a1", 10, undefined, `${PREAMBLE}use Redis`),
+  asst(PB, "pb-a2", "pb-u2", 11, "msg_redis", [text("Redis answer.")]),
+]);
+
+// rename-src/c--work-rename: P3 → F3 (native fork, "Root (fork)") → G3
+// (native fork of F3's own reply, then RENAMED). Outside projects/ on purpose:
+// the test copies them in one at a time, so their creation order is the true
+// one — which a title-only rename must not overturn.
+const P3 = "4fffffff-ffff-4fff-8fff-ffffffffffff";
+const F3 = "50000000-0000-4000-8000-000000000001";
+const G3 = "50000000-0000-4000-8000-000000000002";
+const RN = "claude/2.1/rename-src/c--work-rename";
+const base3 = (sid, px) => [
+  user(sid, `${px}-u1`, null, 0, "rn-1", "Outline the talk"),
+  asst(sid, `${px}-a1`, `${px}-u1`, 1, "msg_rn1", [text("Intro, body, close.")]),
+];
+write(`${RN}/${P3}.jsonl`, [
+  ...base3(P3, "p3"),
+  user(P3, "p3-u2", "p3-a1", 2, "rn-2", "Expand the intro"),
+  asst(P3, "p3-a2", "p3-u2", 3, "msg_rn2", [text("Open with a story.")]),
+  title(P3, "Root"),
+]);
+write(`${RN}/${F3}.jsonl`, [
+  ...base3(F3, "f3"),
+  title(F3, "Root (fork)"),
+  user(F3, "f3-u2", "f3-a1", 10, "rnf-2", "Expand the close"),
+  asst(F3, "f3-a2", "f3-u2", 11, "msg_rnf2", [text("End with a question.")]),
+]);
+write(`${RN}/${G3}.jsonl`, [
+  ...base3(G3, "g3"),
+  user(G3, "g3-u2", "g3-a1", 10, "rnf-2", "Expand the close"),
+  asst(G3, "g3-a2", "g3-u2", 20, "msg_rnf2", [text("End with a question.")]),
+  title(G3, "Renamed grandchild"),
+  user(G3, "g3-u3", "g3-a2", 21, "rng-3", "Which question?"),
+  asst(G3, "g3-a3", "g3-u3", 22, "msg_rng3", [text("Ask what they'll try first.")]),
+]);
 
 // ------------------------------------------------------------------ Codex
 //
@@ -417,6 +494,22 @@ write(`${CODEX}/sessions/2026/10/06/rollout-2026-10-06T10-00-00-${T7}.jsonl`, [
   meta(T7),
   { timestamp: ts(30), ordinal: 1, type: "event_msg", payload: { type: "item_completed", turn_id: turn(15), item: { type: "UserMessageV2", id: "item-1", parts: [{ text: "hello" }] } } },
 ]);
+
+// An aborted prompt (no reply at all), then the replacement turn. The two
+// user messages are adjacent and belong to DIFFERENT turns; folding them
+// into one node would make "fork after this" cut before the replacement.
+const T11 = "01900000-0000-7000-8000-00000000000b";
+{
+  let o = 1;
+  const r = [];
+  const at = (min, rec) => r.push({ timestamp: ts(min), ordinal: o++, ...rec });
+  const tid = turn(16);
+  at(40, { type: "event_msg", payload: { type: "task_started", turn_id: tid } });
+  at(40, { type: "event_msg", payload: { type: "item_completed", thread_id: T11, turn_id: tid, item: { type: "UserMessage", id: "item-1", content: [{ type: "text", text: "Cancelled prompt", text_elements: [] }] } } });
+  at(40, { type: "event_msg", payload: { type: "turn_aborted", turn_id: tid, reason: "interrupted" } });
+  const [rest] = cxTurn(T11, turn(17), o, 41, "Replacement prompt", ["Working.", "Replacement answer."]);
+  write(`${CODEX}/sessions/2026/10/07/rollout-2026-10-07T10-00-00-${T11}.jsonl`, [meta(T11), ...r, ...rest]);
+}
 
 // Legacy (pre-paginated) rollout and a copy-prefix fork of it.
 const L = "01800000-0000-7000-8000-000000000001";

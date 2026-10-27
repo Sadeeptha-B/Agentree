@@ -74,18 +74,34 @@ export interface TurnNode {
    */
   absorbedIds?: NodeId[];
   /**
-   * Ids the SAME turn carries in other sessions of the family: the copies a
-   * fork made of it. Stitching keeps one node per turn, so annotations
-   * written against a copy (before the family was joined, or from a member
-   * that is now the only one left) resolve through these.
+   * Semantic identity of the message(s) this node draws: the same in every
+   * session holding a copy, whatever uuid each copy got (Claude:
+   * `m:<message.id>` / `u:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
+   * text-only evidence is qualified by its parent's identity). The node's own
+   * comes first, then any merged-in parts'. Keys annotations, and keeps a
+   * selection across a reload that re-roots the family.
    */
-  aliasIds?: NodeId[];
+  stableIds?: string[];
+  /**
+   * The other sessions of the family that hold a copy of this turn, with the
+   * id it has there. Stitching draws one node per turn; this keeps where else
+   * it lives (`sourceSessionId` is the one drawn).
+   */
+  occurrences?: { sessionId: SessionId; id: NodeId }[];
+  /**
+   * The harness's own unit of work this node belongs to, where it has one
+   * (Codex: the turn id). The display merge never folds across it, because a
+   * fork can only cut between such units.
+   */
+  turnId?: string;
   /**
    * Why a fork can't be anchored at this node — absent when it can. Decided
    * by the provider while it builds the tree, from what the harness can
    * actually resume (Claude: no record, or before the last /compact; Codex:
-   * not the end of a whole turn, or a branch no thread still holds). The
-   * panel shows it instead of offering the fork; the fork call refuses with it.
+   * not the end of a whole turn, or a branch no thread still holds), and kept
+   * through the display merge: a merged node is forkable only if its LAST
+   * part is, so a fork never stops before text the node shows. The panel
+   * shows it instead of offering the fork; the fork call refuses with it.
    */
   forkBlocked?: string;
   /**
@@ -103,10 +119,12 @@ export interface TurnNode {
    */
   sourceSessionId?: SessionId;
   /**
-   * The edge INTO this node crosses into a different session or page — the
-   * first turn of a fork, or of a Codex prompt edit. Drawn dashed.
+   * The edge INTO this node starts a branch stored apart from its parent:
+   * `fork` — a new session (Claude fork file, Codex fork thread, Copilot
+   * copy); `edit` — a Codex prompt edit, a new page of the SAME thread.
+   * Drawn dashed either way; only a fork is a separate chat with its own name.
    */
-  crossSession?: boolean;
+  branchKind?: "fork" | "edit";
 
   // ---- sidecar metadata (Agentree's own store, never written to the transcript)
   label?: string;
@@ -148,6 +166,14 @@ export interface MemberInfo {
   title: string;
   /** The session this one was forked from; null for the family root. */
   parentId: SessionId | null;
+  /**
+   * How `parentId` is known. `explicit`: the harness or Agentree recorded it
+   * (Codex `forked_from_id`, `forkedFrom`, the lineage sidecar). `inferred`:
+   * shared history proves the two are related, but the direction is a guess
+   * from file creation order (the Claude extension's own forks record
+   * nothing), so the panel says so.
+   */
+  parentEvidence?: "explicit" | "inferred";
   cwd: string;
   resumeCommand: string;
   updatedAt: number;
