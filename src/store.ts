@@ -39,7 +39,11 @@ interface State {
 
   boot: () => Promise<void>;
   refreshSessions: () => Promise<void>;
-  openSession: (id: string) => Promise<void>;
+  /**
+   * Open the family holding `id`. With `focus`, select that member session's
+   * own tip (`MemberInfo.tipId`) instead of the family's newest leaf.
+   */
+  openSession: (id: string, opts?: { focus?: string }) => Promise<void>;
   close: () => void;
 
   select: (id: NodeId | null) => void;
@@ -150,7 +154,7 @@ export const useStore = create<State>((set, get) => ({
       }
     }),
 
-  openSession: async (id) => {
+  openSession: async (id, opts) => {
     const mine = ++view;
     set({ loading: true });
     try {
@@ -162,13 +166,18 @@ export const useStore = create<State>((set, get) => ({
       }
       const nodes = toNodeMap(session.nodes);
       const children = childIndex(session.nodes);
+      const tip = newestLeaf(session.nodes, children);
+      const focused = opts?.focus ? session.members.find((m) => m.id === opts.focus)?.tipId : undefined;
+      const selected = focused && nodes.has(focused) ? focused : tip;
       set({
         session,
         nodes,
         children,
-        selected: newestLeaf(session.nodes, children),
+        selected,
         expanded: new Set(),
-        following: true,
+        // Follow the conversation only from its tip; a focused fork that
+        // isn't the tip is a place the user asked to read.
+        following: selected === tip,
         error: null,
       });
     } catch (e) {

@@ -110,11 +110,24 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
   color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 46ch;
 }
 .tree-card {
-  width: 100%; display: flex; flex-direction: column; gap: 2px; text-align: left;
+  display: flex; flex-direction: column; gap: 2px;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 10px 13px; margin: 4px 0;
 }
 .tree-card:hover { border-color: var(--accent); }
+/* The card's main target; the fork names under it are buttons of their own. */
+.tree-main {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0;
+  background: none; border: 0; padding: 0; text-align: left;
+}
+.fork-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 2px; min-width: 0; }
+.fork-glyph { margin-right: 4px; color: var(--accent); }
+.fork-name {
+  background: none; border: 0; padding: 0; color: var(--muted);
+  max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+}
+.fork-name:hover { color: var(--fg); text-decoration: underline; }
+.fork-name.match { color: var(--fg); font-weight: 600; background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 4px; padding: 0 3px; }
 .tree-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch-badge { color: var(--accent); margin-left: 8px; font-weight: 600; }
 .id-short { color: var(--muted); }

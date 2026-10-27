@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { childIndex, countBranchPoints } from "../../shared/render.ts";
+import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../../shared/render.ts";
 import type {
   ForkResult,
   MemberInfo,
@@ -294,6 +294,7 @@ function metaFor(fam: Family): SessionMeta | null {
     branchPoints: countBranchPoints(childIndex(nodes)),
     resumeCommand: resumeCmd(fam.rootId, rootMember.ws.cwd),
     members: fam.members.length,
+    forks: forkSummaries(membersOf(fam), fam.rootId),
     entrypoint: "copilot-cli",
   };
 }
@@ -349,7 +350,8 @@ export function loadCopilotSession(sessionId: SessionId): SessionDetail | null {
 
   const nodes = stitched(fam);
   applyAnnotations(nodes, fam.members.map((m) => m.ws.id));
-  return { meta, nodes, members: membersOf(fam) };
+  const members = membersOf(fam).map((m) => ({ ...m, tipId: heldTip(nodes, holdsCopy(m.id)) ?? undefined }));
+  return { meta, nodes, members };
 }
 
 // ------------------------------------------------------------------ fork

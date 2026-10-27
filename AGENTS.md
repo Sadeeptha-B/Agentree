@@ -691,6 +691,19 @@ The tree follows the transcripts on disk.
   recent conversation) and one flat list, newest interaction first, with one
   entry per fork family.
 - Badges: `⑂ n` branch points, `N sessions` for a family.
+- A family card names its other chats (`SessionMeta.forks`, newest activity
+  first, three then "+N"); a fork's own title is often the descriptive one.
+  The search matches fork titles and ids too, and a matched fork moves to
+  the front of that line, highlighted. A family counts under every member's
+  directory, so a fork made in another repo shows there as well (owner's
+  choice).
+- Clicking a fork name, or opening a card whose search hit only a fork,
+  opens the tree **focused** on that member: the selection lands on
+  `MemberInfo.tipId`, the newest leaf among the turns the member holds. The
+  provider decides "holds": Claude and Copilot by `sourceSessionId` or an
+  occurrence, Codex by the thread's current history (a fork by reference
+  copies nothing, so it has no occurrences). A fork with no turn of its own
+  lands on the turn it was forked at.
 - Health rows sit above the list. Their provider chips are the agent filter
   (one agent, or all; `providerFilter` in the store). It combines with the
   directory filter and the search, and the rail counts only what it lets

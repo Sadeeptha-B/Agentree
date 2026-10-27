@@ -101,6 +101,18 @@ describe("renderer store lifecycle", () => {
     expect(useStore.getState().error).toMatch(/no longer on disk/);
   });
 
+  it("opens a family on a focused member's own tip", async () => {
+    const fam = detail("P", withRoot.nodes, [member("P", null), { ...member("F", "P"), tipId: "p-a1" }]);
+    api.getSession.mockResolvedValueOnce(fam);
+    await useStore.getState().openSession("P", { focus: "F" });
+    expect(useStore.getState().selected).toBe("p-a1");
+    // Not the tip, so a live update doesn't drag the selection away.
+    expect(useStore.getState().following).toBe(false);
+    api.getSession.mockResolvedValueOnce(fam);
+    await useStore.getState().openSession("P");
+    expect(useStore.getState().selected).toBe("f-u2");
+  });
+
   it("sends a cleared annotation field as null, which survives JSON", async () => {
     api.getSession.mockResolvedValueOnce(withRoot);
     await useStore.getState().openSession("P");
