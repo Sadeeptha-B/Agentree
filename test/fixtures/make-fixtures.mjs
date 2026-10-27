@@ -349,20 +349,35 @@ write(`${CL}/c--work-toolloop/${TL}.jsonl`, [
   { type: "permission-mode", permissionMode: "acceptEdits", sessionId: TL, timestamp: ts(300) },
 ]);
 
-// c--work-old: a session that moved directory partway, recording the new
-// one in three spellings (trailing separator, lower-case drive, Git Bash).
-// It continues in the new directory; a bookkeeping record with the old cwd
-// at the end must not move it back.
+// c--work-new: a session filed in the new directory's project folder whose
+// records start in the old one (a moved repo), record the new one in three
+// spellings (trailing separator, lower-case drive, Git Bash), and end after
+// the agent `cd`'d into a subfolder — the cwd is the shell's. It belongs to
+// the new directory: not the old one, not the subfolder. A bookkeeping
+// record with the old cwd at the end must not move it back.
 const MV = "50000000-0000-4000-8000-000000000004";
 const at = (rec, cwd) => ({ ...rec, cwd });
-write(`${CL}/c--work-old/${MV}.jsonl`, [
+write(`${CL}/c--work-new/${MV}.jsonl`, [
   at(user(MV, "mv-u1", null, 0, "mv-1", "Start here"), "C:\\work\\old"),
   at(asst(MV, "mv-a1", "mv-u1", 1, "msg_mv1", [text("Started.")]), "C:\\work\\old"),
   at(user(MV, "mv-u2", "mv-a1", 2, "mv-2", "Moved the repo"), "c:\\work\\new\\"),
   at(asst(MV, "mv-a2", "mv-u2", 3, "msg_mv2", [text("Noted.")]), "C:\\work\\new"),
   at(user(MV, "mv-u3", "mv-a2", 4, "mv-3", "From Git Bash now"), "/c/work/new"),
   at(asst(MV, "mv-a3", "mv-u3", 5, "msg_mv3", [text("Still here.")]), "/c/work/new"),
-  { type: "file-history-snapshot", messageId: "mv-a3", snapshot: {}, cwd: "C:\\work\\old" },
+  at(user(MV, "mv-u4", "mv-a3", 6, "mv-4", "Build the app"), "C:\\work\\new\\src"),
+  at(asst(MV, "mv-a4", "mv-u4", 7, "msg_mv4", [text("Built in src.")]), "C:\\work\\new\\src"),
+  { type: "file-history-snapshot", messageId: "mv-a4", snapshot: {}, cwd: "C:\\work\\old" },
+]);
+
+// c--work-cd: no folder name to go by (it encodes no recorded cwd), and the
+// agent cd'd into a subfolder and back up past the start. The session stays
+// where it began.
+const CD = "50000000-0000-4000-8000-000000000008";
+write(`${CL}/c--work-cd/${CD}.jsonl`, [
+  at(user(CD, "cd-u1", null, 0, "cd-1", "Look around"), "C:\\repo"),
+  at(asst(CD, "cd-a1", "cd-u1", 1, "msg_cd1", [text("In the repo.")]), "C:\\repo\\pkg\\a"),
+  at(user(CD, "cd-u2", "cd-a1", 2, "cd-2", "Go up"), "C:\\"),
+  at(asst(CD, "cd-a2", "cd-u2", 3, "msg_cd2", [text("At the drive root.")]), "C:\\"),
 ]);
 
 // One session id in several project folders (a moved repo).
