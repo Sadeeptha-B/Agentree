@@ -13,9 +13,9 @@ import type {
   UsageSnapshot,
 } from "../../shared/types.ts";
 import { HealthScan, minorVersion } from "../health.ts";
-import { readMeta } from "../meta.ts";
+import { applyAnnotations } from "../meta.ts";
 import { codexArchived, codexIndex, codexSessions } from "../paths.ts";
-import { resumeCommand } from "../shell.ts";
+import { RESUME_ARGV, resumeCommand } from "../shell.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
@@ -35,22 +35,27 @@ import { stitchFamily, type FamilyMember } from "./stitch.ts";
  * (`turn_trigger: "edit_user_message"`) starts a new page cut before the
  * edited turn; a fork (VS Code "fork from here", `thread/fork`) starts a new
  * THREAD whose first page is cut after the chosen turn, and also records
- * `forked_from_id`. Verified on 24 cuts: every one lands on a turn boundary.
+ * `forked_from_id`. Verified on 25 cuts: every one lands on a turn boundary.
  *
  * So the pages form an exact tree with no matching or inference: a page's
- * first turn hangs off the last turn of its base before the cut. Turn ids
- * (UUIDv7) are shared by reference, never copied. This is strictly more than
- * `codex app-server` shows — `thread/turns/list` returns only a thread's
- * active path, hiding every prompt-edit branch — which is why the tree is
- * built from the files and the app-server is used only to fork.
+ * first turn hangs off the last turn of its base before the cut. This is
+ * strictly more than `codex app-server` shows — `thread/turns/list` returns
+ * only a thread's active path, hiding every prompt-edit branch — which is why
+ * the tree is built from the files and the app-server is used only to fork.
+ *
+ * Two things vary independently and are read independently:
+ *
+ *  - VOCABULARY: `item_completed` items carrying turn ids, or the legacy
+ *    `user_message` / `agent_message` events, which carry none;
+ *  - HISTORY ENCODING: by reference (`history_base`), or a COPIED prefix
+ *    (`forked_from_id` and no `history_base`). Codex 0.153–0.162 wrote forks
+ *    of paginated threads both ways (7 copied-prefix forks on the target
+ *    machine). A copy keeps the turn ids, so with the item vocabulary its
+ *    prefix aligns on them exactly; legacy copies are stitched by content.
  *
  * Older pages are zstd-compressed; bases may live in `archived_sessions/`
  * (an archived thread can be the root of live forks). Guardian-review and
  * subagent threads are Codex's own plumbing and are hidden.
- *
- * Pre-paginated ("legacy") rollouts — `event_msg` `user_message` /
- * `agent_message`, forks as verbatim copied prefixes — are still read, and
- * their families stitched by content.
  */
 
 // ------------------------------------------------------------------ records
@@ -218,12 +223,15 @@ interface Page {
   file: string;
   archived: boolean;
   cwd: string;
+  /** `forked_from_id`. With no `base`, the page holds a COPY of that thread's prefix. */
   forkedFrom: string | null;
   base: { pageId: string; end: number } | null;
   source: Source;
   version?: string;
-  /** Pre-paginated rollout: linear nodes, families stitched by content. */
+  /** Legacy event vocabulary: no turn ids, so linear nodes stitched by content. */
   legacy: boolean;
+  /** Turn-bearing records that yielded no turn — what a vocabulary change looks like. */
+  unrecognized?: boolean;
   turns: Turn[];
   lastOrdinal: number;
   touchedAt: number;
@@ -308,10 +316,14 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     tools: string[];
     thinking: string[];
     lastAssistant: TurnNode | null;
+    /** Usage reported before the turn's first prose; lands on its first reply. */
+    usage?: UsageSnapshot;
+    lastUsage?: UsageSnapshot;
     users: number;
   }
   const turns = new Map<string, Builder>();
   let model: string | undefined;
+  let turnRecords = 0;
 
   const builder = (turnId: string, ordinal: number): Builder => {
     let b = turns.get(turnId);
@@ -348,14 +360,20 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     if (r.type === "turn_context" && p.model) model = p.model;
     if (r.type === "event_msg" && p.type && !KNOWN_EVENTS.has(p.type)) bump(`event_msg/${p.type}`);
     if (!p.turn_id) continue;
+    turnRecords++;
     const b = builder(p.turn_id, ord);
 
     if (r.type === "token_usage_record" && p.usage) {
+      // A response that produced only tools or reasoning reports usage before
+      // any prose exists; hold it for the reply rather than drop it.
       const u = toUsage(p.usage);
       const target = b.lastAssistant;
       if (target) {
         target.usage = addUsage(target.usage, u);
         target.lastUsage = u;
+      } else {
+        b.usage = addUsage(b.usage, u);
+        b.lastUsage = u;
       }
       continue;
     }
@@ -397,6 +415,11 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
         push(b, { ...base, id: nodeId, parentId: null, role: "assistant", text, model });
       }
       const n = b.cur!;
+      if (b.usage) {
+        n.usage = addUsage(n.usage, b.usage);
+        n.lastUsage ??= b.lastUsage;
+        b.usage = b.lastUsage = undefined;
+      }
       if (b.tools.length) n.toolUses = [...(n.toolUses ?? []), ...b.tools];
       if (b.thinking.length) n.thinking = [n.thinking, ...b.thinking].filter(Boolean).join("\n\n");
       b.tools = [];
@@ -421,6 +444,11 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     .map((b) => b.turn)
     .filter((t) => t.nodes.length > 0)
     .sort((a, c) => a.firstOrdinal - c.firstOrdinal);
+  // A page can legitimately say nothing (just created), but not while holding
+  // records of turns that all came out empty.
+  page.unrecognized = turnRecords > 0 && page.turns.length === 0 && !records.some(
+    (r) => r.type === "event_msg" && r.payload?.type === "turn_aborted",
+  );
 }
 
 /** The pre-paginated format: one linear stream of event_msg prose. */
@@ -510,16 +538,21 @@ function scanPages(): Scan {
     if (!hit || hit.mtimeMs !== st.mtimeMs || hit.size !== st.size) {
       pages.set(file, { mtimeMs: st.mtimeMs, size: st.size, page });
     }
-    if (!page) return;
+    if (!page) {
+      // Unreadable, not a rollout name, or no session_meta head.
+      health.failed();
+      return;
+    }
     health.version(page.version ? `codex-cli ${minorVersion(page.version)}` : undefined);
     if (page.source === "hidden") {
       health.skipped();
       return;
     }
     health.unknown(page.unknownTypes);
-    // A page with no turns is still a valid link in the tree (e.g. an edit
-    // that was abandoned before any reply); it parsed, it just says nothing.
-    health.parsed();
+    // An unrecognised page still links the pages continuing it, so it stays
+    // in the graph; it just counts as a failure, not as a session.
+    if (page.unrecognized) health.failed();
+    else health.parsed();
     out.push(page);
   };
 
@@ -553,16 +586,21 @@ function scanPages(): Scan {
 }
 
 /** `session_index.jsonl`: `{id, thread_name}` lines, last one per id wins. */
-let indexCache: { mtimeMs: number; names: Map<string, string> } | null = null;
+let indexCache: { stamp: string; names: Map<string, string> } | null = null;
+/** File identity of the index — part of every family-meta cache key, since a rename lives there. */
+function indexStamp(): string {
+  try {
+    const st = fs.statSync(codexIndex());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "none";
+  }
+}
 function threadNames(): Map<string, string> {
   const file = codexIndex();
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(file);
-  } catch {
-    return new Map();
-  }
-  if (indexCache && indexCache.mtimeMs === st.mtimeMs) return indexCache.names;
+  const stamp = indexStamp();
+  if (stamp === "none") return new Map();
+  if (indexCache && indexCache.stamp === stamp) return indexCache.names;
   const names = new Map<string, string>();
   for (const line of (readText(file) ?? "").split("\n")) {
     try {
@@ -572,7 +610,7 @@ function threadNames(): Map<string, string> {
       /* skip */
     }
   }
-  indexCache = { mtimeMs: st.mtimeMs, names };
+  indexCache = { stamp, names };
   return names;
 }
 
@@ -599,7 +637,8 @@ function families(scan: Scan): Family[] {
   for (const p of scan.pages) {
     union(p.pageId, threadKey(p.threadId));
     if (p.base && scan.byPage.has(p.base.pageId)) union(p.pageId, p.base.pageId);
-    if (p.legacy && p.forkedFrom) union(threadKey(p.threadId), threadKey(p.forkedFrom));
+    // Explicit lineage, whatever the vocabulary or history encoding.
+    if (p.forkedFrom) union(threadKey(p.threadId), threadKey(p.forkedFrom));
   }
   const groups = new Map<string, Page[]>();
   for (const p of scan.pages) {
@@ -609,10 +648,11 @@ function families(scan: Scan): Family[] {
     else groups.set(r, [p]);
   }
   return [...groups.values()].map((ps) => {
-    // The root page: no base on disk, earliest first.
+    // The root page: no base on disk, not a copy of a thread in the family,
+    // earliest first.
     const roots = ps
       .filter((p) => !p.base || !scan.byPage.has(p.base.pageId))
-      .filter((p) => !p.legacy || !p.forkedFrom || !ps.some((q) => q.threadId === p.forkedFrom));
+      .filter((p) => !p.forkedFrom || !ps.some((q) => q.threadId === p.forkedFrom));
     const root = (roots.length ? roots : ps).sort((a, b) => a.pageId.localeCompare(b.pageId))[0];
     return { rootThread: root.threadId, pages: ps };
   });
@@ -634,15 +674,70 @@ function tailBefore(scan: Scan, page: Page, cut: number, seen = new Set<string>(
   return base ? tailBefore(scan, base, Math.min(cut, page.base.end), seen) : null;
 }
 
-/** Build the family tree: page-graph links for paginated pages, stitching for legacy. */
-function buildTree(scan: Scan, fam: Family): TurnNode[] {
+/** Pages grouped by thread, oldest page first — the last one is the thread's current head. */
+function threadsOf(fam: Family): Map<string, Page[]> {
+  const t = new Map<string, Page[]>();
+  for (const p of fam.pages) {
+    const arr = t.get(p.threadId);
+    if (arr) arr.push(p);
+    else t.set(p.threadId, [p]);
+  }
+  // Page ids are UUIDv7 — lexical order is creation order.
+  for (const arr of t.values()) arr.sort((a, b) => a.pageId.localeCompare(b.pageId));
+  return t;
+}
+
+/**
+ * The turn ids on a thread's CURRENT history: from its newest page down its
+ * bases — into other threads too, since a fork's history continues into its
+ * parent's pages — narrowing the cut at each step. A page a later prompt edit
+ * cut short is still a base, but its turns past the cut are no longer held.
+ * "Newest page = current head" agreed with app-server's active turns on all
+ * ten multi-page threads of the target machine.
+ */
+function currentHistory(scan: Scan, head: Page): Set<string> {
+  const held = new Set<string>();
+  let cut = Infinity;
+  const seen = new Set<string>();
+  for (let p: Page | undefined = head; p && !seen.has(p.pageId); ) {
+    seen.add(p.pageId);
+    for (const t of p.turns) if (t.firstOrdinal < cut) held.add(t.id);
+    if (!p.base) break;
+    cut = Math.min(cut, p.base.end);
+    p = scan.byPage.get(p.base.pageId);
+  }
+  return held;
+}
+
+/** Why a Codex node can't anchor a fork. */
+const BLOCK = {
+  legacy: "This rollout predates Codex's paginated format; its turns have no ids to fork at.",
+  partial:
+    "Codex forks whole turns, and this turn continues below this message. Fork at the turn's last reply to keep all of it, or at the previous turn's reply to leave it out.",
+  abandoned:
+    "A prompt edit replaced this turn, and Codex can only fork history a thread still holds. Fork at the last turn before the edit and resend the prompt from there.",
+};
+
+interface Tree {
+  nodes: TurnNode[];
+  /** turn id → the thread a `thread/fork` through that turn goes to. */
+  forkVia: Map<string, string>;
+}
+
+/**
+ * Build the family tree: page-graph links for referenced history, turn-id
+ * alignment for copied prefixes, content stitching for the legacy vocabulary.
+ * Also decides, per node, whether Codex can fork there.
+ */
+function buildTree(scan: Scan, fam: Family): Tree {
   const out: TurnNode[] = [];
   const legacy: FamilyMember[] = [];
-  /** Turns already placed. A turn never spans pages in practice; if one ever
-   * did, its first placement wins rather than duplicating node ids. */
-  const placed = new Map<string, Turn>();
+  /** Turns already placed, with the page that placed them. A copied prefix
+   * repeats its source's turn ids; they are drawn once, where first placed. */
+  const placed = new Map<string, { turn: Turn; page: Page }>();
 
-  // Base pages before the pages continuing them, so a fork's parent exists.
+  // Base pages before the pages continuing them, and a thread before the
+  // threads that copied it: page ids are UUIDv7, so this is creation order.
   for (const page of [...fam.pages].sort((a, b) => a.pageId.localeCompare(b.pageId))) {
     if (page.legacy) {
       legacy.push({
@@ -658,41 +753,58 @@ function buildTree(scan: Scan, fam: Family): TurnNode[] {
     // that drops some of the base page's own records (a prompt edit).
     const branches =
       !!base && !!page.base && (base.threadId !== page.threadId || page.base.end <= base.lastOrdinal);
+    let afterCopy = false;
     page.turns.forEach((t, i) => {
       const dup = placed.get(t.id);
       if (dup) {
-        prev = dup.nodes[dup.nodes.length - 1];
+        prev = dup.turn.nodes[dup.turn.nodes.length - 1];
+        afterCopy = true;
         return;
       }
-      placed.set(t.id, t);
+      placed.set(t.id, { turn: t, page });
+      // The first own turn after a prefix copied from ANOTHER thread is where
+      // this fork begins.
+      const cross =
+        prev !== null && ((i === 0 && branches) || (afterCopy && prev.sourceSessionId !== page.threadId));
+      afterCopy = false;
       t.nodes.forEach((n, j) => {
         out.push({
           ...n,
           parentId: j === 0 ? prev?.id ?? null : n.parentId,
-          crossSession: (i === 0 && j === 0 && branches && prev !== null) || undefined,
+          crossSession: (j === 0 && cross) || undefined,
+          forkBlocked: j < t.nodes.length - 1 ? BLOCK.partial : undefined,
         });
       });
       prev = t.nodes[t.nodes.length - 1];
     });
   }
-  if (legacy.length) out.push(...stitchFamily(legacy));
-  return mergeSameRoleRuns(out);
-}
 
-/** Pages grouped by thread, with that thread's newest ("current") page. */
-function threadsOf(fam: Family): Map<string, Page[]> {
-  const t = new Map<string, Page[]>();
-  for (const p of fam.pages) {
-    const arr = t.get(p.threadId);
-    if (arr) arr.push(p);
-    else t.set(p.threadId, [p]);
+  // Forks go through a thread whose current history still holds the turn:
+  // the one that placed it if it does, else any other (a fork of it, say —
+  // verified: thread/fork on a fork thread accepts a turn it only inherits
+  // through history_base, codex-cli 0.164). A turn no thread holds was cut
+  // away by a prompt edit, and app-server refuses to fork stale pages.
+  const holders = [...threadsOf(fam).entries()].map(([id, ps]) => ({
+    id,
+    held: currentHistory(scan, ps[ps.length - 1]),
+  }));
+  const forkVia = new Map<string, string>();
+  for (const [turnId, { page }] of placed) {
+    const own = holders.find((h) => h.id === page.threadId && h.held.has(turnId));
+    const via = own ?? holders.find((h) => h.held.has(turnId));
+    if (via) forkVia.set(turnId, via.id);
   }
-  // Page ids are UUIDv7 — lexical order is creation order.
-  for (const arr of t.values()) arr.sort((a, b) => a.pageId.localeCompare(b.pageId));
-  return t;
+  for (const n of out) {
+    if (!n.forkBlocked && n.lastRawId && !forkVia.has(n.lastRawId)) n.forkBlocked = BLOCK.abandoned;
+  }
+
+  if (legacy.length) {
+    for (const n of stitchFamily(legacy)) out.push({ ...n, forkBlocked: BLOCK.legacy });
+  }
+  return { nodes: mergeSameRoleRuns(out), forkVia };
 }
 
-export const codexResumeArgv = (id: string) => ["codex", "resume", id];
+export const codexResumeArgv = RESUME_ARGV.codex;
 const resumeCmd = (id: string, cwd: string) => resumeCommand(cwd, codexResumeArgv(id));
 
 function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; members: MemberInfo[] } {
@@ -737,29 +849,34 @@ let lastHealth: ProviderHealth | null = null;
 export const codexHealth = (): ProviderHealth =>
   lastHealth ?? new HealthScan("codex", codexSessions()).done();
 
-/** Family-meta cache: one entry per family, keyed by its pages' file identities. */
+/**
+ * Family-meta cache: one entry per family, keyed by its pages' file
+ * identities AND the thread-name index's — a rename touches only the index.
+ */
 const metas = new Map<string, SessionMeta>();
 
 export function listCodexSessions(): SessionMeta[] {
   const scan = scanPages();
   const out: SessionMeta[] = [];
   const live = new Set<string>();
+  const index = indexStamp();
   for (const fam of families(scan)) {
     // Only conversations the user can still see: an all-archived family stays
     // reachable as the base of live forks, but gets no entry of its own.
     if (fam.pages.every((p) => p.archived)) continue;
     if (!fam.pages.some((p) => p.turns.length)) continue;
-    const sig = fam.pages
-      .map((p) => {
-        const c = pages.get(p.file);
-        return `${p.file}:${c?.mtimeMs}:${c?.size}`;
-      })
-      .sort()
-      .join("|");
+    const sig =
+      fam.pages
+        .map((p) => {
+          const c = pages.get(p.file);
+          return `${p.file}:${c?.mtimeMs}:${c?.size}`;
+        })
+        .sort()
+        .join("|") + `|index:${index}`;
     live.add(sig);
     let meta = metas.get(sig);
     if (!meta) {
-      meta = describe(fam, buildTree(scan, fam)).meta;
+      meta = describe(fam, buildTree(scan, fam).nodes).meta;
       metas.set(sig, meta);
     }
     out.push(meta);
@@ -785,41 +902,13 @@ export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
   const scan = scanPages();
   const fam = familyOf(scan, sessionId);
   if (!fam) return null;
-  const nodes = buildTree(scan, fam);
+  const { nodes } = buildTree(scan, fam);
   const { meta, members } = describe(fam, nodes);
-  // Annotations: written under the family root's id; read every member's so a
-  // re-rooted family keeps them.
-  for (const m of members) {
-    const mm = readMeta(m.id);
-    for (const n of nodes) {
-      const a = mm[n.id] ?? n.absorbedIds?.map((id) => mm[id]).find(Boolean);
-      if (a) Object.assign(n, a);
-    }
-  }
+  applyAnnotations(nodes, members.map((m) => m.id));
   return { meta, nodes, members };
 }
 
 // ------------------------------------------------------------------ fork
-
-/**
- * Is `turn` (on `owner`) part of its thread's CURRENT history? Walk from the
- * thread's newest page down its bases, narrowing the cut at each step: a page
- * that a later prompt edit cut short is still a base, but its turns past the
- * cut are no longer in the thread.
- */
-function onCurrentHistory(scan: Scan, fam: Family, owner: Page, turn: Turn): boolean {
-  const thread = threadsOf(fam).get(owner.threadId) ?? [];
-  let cut = Infinity;
-  const seen = new Set<string>();
-  for (let p = thread[thread.length - 1]; p && !seen.has(p.pageId); ) {
-    seen.add(p.pageId);
-    if (p.pageId === owner.pageId) return turn.firstOrdinal < cut;
-    if (!p.base || p.threadId !== owner.threadId) return false;
-    cut = Math.min(cut, p.base.end);
-    p = scan.byPage.get(p.base.pageId)!;
-  }
-  return false;
-}
 
 /**
  * Fork a Codex thread through a chosen turn (inclusive), via the app-server's
@@ -827,41 +916,33 @@ function onCurrentHistory(scan: Scan, fam: Family, owner: Page, turn: Turn): boo
  * thread is a first-class Codex thread with real lineage (`forked_from_id`,
  * `history_base`). Agentree writes nothing itself.
  *
- * The thread to fork is the one whose CURRENT history contains the turn. A
- * turn that survives only on an abandoned prompt-edit page isn't in any
- * thread's current history, so that page's file is passed instead (the API's
- * fork-by-path).
+ * Which nodes can be forked, and through which thread, was decided when the
+ * tree was built (`forkBlocked`, `forkVia`): Codex cuts only at whole turns,
+ * and only in history some thread still holds.
  */
 export async function forkCodexAt(familyId: SessionId, nodeId: string): Promise<ForkResult> {
   const scan = scanPages();
   const fam = familyOf(scan, familyId);
-  const node = fam ? buildTree(scan, fam).find((n) => n.id === nodeId) : undefined;
-  if (!fam || !node) return { ok: false, error: "That turn is not in this conversation any more." };
-  const turnId = node.lastRawId;
-  if (!turnId || turnId.endsWith("#legacy")) {
-    return { ok: false, error: "This rollout predates Codex's paginated format; its turns have no ids to fork at." };
-  }
+  const tree = fam ? buildTree(scan, fam) : undefined;
+  const node = tree?.nodes.find((n) => n.id === nodeId);
+  if (!fam || !tree || !node) return { ok: false, error: "That turn is not in this conversation any more." };
+  if (node.forkBlocked) return { ok: false, error: node.forkBlocked };
+  const turnId = node.lastRawId!;
+  const via = tree.forkVia.get(turnId);
+  if (!via) return { ok: false, error: BLOCK.abandoned };
 
-  const owner = fam.pages.find((p) => p.turns.some((t) => t.id === turnId));
-  const turn = owner?.turns.find((t) => t.id === turnId);
-  if (!owner || !turn) return { ok: false, error: "That turn's rollout page is no longer on disk." };
-  const onCurrent = onCurrentHistory(scan, fam, owner, turn);
-
-  const res = await forkThread({
-    threadId: owner.threadId,
-    lastTurnId: turnId,
-    path: onCurrent ? undefined : owner.file,
-  });
+  const res = await forkThread({ threadId: via, lastTurnId: turnId });
   if (!res.ok) return res;
-  const cwd = res.cwd || owner.cwd;
+  const cwd = res.cwd || fam.pages.find((p) => p.threadId === via)?.cwd || "";
   return {
     ok: true,
     id: res.threadId,
     cwd,
     command: resumeCmd(res.threadId, cwd),
     open: { provider: "codex", sessionId: res.threadId, cwd },
-    note: onCurrent
-      ? undefined
-      : "This turn was on a prompt-edit branch; the fork was taken from that branch's own page.",
+    note:
+      via !== node.sourceSessionId
+        ? "This turn's own thread was edited past it, so the fork was taken through a fork of that thread that still holds it."
+        : undefined,
   };
 }

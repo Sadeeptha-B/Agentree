@@ -1,30 +1,30 @@
 import * as vscode from "vscode";
+import path from "node:path";
 
-import {
-  allHealth,
-  forkAnyAt,
-  listAllSessions,
-  loadAnySession,
-  providerById,
-} from "../../electron/registry.ts";
-import { writeMeta } from "../../electron/meta.ts";
+import { startBackend, type Backend } from "../../electron/backend-client.ts";
 import { nativeLink } from "../../electron/native.ts";
-import { quote } from "../../electron/shell.ts";
+import { quote, RESUME_ARGV } from "../../electron/shell.ts";
 import { usableCwd } from "../../electron/terminal.ts";
-import { watchTranscripts, type Watcher } from "../../electron/watch.ts";
+import { watchLater, type Watcher } from "../../electron/watch.ts";
 import type { ActionResult, NodeMeta, SessionRef } from "../../shared/types.ts";
 
 /**
  * VS Code host for Agentree. The Electron app's main/renderer split maps
  * one-to-one onto extension host/webview: the same provider code answers the
- * same four calls, and the webview runs the same React bundle with a
- * postMessage shim standing in for the contextBridge (see src/shim.ts).
+ * same calls, and the webview runs the same React bundle with a postMessage
+ * shim standing in for the contextBridge (see src/shim.ts).
+ *
+ * The providers run in a worker thread (dist/worker.cjs), not here: a cold
+ * scan takes seconds, and the extension host is shared by every extension.
  */
 
 /** One panel, like the Electron app's one window; re-running the command reveals it. */
 let current: vscode.WebviewPanel | undefined;
+let backend: Backend;
 
 export function activate(context: vscode.ExtensionContext) {
+  backend = startBackend(path.join(context.extensionPath, "dist", "worker.cjs"));
+  context.subscriptions.push({ dispose: () => backend.dispose() });
   context.subscriptions.push(
     vscode.commands.registerCommand("agentree.open", () => {
       if (current) {
@@ -71,7 +71,7 @@ function createPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
       watchers.get(m.token)?.close();
       watchers.set(
         m.token,
-        watchTranscripts(m.sessionId, () => {
+        watchLater(backend.watchTargets(m.sessionId), () => {
           void panel.webview.postMessage({ kind: "changed", token: m.token });
         }),
       );
@@ -97,15 +97,15 @@ type BridgeRequest =
 function dispatch(method: string, args: unknown[]): unknown {
   switch (method) {
     case "listSessions":
-      return listAllSessions();
+      return backend.listSessions();
     case "getSession":
-      return loadAnySession(args[0] as string);
+      return backend.getSession(args[0] as string);
     case "patchNode":
-      return writeMeta(args[0] as string, args[1] as string, args[2] as NodeMeta);
+      return backend.patchNode(args[0] as string, args[1] as string, args[2] as NodeMeta);
     case "forkAt":
-      return forkAnyAt(args[0] as string, args[1] as string);
+      return backend.forkAt(args[0] as string, args[1] as string);
     case "providerHealth":
-      return allHealth();
+      return backend.providerHealth();
     case "openNative":
       return openNative(args[0] as SessionRef);
     case "resumeInTerminal":
@@ -150,15 +150,15 @@ async function openNative(ref: SessionRef): Promise<ActionResult> {
 
 /** Resume in an integrated terminal started in the session's own directory. */
 function resumeInTerminal(ref: SessionRef): ActionResult {
-  const p = providerById(ref.provider);
-  if (!p) return { ok: false, error: "Unknown harness." };
+  const argv = RESUME_ARGV[ref.provider];
+  if (!argv || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
   const term = vscode.window.createTerminal({
     name: `${ref.provider} ${ref.sessionId.slice(0, 8)}`,
     // A session's folder can be gone (repo moved); the CLI still finds the session.
     cwd: usableCwd(ref.cwd),
   });
   term.show();
-  term.sendText(p.resumeArgv(ref.sessionId).map((a) => quote(a)).join(" "));
+  term.sendText(argv(ref.sessionId).map((a) => quote(a)).join(" "));
   return { ok: true };
 }
 

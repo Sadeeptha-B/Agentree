@@ -3,30 +3,65 @@ import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { childIndex, pathToRoot, toNodeMap } from "../shared/render.ts";
+import type { SessionDetail, TurnNode } from "../shared/types.ts";
 import { listSessions, loadSession, claudeHealth } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
 import { readLineage } from "../electron/lineage.ts";
+import { annotate } from "../electron/registry.ts";
+import { writeMeta } from "../electron/meta.ts";
 
 const P = "11111111-1111-4111-8111-111111111111";
 const F = "22222222-2222-4222-8222-222222222222";
 const S = "33333333-3333-4333-8333-333333333333";
-let projectDir: string;
+const P1 = "41111111-1111-4111-8111-111111111111";
+const F1 = "42222222-2222-4222-8222-222222222222";
+const G1 = "43333333-3333-4333-8333-333333333333";
+const P2 = "44444444-4444-4444-8444-444444444444";
+const F2 = "45555555-5555-4555-8555-555555555555";
+const QP = "46666666-6666-4666-8666-666666666666";
+const QF = "47777777-7777-4777-8777-777777777777";
+const KP = "48888888-8888-4888-8888-888888888888";
+const KN = "49999999-9999-4999-8999-999999999999";
+const NP = "4aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+let projects: string;
+const projectDir = (name = "c--work-demo") => path.join(projects, name);
+const readJsonl = (file: string) =>
+  fs.readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+/** Every tree Agentree hands the renderer must be one: unique ids, no dangling parents, no cycles. */
+function expectTree(d: SessionDetail) {
+  const ids = new Set(d.nodes.map((n) => n.id));
+  expect(ids.size).toBe(d.nodes.length);
+  for (const n of d.nodes) if (n.parentId) expect(ids.has(n.parentId)).toBe(true);
+  const map = toNodeMap(d.nodes);
+  for (const n of d.nodes) expect(pathToRoot(n.id, map)[0].parentId).toBeNull();
+}
+const byText = (d: SessionDetail, t: string) => d.nodes.filter((n) => n.text === t);
+const one = (d: SessionDetail, t: string): TurnNode => {
+  const hits = byText(d, t);
+  expect(hits, `"${t}" drawn once`).toHaveLength(1);
+  return hits[0];
+};
+const kidsOf = (d: SessionDetail, n: TurnNode) =>
+  (childIndex(d.nodes).get(n.id) ?? []).map((k) => k.text).sort();
 
 beforeAll(() => {
-  // Work on a copy: the fork tests write a new transcript.
+  // Work on a copy: the fork tests write new transcripts.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agentree-claude-"));
   fs.cpSync(path.join(__dirname, "fixtures", "claude", "2.1"), path.join(tmp, "claude"), { recursive: true });
   process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "claude");
   process.env.AGENTREE_HOME = path.join(tmp, "agentree");
-  projectDir = path.join(tmp, "claude", "projects", "c--work-demo");
+  // The registry is used for annotations; keep the other harnesses off the real home dir.
+  process.env.CODEX_HOME = path.join(tmp, "no-codex");
+  process.env.COPILOT_HOME = path.join(tmp, "no-copilot");
+  projects = path.join(tmp, "claude", "projects");
 });
 
 describe("Claude transcripts", () => {
   it("lists one entry per fork family and never merges on an opening prompt alone", () => {
-    const list = listSessions();
+    const list = listSessions().filter((s) => [P, F, S].includes(s.id));
     expect(list.map((s) => s.id).sort()).toEqual([P, S]);
-    const fam = list.find((s) => s.id === P)!;
-    expect(fam.members).toBe(2);
+    expect(list.find((s) => s.id === P)!.members).toBe(2);
     expect(list.find((s) => s.id === S)!.members).toBe(1);
   });
 
@@ -34,63 +69,107 @@ describe("Claude transcripts", () => {
     const fam = listSessions().find((s) => s.id === P)!;
     expect(fam.title).toBe("Build walkthrough");
     expect(fam.entrypoint).toBe("claude-vscode");
-    const solo = listSessions().find((s) => s.id === S)!;
-    expect(solo.title).toBe("Explain the build");
+    expect(listSessions().find((s) => s.id === S)!.title).toBe("Explain the build");
   });
 
   it("drops ide_* context from turn text and ignores api-request-blob records", () => {
     const d = loadSession(P)!;
-    const first = d.nodes.find((n) => n.parentId === null)!;
-    expect(first.text).toBe("Explain the build");
+    expect(d.nodes.find((n) => n.parentId === null)!.text).toBe("Explain the build");
     expect(d.nodes.some((n) => n.text.includes("NOT A TURN"))).toBe(false);
   });
 
   it("stitches the extension fork in at the turn it was taken after", () => {
     for (const id of [P, F]) {
       const d = loadSession(id)!;
+      expectTree(d);
       expect(d.meta.id).toBe(P); // any member opens the family
-      const kids = childIndex(d.nodes);
-      const added = d.nodes.find((n) => n.text === "Added vitest.")!;
-      const branch = (kids.get(added.id) ?? []).map((n) => n.text).sort();
       // Two rewind branches inside P, plus the fork's own first prompt.
-      expect(branch).toEqual(["Actually, wait", "Ship it", "Try rollup instead"]);
-      const forkTurn = d.nodes.find((n) => n.text === "Try rollup instead")!;
+      expect(kidsOf(d, one(d, "Added vitest."))).toEqual(["Actually, wait", "Ship it", "Try rollup instead"]);
+      const forkTurn = one(d, "Try rollup instead");
       expect(forkTurn.crossSession).toBe(true);
       expect(forkTurn.sourceSessionId).toBe(F);
-      // The shared prefix exists once.
-      expect(d.nodes.filter((n) => n.text === "Explain the build")).toHaveLength(1);
+      one(d, "Explain the build"); // the shared prefix exists once
       expect(d.meta.branchPoints).toBe(1);
       expect(d.members.find((m) => m.id === F)!.parentId).toBe(P);
     }
   });
 
-  it("reports health with no unknown record types", () => {
+  it("keeps the fork's parent when that parent rewinds after being forked from", () => {
+    const d = loadSession(G1)!;
+    expectTree(d);
+    expect(d.meta.id).toBe(P1);
+    const parents = Object.fromEntries(d.members.map((m) => [m.id, m.parentId]));
+    expect(parents).toEqual({ [P1]: null, [F1]: P1, [G1]: F1 });
+    // F1's own reply exists once, and G1 continues from it.
+    expect(kidsOf(d, one(d, "Rollback is a revert."))).toEqual(["Script the revert"]);
+    expect(one(d, "Script the revert").crossSession).toBe(true);
+    // F1's later rewind is its own branch off the first reply.
+    expect(kidsOf(d, one(d, "Three steps."))).toEqual(["Detail step one", "Start over with a hotfix"]);
+  });
+
+  it("never lets title order contradict explicit lineage (no cycle, no duplicated prefix)", () => {
+    const d = loadSession(F2)!;
+    expectTree(d);
+    expect(d.meta.id).toBe(P2);
+    expect(Object.fromEntries(d.members.map((m) => [m.id, m.parentId]))).toEqual({ [P2]: null, [F2]: P2 });
+    expect(kidsOf(d, one(d, "Dear team,"))).toEqual(["Make it formal", "Make it shorter"]);
+  });
+
+  it("joins a fork taken on a regenerated first answer", () => {
+    const list = listSessions().filter((s) => [QP, QF].includes(s.id));
+    expect(list).toHaveLength(1);
+    expect(list[0].members).toBe(2);
+    const d = loadSession(QF)!;
+    expectTree(d);
+    expect(kidsOf(d, one(d, "Name the project"))).toEqual(["Call it Atlas.", "Call it Beacon."]);
+    expect(kidsOf(d, one(d, "It guides."))).toEqual(["Pick a logo"]);
+  });
+
+  it("aligns a native fork of a compacted session across the stale logical parent", () => {
+    const d = loadSession(KN)!;
+    expectTree(d);
+    expect(d.members).toHaveLength(2);
+    expect(d.nodes.filter((n) => n.parentId === null)).toHaveLength(1);
+    expect(kidsOf(d, one(d, "Continuing with issue one."))).toEqual(["Fix issue three instead", "Fix issue two"]);
+    // Pre-compact turns are drawn, and say why they can't be forked.
+    expect(one(d, "Found four issues.").forkBlocked).toMatch(/compact/);
+  });
+
+  it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(3);
-    expect(h.sessionsParsed).toBe(3);
-    expect(h.listed).toBe(2);
+    expect(h.filesSeen).toBe(14);
+    expect(h.failed).toBe(1);
+    expect(h.sessionsParsed).toBe(13);
+    expect(h.skipped).toBe(0);
+    expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
     expect(h.unknownRecordTypes).toEqual({});
+  });
+});
+
+describe("Claude annotations", () => {
+  it("resolves a label saved against a copy that stitching folded away", () => {
+    // Saved while F stood alone, under F's own uuid for the shared reply.
+    writeMeta(F, "f-a2", { label: "tests landed" });
+    const d = loadSession(P)!;
+    const n = one(d, "Added vitest.");
+    expect(n.id).toBe("p-a2");
+    expect(n.label).toBe("tests landed");
   });
 });
 
 describe("Claude fork", () => {
   it("writes a new transcript in the extension's fork format and stitches it back", () => {
     const before = loadSession(P)!;
-    const shipped = before.nodes.find((n) => n.text === "Added vitest.")!;
+    const shipped = one(before, "Added vitest.");
     const res = forkClaudeAt(P, shipped.id);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.open).toEqual({ provider: "claude", sessionId: res.id, cwd: "C:\\work\\demo" });
     expect(readLineage()[res.id]).toBe(P);
 
-    const lines = fs
-      .readFileSync(path.join(projectDir, `${res.id}.jsonl`), "utf8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
-    const title = lines[lines.length - 1];
-    expect(title).toMatchObject({ type: "custom-title", customTitle: "Build walkthrough (fork)" });
+    const lines = readJsonl(path.join(projectDir(), `${res.id}.jsonl`));
+    expect(lines.at(-1)).toMatchObject({ type: "custom-title", customTitle: "Build walkthrough (fork)" });
     const recs = lines.slice(0, -1);
     // Chain up to and including the anchor, re-linked, re-owned, marked.
     expect(recs.map((r) => r.message?.id ?? r.promptId)).toEqual(["prompt-1", "msg_1", "msg_1", "prompt-2", "msg_2"]);
@@ -103,31 +182,71 @@ describe("Claude fork", () => {
 
     // Until it has a turn of its own, the fork adds nothing to the tree...
     const after = loadSession(P)!;
+    expectTree(after);
     expect(after.members.map((m) => m.id)).toContain(res.id);
     expect(after.nodes.length).toBe(before.nodes.length);
     // ...and the original transcript is untouched.
-    expect(fs.readFileSync(path.join(projectDir, `${P}.jsonl`), "utf8")).not.toContain(res.id);
+    expect(fs.readFileSync(path.join(projectDir(), `${P}.jsonl`), "utf8")).not.toContain(res.id);
   });
 
   it("forks at a node inside a fork's own suffix from that fork's transcript", () => {
     const d = loadSession(P)!;
-    const n = d.nodes.find((x) => x.text === "Switched to rollup.")!;
-    const res = forkClaudeAt(P, n.id);
+    const res = forkClaudeAt(P, one(d, "Switched to rollup.").id);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    const recs = fs
-      .readFileSync(path.join(projectDir, `${res.id}.jsonl`), "utf8")
-      .trim()
-      .split("\n")
-      .map((l) => JSON.parse(l));
+    const recs = readJsonl(path.join(projectDir(), `${res.id}.jsonl`));
     expect(recs[0].forkedFrom.sessionId).toBe(F);
     expect(recs.at(-1).customTitle).toBe("Build walkthrough (fork) (fork)");
   });
 
   it("path to a stitched node runs through the shared prefix", () => {
     const d = loadSession(P)!;
-    const leaf = d.nodes.find((n) => n.text === "Switched to rollup.")!;
-    const texts = pathToRoot(leaf.id, toNodeMap(d.nodes)).map((n) => n.text);
+    const texts = pathToRoot(one(d, "Switched to rollup.").id, toNodeMap(d.nodes)).map((n) => n.text);
     expect(texts).toEqual(["Explain the build", "The build uses esbuild.", "Now add tests", "Added vitest.", "Try rollup instead", "Switched to rollup."]);
+  });
+
+  it("copies the logical chain across /compact, keeping the boundary a physical root", () => {
+    const before = loadSession(KP)!;
+    const res = forkClaudeAt(KP, one(before, "Issue two fixed.").id);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const recs = readJsonl(path.join(projectDir("c--work-compact"), `${res.id}.jsonl`)).slice(0, -1);
+    expect(recs.map((r) => r.subtype ?? r.message?.id ?? r.promptId ?? "summary")).toEqual([
+      "kp-1", "msg_k1", "compact_boundary", "summary", "msg_k2", "kp-3", "msg_k3",
+    ]);
+    const cb = recs.find((r) => r.subtype === "compact_boundary");
+    expect(cb.parentUuid).toBeNull();
+    // The fork is one family with its source, and adds no node of its own yet.
+    const after = loadSession(KP)!;
+    expectTree(after);
+    expect(after.members).toHaveLength(3);
+    expect(after.nodes.length).toBe(before.nodes.length);
+  });
+
+  it("refuses a pre-compact turn with the reason the panel showed", () => {
+    const d = loadSession(KP)!;
+    const res = forkClaudeAt(KP, one(d, "Found four issues.").id);
+    expect(res).toEqual({ ok: false, error: one(d, "Found four issues.").forkBlocked });
+  });
+
+  it("a fork ending on a prompt without promptId re-joins its source", () => {
+    const before = loadSession(NP)!;
+    const res = forkClaudeAt(NP, one(before, "Second question").id);
+    expect(res.ok).toBe(true);
+    const after = loadSession(NP)!;
+    expectTree(after);
+    expect(after.members).toHaveLength(2);
+    one(after, "Second question");
+    expect(after.nodes.length).toBe(before.nodes.length);
+  });
+
+  it("annotations survive the session they were made in being deleted", () => {
+    // Annotated on the family (written to every member, under every id)...
+    annotate(P1, one(loadSession(P1)!, "Step one is tagging.").id, { label: "keep" });
+    // ...then the root transcript goes away. Its forks still carry the turn.
+    fs.rmSync(path.join(projectDir("c--work-lineage"), `${P1}.jsonl`));
+    const d = loadSession(F1)!;
+    expect(d.meta.id).toBe(F1);
+    expect(one(d, "Step one is tagging.").label).toBe("keep");
   });
 });

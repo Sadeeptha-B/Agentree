@@ -1,12 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { locate } from "./transcripts.ts";
-import { locateCodex } from "./providers/codex.ts";
-import { locateCopilot } from "./providers/copilot.ts";
-import { claudeProjects, codexArchived, codexSessions, copilotState } from "./paths.ts";
-import type { SessionId } from "../shared/types.ts";
-
 /** Files any provider reads: .jsonl, Codex's compressed pages, Copilot's yaml. */
 const TRANSCRIPT = /\.(jsonl|jsonl\.zst|yaml)$/;
 
@@ -32,6 +26,17 @@ const QUIET_MS = 250;
  * codex/copilot roots catches the writes FSEvents never reports.
  */
 const POLL_MS = 1000;
+
+/**
+ * Something on disk a view depends on. Resolved by the providers (in the
+ * backend worker — finding a session's files can mean a scan), watched here
+ * on the host, which only stats.
+ *
+ * - `dir`: watched recursively for transcript files, and stat-polled if `poll`.
+ * - `file`: a single file outside those trees (Codex's thread-name index),
+ *   stat-polled only.
+ */
+export type WatchTarget = { kind: "dir"; path: string; poll: boolean } | { kind: "file"; path: string };
 
 export interface Watcher {
   close(): void;
@@ -67,39 +72,24 @@ function treeSignature(dir: string, depth = 0): string {
   return out;
 }
 
-/**
- * Watch a session's family, or — with `sessionId: null` — every root, and
- * call `onChange` once per burst of writes.
- *
- * Watching a session means watching its *directory* rather than the file:
- * editors and the CLI both replace files, a watch on an inode goes deaf the
- * moment the file is rewritten — and a tree is a FAMILY of sessions that can
- * grow through any member, or through a brand-new fork file next to them.
- */
-export function watchTranscripts(
-  sessionId: SessionId | null,
-  onChange: () => void,
-): Watcher {
-  // Codex/Copilot roots are ALSO stat-polled — see POLL_MS for why fs.watch
-  // alone goes deaf there. The parse caches keep the rescans cheap.
-  const targets: { dir: string; poll: boolean }[] = [];
-  const codexRoots = () => {
-    targets.push({ dir: codexSessions(), poll: true });
-    targets.push({ dir: codexArchived(), poll: true });
-  };
-
-  if (sessionId) {
-    const loc = locate(sessionId);
-    if (loc) targets.push({ dir: path.dirname(loc.file), poll: false });
-    else if (locateCodex(sessionId)) codexRoots();
-    else if (locateCopilot(sessionId)) targets.push({ dir: copilotState(), poll: true });
-    else return { close() {} };
-  } else {
-    targets.push({ dir: claudeProjects(), poll: false });
-    codexRoots();
-    targets.push({ dir: copilotState(), poll: true });
+function fileSignature(file: string): string {
+  try {
+    const s = fs.statSync(file);
+    return `${s.size}:${s.mtimeMs}`;
+  } catch {
+    return "missing";
   }
+}
 
+/**
+ * Watch `targets` and call `onChange` once per burst of writes.
+ *
+ * Directories, never single transcripts: editors and the CLI both replace
+ * files, a watch on an inode goes deaf the moment the file is rewritten — and
+ * a tree is a FAMILY of sessions that can grow through any member, or through
+ * a brand-new fork file next to them.
+ */
+export function watchTranscripts(targets: WatchTarget[], onChange: () => void): Watcher {
   let timer: NodeJS.Timeout | null = null;
   const fire = () => {
     if (timer) clearTimeout(timer);
@@ -110,24 +100,28 @@ export function watchTranscripts(
   };
 
   const polls: NodeJS.Timeout[] = [];
-  for (const { dir, poll } of targets) {
-    if (!poll || !fs.existsSync(dir)) continue;
-    let sig = treeSignature(dir);
+  const poll = (sign: () => string) => {
+    let sig = sign();
     polls.push(
       setInterval(() => {
-        const next = treeSignature(dir);
+        const next = sign();
         if (next !== sig) {
           sig = next;
           fire();
         }
       }, POLL_MS),
     );
-  }
+  };
 
   const watchers: fs.FSWatcher[] = [];
-  for (const { dir } of targets) {
+  for (const t of targets) {
+    if (t.kind === "file") {
+      poll(() => fileSignature(t.path));
+      continue;
+    }
+    if (t.poll && fs.existsSync(t.path)) poll(() => treeSignature(t.path));
     try {
-      const w = fs.watch(dir, { recursive: true }, (_event, filename) => {
+      const w = fs.watch(t.path, { recursive: true }, (_event, filename) => {
         // Claude/Codex append .jsonl; Codex rotates pages to .jsonl.zst;
         // Copilot appends events.jsonl inside a session dir, and yaml changes
         // ride along on the same debounce as their neighbouring events write.
@@ -141,13 +135,35 @@ export function watchTranscripts(
       // Missing directory (harness not installed) — the others still watch.
     }
   }
-  if (watchers.length === 0 && polls.length === 0) return { close() {} };
 
   return {
     close() {
       if (timer) clearTimeout(timer);
       for (const w of watchers) w.close();
       for (const p of polls) clearInterval(p);
+    },
+  };
+}
+
+/**
+ * A watcher whose targets arrive asynchronously (from the backend worker).
+ * Closing it before they arrive is fine: nothing is ever started.
+ */
+export function watchLater(targets: Promise<WatchTarget[]>, onChange: () => void): Watcher {
+  let inner: Watcher | null = null;
+  let closed = false;
+  targets.then(
+    (t) => {
+      if (!closed) inner = watchTranscripts(t, onChange);
+    },
+    () => {
+      /* the view just doesn't follow the disk; it still reloads on demand */
+    },
+  );
+  return {
+    close() {
+      closed = true;
+      inner?.close();
     },
   };
 }

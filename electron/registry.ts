@@ -1,5 +1,6 @@
 import type {
   ForkResult,
+  NodeMeta,
   ProviderHealth,
   ProviderId,
   SessionDetail,
@@ -17,6 +18,10 @@ import {
   loadCopilotSession,
   locateCopilot,
 } from "./providers/copilot.ts";
+import { writeAnnotation } from "./meta.ts";
+import { claudeProjects, codexArchived, codexIndex, codexSessions, copilotState } from "./paths.ts";
+import type { WatchTarget } from "./watch.ts";
+import path from "node:path";
 
 /**
  * One surface over the harnesses. Everything above this file sees only
@@ -115,6 +120,7 @@ export function allHealth(): ProviderHealth[] {
       filesSeen: 0,
       skipped: 0,
       sessionsParsed: 0,
+      failed: 0,
       listed: 0,
       formatVersions: {},
       unknownRecordTypes: {},
@@ -142,4 +148,48 @@ export async function forkAnyAt(sessionId: SessionId, nodeId: string): Promise<F
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/**
+ * Annotate one turn of a family. Loads the family so the annotation can be
+ * written under every id the turn has, into every member's sidecar — see
+ * `writeAnnotation`. Costs one family load per click, which is the point:
+ * identity is only known once the family is stitched.
+ */
+export function annotate(familyId: SessionId, nodeId: string, patch: NodeMeta): void {
+  const p = owner(familyId);
+  const detail = p ? guarded(p, () => p.load(familyId), null) : null;
+  const node = detail?.nodes.find((n) => n.id === nodeId);
+  if (!detail || !node) return;
+  const members = detail.members.length ? detail.members.map((m) => m.id) : [detail.meta.id];
+  writeAnnotation(node, [detail.meta.id, ...members], patch);
+}
+
+const codexTargets = (): WatchTarget[] => [
+  { kind: "dir", path: codexSessions(), poll: true },
+  { kind: "dir", path: codexArchived(), poll: true },
+  // Renaming a thread in Codex touches only this file.
+  { kind: "file", path: codexIndex() },
+];
+
+/**
+ * What the live view of `sessionId` (or, with null, the welcome screen) has to
+ * watch. Resolving an id to its files can mean a scan, so this runs with the
+ * providers in the backend; the host only watches the result.
+ */
+export function watchTargets(sessionId: SessionId | null): WatchTarget[] {
+  if (sessionId === null) {
+    return [
+      { kind: "dir", path: claudeProjects(), poll: false },
+      ...codexTargets(),
+      { kind: "dir", path: copilotState(), poll: true },
+    ];
+  }
+  const loc = locateClaude(sessionId);
+  // The family's whole project directory: a tree grows through any member,
+  // or through a fork file that didn't exist when the view opened.
+  if (loc) return [{ kind: "dir", path: path.dirname(loc.file), poll: false }];
+  if (locateCodex(sessionId)) return codexTargets();
+  if (locateCopilot(sessionId)) return [{ kind: "dir", path: copilotState(), poll: true }];
+  return [];
 }
