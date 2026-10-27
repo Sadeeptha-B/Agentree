@@ -105,8 +105,25 @@ export function listAllSessions(): SessionMeta[] {
     failures.delete(p.id);
     out.push(...guarded(p, () => p.list(), []));
   }
-  out.sort((a, b) => b.updatedAt - a.updatedAt);
-  return out;
+  return dedupeSessions(out).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
+ * One entry per `provider:id`, whatever a provider returned. Two entries with
+ * one identity mean a provider regressed (the Claude moved-repo duplicate did
+ * exactly this): the newer is kept and the other is logged, because the user
+ * should never see a duplicate — two list cards with one key also left stale
+ * cards on screen when the list was filtered.
+ */
+export function dedupeSessions(list: SessionMeta[]): SessionMeta[] {
+  const byKey = new Map<string, SessionMeta>();
+  for (const s of list) {
+    const key = `${s.provider}:${s.id}`;
+    const prev = byKey.get(key);
+    if (prev) console.warn(`[agentree] ${key} was listed twice; keeping the newer entry.`);
+    if (!prev || s.updatedAt > prev.updatedAt) byKey.set(key, s);
+  }
+  return [...byKey.values()];
 }
 
 export function allHealth(): ProviderHealth[] {
