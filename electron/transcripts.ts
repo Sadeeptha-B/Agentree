@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../shared/render.ts";
+import { childIndex, countBranchPoints, cwdKey, forkSummaries, heldTip, holdsCopy } from "../shared/render.ts";
 import type {
   MemberInfo,
   NodeId,
@@ -639,14 +639,52 @@ const isActivity = (rec: RawRecord) =>
 
 /** Project a transcript file into the node list. Read-only — we never write here. */
 export function parseFile(file: string): Parsed {
-  return parseRecords(path.basename(file).replace(/\.jsonl$/, ""), readLines(file));
+  return parseRecords(
+    path.basename(file).replace(/\.jsonl$/, ""),
+    readLines(file),
+    path.basename(path.dirname(file)),
+  );
+}
+
+/** Claude Code's project-folder name for a directory: every non-alphanumeric becomes "-". */
+const projectSlug = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase();
+const within = (dir: string, root: string) => {
+  const r = cwdKey(root);
+  const d = cwdKey(dir);
+  return d !== r && d.startsWith(r.endsWith("/") ? r : `${r}/`);
+};
+
+/**
+ * The directory a session belongs to, from the cwds its conversation records
+ * carry, in order. The cwd is the SHELL's: it follows every `cd` the agent
+ * runs, so the last one alone files sessions under subfolders. The project
+ * folder the transcript sits in names the directory the CLI was started in,
+ * and a moved repo continues in a new folder named after its new directory —
+ * so the last cwd that folder encodes wins, in its latest spelling. Without
+ * a match (a name too long to encode, a copied fixture), the last directory
+ * that isn't merely inside, or above, the one before it.
+ */
+function sessionCwd(cwds: string[], dirName: string | undefined): string {
+  const slug = dirName?.toLowerCase();
+  const home = slug ? [...cwds].reverse().find((c) => projectSlug(c) === slug) : undefined;
+  if (home) return [...cwds].reverse().find((c) => cwdKey(c) === cwdKey(home))!;
+  let root = "";
+  for (const c of cwds) {
+    if (!root || cwdKey(c) === cwdKey(root) || !(within(c, root) || within(root, c))) root = c;
+  }
+  return root;
 }
 
 /**
  * Project one session's records — one file's, or the union of several
  * copies of the same session (`unionRecords`) — into the node list.
+ * `dirName` is the project folder they're filed in (see `sessionCwd`).
  */
-export function parseRecords(sessionId: SessionId, read: { records: RawRecord[]; bad: number } | null): Parsed {
+export function parseRecords(
+  sessionId: SessionId,
+  read: { records: RawRecord[]; bad: number } | null,
+  dirName?: string,
+): Parsed {
   if (!read) return EMPTY(sessionId, "unreadable");
   if (read.records.length === 0) return EMPTY(sessionId, read.bad > 0 ? "malformed" : undefined);
   const all = read.records;
@@ -663,7 +701,7 @@ export function parseRecords(sessionId: SessionId, read: { records: RawRecord[];
   let touchedAt = 0;
   let activeAt = 0;
   let cwd = "";
-  let lastCwd = "";
+  const cwds: string[] = [];
   let entrypoint: string | undefined;
   let version: string | undefined;
   let forkedFrom: string | undefined;
@@ -690,12 +728,11 @@ export function parseRecords(sessionId: SessionId, read: { records: RawRecord[];
       if (t > touchedAt) touchedAt = t;
       if (t > activeAt && isActivity(rec)) activeAt = t;
     }
-    // Where the session CONTINUES: the last directory a conversation record
-    // ran in (a moved repo keeps one session id across folders). Any
-    // record's first cwd is only the fallback.
+    // Where the session continues (`sessionCwd`), from the conversation
+    // records' cwds. Any record's first cwd is only the fallback.
     if (rec.cwd) {
       if (!cwd) cwd = rec.cwd;
-      if (rec.type === "user" || rec.type === "assistant") lastCwd = rec.cwd;
+      if ((rec.type === "user" || rec.type === "assistant") && rec.cwd !== cwds[cwds.length - 1]) cwds.push(rec.cwd);
     }
     if (!entrypoint && rec.entrypoint) entrypoint = rec.entrypoint;
     if (rec.version) version = rec.version;
@@ -949,7 +986,7 @@ export function parseRecords(sessionId: SessionId, read: { records: RawRecord[];
       (titleDraft?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90),
     touchedAt,
     activeAt,
-    cwd: lastCwd || cwd,
+    cwd: sessionCwd(cwds, dirName) || cwd,
     entrypoint,
     version,
     forkedFrom,
@@ -1169,7 +1206,7 @@ function resolveSource(copies: FileSummary[]): SessionSummary {
   if (hit) return hit;
   const primary = parse[parse.length - 1];
   const s: SessionSummary = {
-    ...summaryOf(parseRecords(primary.id, unionRecords(parse)), primary.file, primary.dirName, primary),
+    ...summaryOf(parseRecords(primary.id, unionRecords(parse), primary.dirName), primary.file, primary.dirName, primary),
     createdMs,
     copies,
     parse,
@@ -1213,7 +1250,9 @@ export function readSourceRecords(s: SessionSummary): RawRecord[] | null {
 }
 
 function parseSource(s: SessionSummary): Parsed {
-  return s.parse.length === 1 ? parseFile(s.parse[0].file) : parseRecords(s.id, unionRecords(s.parse));
+  return s.parse.length === 1
+    ? parseFile(s.parse[0].file)
+    : parseRecords(s.id, unionRecords(s.parse), s.parse[s.parse.length - 1].dirName);
 }
 
 /**

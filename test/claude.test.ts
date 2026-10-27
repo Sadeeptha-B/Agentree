@@ -34,6 +34,7 @@ const MV = "50000000-0000-4000-8000-000000000004";
 const MO = "50000000-0000-4000-8000-000000000005";
 const MF = "50000000-0000-4000-8000-000000000006";
 const SP = "50000000-0000-4000-8000-000000000007";
+const CD = "50000000-0000-4000-8000-000000000008";
 let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
@@ -171,14 +172,17 @@ describe("Claude transcripts", () => {
     expect(s.cwd).toBe("/c/work/new");
     expect(cwdKey(s.cwd)).toBe(cwdKey("C:/work/new"));
     expect(loadSession(MV)!.meta.cwd).toBe("/c/work/new");
+    // No project folder to go by: a cd into a subfolder, or up past the
+    // start, doesn't move the session.
+    expect(listSessions().find((x) => x.id === CD)!.cwd).toBe("C:\\repo");
   });
 
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(24);
+    expect(h.filesSeen).toBe(25);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(22);
+    expect(h.sessionsParsed).toBe(23);
     // The moved session's old copy: every record is in the new one.
     expect(h.skipped).toBe(1);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
