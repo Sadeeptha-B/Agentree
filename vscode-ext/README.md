@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/serban-cercelescu/Agentree/main/assets/logo-256.png" alt="Agentree" width="96" height="96">
+  <img src="https://raw.githubusercontent.com/Sadeeptha-B/Agentree/main/assets/logo-256.png" alt="Agentree" width="96" height="96">
 </p>
 
 <h1 align="center">Agentree</h1>
