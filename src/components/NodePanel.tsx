@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
-import type { ActionResult, ForkResult, MemberInfo, ProviderId, SessionRef } from "../../shared/types.ts";
-import { contextAt, costOf, inferWindow, pathToRoot } from "../../shared/render.ts";
+import type { ActionResult, ForkResult, ProviderId, SessionRef } from "../../shared/types.ts";
+import { actionTarget, contextAt, costOf, inferWindow, pathToRoot } from "../../shared/render.ts";
 import { Markdown } from "../markdown.tsx";
 import { pct, tokens, when } from "../format.ts";
 
@@ -92,7 +92,7 @@ function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: stri
 }
 
 export function NodePanel() {
-  const { session, nodes, selected, patch, setStatus, settings } = useStore();
+  const { session, nodes, selected, focus, patch, setStatus, settings, set } = useStore();
   // A fresh fork opens in the harness's chat panel: by default only in VS
   // Code, where that panel is right there; the desktop app shows the buttons.
   const openForks = settings?.settings.openForkInChat ?? api.host === "vscode";
@@ -121,22 +121,14 @@ export function NodePanel() {
   const ctx = node ? contextAt(node.id, nodes) : null;
   const depth = node ? pathToRoot(node.id, nodes).length : 0;
 
-  // A family tree mixes sessions: resume/open/fork act on the session the
-  // selected turn belongs to, not on the family root.
+  // A family tree mixes sessions: open/resume act on the focused member where
+  // the selected turn is in its history, else on the session the turn
+  // belongs to — never just the family root.
   const members = session.members ?? [];
-  const memberId = node?.sourceSessionId ?? meta.id;
-  const member: MemberInfo =
-    members.find((m) => m.id === memberId) ?? {
-      id: meta.id,
-      title: meta.title,
-      parentId: null,
-      cwd: meta.cwd,
-      resumeCommand: meta.resumeCommand,
-      activeAt: meta.activeAt,
-      touchedAt: meta.touchedAt,
-    };
+  const { member, ref: ref_ } = actionTarget(session, node, focus);
   const parentTitle = member.parentId ? members.find((m) => m.id === member.parentId)?.title : null;
-  const ref_: SessionRef = { provider: meta.provider, sessionId: member.id, cwd: member.cwd };
+  // Shared history is in several sessions at once; let the user say which.
+  const holders = members.filter((m) => node?.heldBy?.includes(m.id));
 
   const doFork = async () => {
     if (!node) return;
@@ -178,7 +170,22 @@ export function NodePanel() {
           {member.archived && <span className="fork-badge">archived</span>}
           {member.entrypoint && <span className="muted small"> · {member.entrypoint}</span>}
         </h3>
-        <div className="member-title">{member.title}</div>
+        {holders.length > 1 ? (
+          <select
+            className="member-pick"
+            title="This turn is in several sessions' history. Open and resume act on the one chosen here."
+            value={member.id}
+            onChange={(e) => set({ focus: e.target.value })}
+          >
+            {holders.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.title} · {m.id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="member-title">{member.title}</div>
+        )}
         {parentTitle && (
           <p
             className="muted small hint"

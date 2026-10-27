@@ -429,6 +429,124 @@ write(`${CL}/c--work-split-b/${SP}.jsonl`, [
   asst(SP, "sb-a2", "sb-u2", 6, "msg_sb2", [text("Phase two done.")]),
 ]);
 
+// c--work-indent: a native fork pair whose prompts after the shared reply
+// have no promptId and differ ONLY in indentation — which changes what the
+// code means. They are two prompts, each with its own reply.
+const WP = "50000000-0000-4000-8000-000000000009";
+const WF = "50000000-0000-4000-8000-00000000000a";
+const GUARD_OUT = "Change it:\n\n```python\nif ready:\n    send()\ncancel()\n```";
+const GUARD_IN = "Change it:\n\n```python\nif ready:\n    send()\n    cancel()\n```";
+const wiBase = (sid, px) => [
+  user(sid, `${px}-u1`, null, 0, "wi-1", "Write the guard"),
+  asst(sid, `${px}-a1`, `${px}-u1`, 1, "msg_wi1", [text("Here is the guard.")]),
+];
+write(`${CL}/c--work-indent/${WP}.jsonl`, [
+  ...wiBase(WP, "wp"),
+  user(WP, "wp-u2", "wp-a1", 2, undefined, GUARD_OUT),
+  asst(WP, "wp-a2", "wp-u2", 3, "msg_wi_out", [text("Unconditional cancel.")]),
+  title(WP, "Guard"),
+]);
+write(`${CL}/c--work-indent/${WF}.jsonl`, [
+  ...wiBase(WF, "wf"),
+  title(WF, "Guard (fork)"),
+  user(WF, "wf-u2", "wf-a1", 10, undefined, GUARD_IN),
+  asst(WF, "wf-a2", "wf-u2", 11, "msg_wi_in", [text("Conditional cancel.")]),
+]);
+
+// c--work-endpoint: quiet forks (no turn of their own) whose endpoint falls
+// inside what the parent alone draws as one merged node.
+//   EP  prompt → reply "First prose." + a tool call → tool result → reply
+//       "Later prose." (one agent loop: drawn as one assistant node);
+//   EF  the extension's fork after "First prose." — it never had "Later prose.";
+//   UP  two user records in a row (drawn as one user node), then a reply;
+//   UF  an Agentree fork after the FIRST of them (explicit lineage: it copied
+//       no reply, so no message id links it).
+// EP's prompt is multi-line WITH a promptId: its identity changed when
+// digests stopped folding whitespace, so annotations saved before must
+// still be found.
+const EP = "50000000-0000-4000-8000-00000000000b";
+const EF = "50000000-0000-4000-8000-00000000000c";
+const UP = "50000000-0000-4000-8000-00000000000d";
+const UF = "50000000-0000-4000-8000-00000000000e";
+const epBase = (sid, px, last) => [
+  user(sid, `${px}-u1`, null, 0, "ep-1", "Summarise the log\n\n  - errors only"),
+  asst(sid, `${px}-a1`, `${px}-u1`, last, "msg_ep1", [text("First prose."), { type: "tool_use", id: "tu_ep", name: "Read", input: { path: "log" } }]),
+];
+write(`${CL}/c--work-endpoint/${EP}.jsonl`, [
+  ...epBase(EP, "ep", 1),
+  user(EP, "ep-r1", "ep-a1", 2, "ep-1", [{ type: "tool_result", tool_use_id: "tu_ep", content: "ok" }]),
+  asst(EP, "ep-a2", "ep-r1", 3, "msg_ep2", [text("Later prose.")]),
+  title(EP, "Log summary"),
+]);
+write(`${CL}/c--work-endpoint/${EF}.jsonl`, [...epBase(EF, "ef", 20), title(EF, "Log summary (fork)")]);
+write(`${CL}/c--work-endpoint/${UP}.jsonl`, [
+  user(UP, "up-u1", null, 0, "up-1", "First ask"),
+  user(UP, "up-u2", "up-u1", 1, "up-2", "Second ask"),
+  asst(UP, "up-a1", "up-u2", 2, "msg_up1", [text("Both answered.")]),
+  title(UP, "Asks"),
+]);
+write(`${CL}/c--work-endpoint/${UF}.jsonl`, [
+  { ...user(UF, "uf-u1", null, 30, "up-1", "First ask"), forkedFrom: { sessionId: UP, messageUuid: "up-u1" } },
+  title(UF, "Asks (fork)"),
+]);
+
+// growth-src/c--work-growth: a session and a native fork of it, copied into
+// projects/ one at a time by the test — so an annotation can be made while
+// the session stands alone, before the fork exists.
+const GP = "50000000-0000-4000-8000-00000000000f";
+const GF = "50000000-0000-4000-8000-000000000010";
+const gBase = (sid, px) => [
+  user(sid, `${px}-u1`, null, 0, "gr-1", "Pick a database"),
+  asst(sid, `${px}-a1`, `${px}-u1`, 1, "msg_gr1", [text("Postgres.")]),
+];
+write(`claude/2.1/growth-src/c--work-growth/${GP}.jsonl`, [
+  ...gBase(GP, "gp"),
+  user(GP, "gp-u2", "gp-a1", 2, "gr-2", "Why?"),
+  asst(GP, "gp-a2", "gp-u2", 3, "msg_gr2", [text("Transactions.")]),
+]);
+write(`claude/2.1/growth-src/c--work-growth/${GF}.jsonl`, [
+  ...gBase(GF, "gf"),
+  title(GF, "Database (fork)"),
+  user(GF, "gf-u2", "gf-a1", 10, "grf-2", "What about SQLite?"),
+  asst(GF, "gf-a2", "gf-u2", 11, "msg_grf2", [text("Fine for one writer.")]),
+]);
+
+// copies-src: sessions stored in two project folders whose NEWER-written copy
+// holds metadata the other doesn't, copied in by the test with set mtimes.
+//   RN  the old folder's copy is the larger one (prefix + continuation,
+//       titled "Older name"); the new folder's copy holds only the prefix
+//       and a rename. Every uuid of the new copy is in the old one.
+//   DV  two copies that diverged; the newer one was renamed BEFORE its
+//       first record the other doesn't have.
+const RNS = "50000000-0000-4000-8000-000000000011";
+const DV = "50000000-0000-4000-8000-000000000012";
+const rnPrefix = [
+  user(RNS, "rn-u1", null, 0, "rns-1", "Tidy the README"),
+  asst(RNS, "rn-a1", "rn-u1", 1, "msg_rns1", [text("Tidied.")]),
+];
+write(`claude/2.1/copies-src/c--work-rn-old/${RNS}.jsonl`, [
+  ...rnPrefix,
+  title(RNS, "Older name"),
+  user(RNS, "rn-u2", "rn-a1", 2, "rns-2", "And the changelog"),
+  asst(RNS, "rn-a2", "rn-u2", 3, "msg_rns2", [text("Done too.")]),
+]);
+write(`claude/2.1/copies-src/c--work-rn-new/${RNS}.jsonl`, [...rnPrefix, title(RNS, "Renamed in copy")]);
+const dvPrefix = [
+  user(DV, "dv-u1", null, 0, "dv-1", "Draft the plan"),
+  asst(DV, "dv-a1", "dv-u1", 1, "msg_dv1", [text("Drafted.")]),
+];
+write(`claude/2.1/copies-src/c--work-dv-a/${DV}.jsonl`, [
+  ...dvPrefix,
+  user(DV, "dva-u2", "dv-a1", 2, "dva-2", "Shorter"),
+  asst(DV, "dva-a2", "dva-u2", 3, "msg_dva2", [text("Shortened.")]),
+]);
+write(`claude/2.1/copies-src/c--work-dv-b/${DV}.jsonl`, [
+  ...dvPrefix,
+  title(DV, "Named before diverging"),
+  user(DV, "dvb-u2", "dv-a1", 5, "dvb-2", "Longer"),
+  asst(DV, "dvb-a2", "dvb-u2", 6, "msg_dvb2", [text("Lengthened.")]),
+]);
+
 // ------------------------------------------------------------------ Codex
 //
 // CODEX_HOME holding one family of paginated pages:

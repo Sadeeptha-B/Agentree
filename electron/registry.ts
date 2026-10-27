@@ -51,7 +51,20 @@ export interface Provider {
   health(): ProviderHealth;
   /** argv that resumes a session in the harness's CLI. */
   resumeArgv(sessionId: SessionId): string[];
+  /**
+   * What the live view must watch: the files of `sessionId`'s family, or —
+   * with null — everything the welcome list is read from.
+   */
+  watchTargets(sessionId: SessionId | null): WatchTarget[];
 }
+
+const codexTargets = (): WatchTarget[] => [
+  { kind: "dir", path: codexSessions(), poll: true },
+  { kind: "dir", path: codexArchived(), poll: true },
+  // Renaming a thread in Codex touches only this file.
+  { kind: "file", path: codexIndex() },
+];
+const copilotTargets = (): WatchTarget[] => [{ kind: "dir", path: copilotState(), poll: true }];
 
 const claude: Provider = {
   id: "claude",
@@ -61,6 +74,13 @@ const claude: Provider = {
   owns: (id) => locateClaude(id) !== null,
   health: claudeHealth,
   resumeArgv: claudeResumeArgv,
+  // Every project directory a member of the family lives in: a tree grows
+  // through any member, or through a fork file that didn't exist when the
+  // view opened (written next to its source).
+  watchTargets: (id) =>
+    id === null
+      ? [{ kind: "dir", path: claudeProjects(), poll: false }]
+      : claudeWatchDirs(id).map((d) => ({ kind: "dir", path: d, poll: false })),
 };
 
 const codex: Provider = {
@@ -71,6 +91,7 @@ const codex: Provider = {
   owns: (id) => locateCodex(id) !== null,
   health: codexHealth,
   resumeArgv: codexResumeArgv,
+  watchTargets: codexTargets,
 };
 
 const copilot: Provider = {
@@ -88,6 +109,7 @@ const copilot: Provider = {
   owns: (id) => locateCopilot(id) !== null || loadCopilotSession(id) !== null,
   health: copilotHealth,
   resumeArgv: copilotResumeArgv,
+  watchTargets: copilotTargets,
 };
 
 export const PROVIDERS: Provider[] = [claude, codex, copilot];
@@ -198,33 +220,15 @@ export function annotate(familyId: SessionId, nodeId: string, patch: NodeMeta): 
   writeAnnotation(node, [detail.meta.id, ...members], patch);
 }
 
-const codexTargets = (): WatchTarget[] => [
-  { kind: "dir", path: codexSessions(), poll: true },
-  { kind: "dir", path: codexArchived(), poll: true },
-  // Renaming a thread in Codex touches only this file.
-  { kind: "file", path: codexIndex() },
-];
-
 /**
  * What the live view of `sessionId` (or, with null, the welcome screen) has to
  * watch. Resolving an id to its files can mean a scan, so this runs with the
- * providers in the backend; the host only watches the result.
+ * providers in the backend; the host only watches the result. Only enabled
+ * providers are asked — a disabled one isn't read or watched at all. For the
+ * list, one that fails leaves the others' targets intact; for a session, only
+ * its owner is asked, and a failure reaches the host, which retries.
  */
 export function watchTargets(sessionId: SessionId | null): WatchTarget[] {
-  if (sessionId === null) {
-    const on = new Set(enabled().map((p) => p.id));
-    return [
-      ...(on.has("claude") ? [{ kind: "dir" as const, path: claudeProjects(), poll: false }] : []),
-      ...(on.has("codex") ? codexTargets() : []),
-      ...(on.has("copilot") ? [{ kind: "dir" as const, path: copilotState(), poll: true }] : []),
-    ];
-  }
-  // Every project directory a member of the family lives in: a tree grows
-  // through any member, or through a fork file that didn't exist when the
-  // view opened (written next to its source).
-  const dirs = claudeWatchDirs(sessionId);
-  if (dirs.length) return dirs.map((d) => ({ kind: "dir", path: d, poll: false }));
-  if (locateCodex(sessionId)) return codexTargets();
-  if (locateCopilot(sessionId)) return [{ kind: "dir", path: copilotState(), poll: true }];
-  return [];
+  if (sessionId === null) return enabled().flatMap((p) => guarded(p, () => p.watchTargets(null), []));
+  return owner(sessionId)?.watchTargets(sessionId) ?? [];
 }

@@ -1,4 +1,4 @@
-import type { ForkSummary, MemberInfo, NodeId, TurnNode, UsageSnapshot } from "./types.ts";
+import type { ForkSummary, MemberInfo, NodeId, SessionDetail, SessionId, SessionRef, TurnNode, UsageSnapshot } from "./types.ts";
 
 export type NodeMap = Map<NodeId, TurnNode>;
 export const ROOT_KEY = "\0root";
@@ -83,9 +83,46 @@ export function heldTip(nodes: TurnNode[], holds: (n: TurnNode) => boolean): Nod
   return withText.length > 0 ? newest(withText) : newest(leaves);
 }
 
-/** A node `sessionId` holds a copy of: drawn as its own, or recorded as an occurrence. */
-export const holdsCopy = (sessionId: string) => (n: TurnNode) =>
-  n.sourceSessionId === sessionId || !!n.occurrences?.some((o) => o.sessionId === sessionId);
+/**
+ * The sessions holding a stitched node's copies: its owner and every session
+ * recorded as an occurrence. Where copies are the only evidence (Claude,
+ * Copilot, legacy Codex), this is `heldBy`.
+ */
+export function copyHolders(n: TurnNode): string[] {
+  const out = n.sourceSessionId ? [n.sourceSessionId] : [];
+  for (const o of n.occurrences ?? []) if (!out.includes(o.sessionId)) out.push(o.sessionId);
+  return out;
+}
+
+/** Each member's `tipId`: the newest leaf among the nodes that list it in `heldBy`. */
+export function assignTips(nodes: TurnNode[], members: MemberInfo[]): void {
+  for (const m of members) m.tipId = heldTip(nodes, (n) => !!n.heldBy?.includes(m.id)) ?? undefined;
+}
+
+/**
+ * The member session the panel's open/resume act on for `node`: the focused
+ * member when the turn is in its history (a quiet fork's shared prefix is
+ * owned by its parent, but opening the fork must still open the fork), else
+ * the session the turn belongs to, else the family's root.
+ */
+export function actionTarget(
+  session: SessionDetail,
+  node: TurnNode | null | undefined,
+  focus: SessionId | null,
+): { member: MemberInfo; ref: SessionRef } {
+  const { meta, members } = session;
+  const id = focus && node?.heldBy?.includes(focus) ? focus : (node?.sourceSessionId ?? meta.id);
+  const member: MemberInfo = members.find((m) => m.id === id) ?? {
+    id: meta.id,
+    title: meta.title,
+    parentId: null,
+    cwd: meta.cwd,
+    resumeCommand: meta.resumeCommand,
+    activeAt: meta.activeAt,
+    touchedAt: meta.touchedAt,
+  };
+  return { member, ref: { provider: meta.provider, sessionId: member.id, cwd: member.cwd } };
+}
 
 /** A family's members as the welcome list shows them: every one but the root, newest first. */
 export function forkSummaries(members: MemberInfo[], rootId: string): ForkSummary[] {

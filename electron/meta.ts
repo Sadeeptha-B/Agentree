@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { scheme2Fingerprint } from "./identity.ts";
 import { agentreeHome } from "./paths.ts";
 import type { NodeId, NodeMeta, SessionId, TurnNode } from "../shared/types.ts";
 
@@ -77,62 +78,117 @@ export function writeMeta(sessionId: SessionId, key: string, patch: NodeMeta): v
 }
 
 /**
- * The keys a node's annotation is stored under (v2): its semantic identities,
- * the same in every session holding a copy, so they outlive any one file.
- * Codex node ids already are such identities.
+ * The keys a node's annotation is stored under: its semantic identities
+ * (identity.ts, scheme 3), the same in every session holding a copy, so they
+ * outlive any one file. Codex node ids already are such identities.
  */
 const stableKeys = (n: TurnNode): string[] => (n.stableIds?.length ? n.stableIds : [n.id]);
-/** The keys entries were stored under before (v1): raw per-file ids. */
+/** Scheme 1 keys: raw per-file ids. */
 const rawKeys = (n: TurnNode): NodeId[] => [
   n.id,
   ...(n.absorbedIds ?? []),
   ...(n.occurrences ?? []).map((o) => o.id),
 ];
 
+/** One member's sidecar, its scheme-2 weak keys (`key@parent…`) indexed by fingerprint. */
+interface Sidecar {
+  sid: SessionId;
+  entries: Record<string, NodeMeta>;
+  scheme2: Map<string, string[]>;
+}
+
+function sidecar(sid: SessionId): Sidecar {
+  const entries = readMeta(sid);
+  const scheme2 = new Map<string, string[]>();
+  for (const k of Object.keys(entries)) {
+    if (!k.includes("@")) continue;
+    const fp = scheme2Fingerprint(k);
+    scheme2.set(fp, [...(scheme2.get(fp) ?? []), k]);
+  }
+  return { sid, entries, scheme2 };
+}
+
 /**
- * Overlay a family's annotations onto its nodes.
+ * Keys an EARLIER scheme stored this node under, as present in `sc`:
+ * scheme 2 (whitespace-folded digests; a weak key as a literal chain, found
+ * by its fingerprint), then scheme 1 (raw ids). With `usable`, a scheme-2 key
+ * is only taken when one node of the family claims it: scheme 2 keyed two
+ * prompts that differ only in whitespace alike, and such an entry can't be
+ * given to either.
+ */
+function olderKeys(sc: Sidecar, n: TurnNode, usable?: (key: string) => boolean): string[] {
+  const out: string[] = [];
+  for (const fp of [...stableKeys(n), ...(n.legacyIds ?? [])]) {
+    if (usable && !usable(fp)) continue;
+    out.push(...(sc.scheme2.get(fp) ?? []));
+  }
+  for (const k of n.legacyIds ?? []) {
+    // A weak fingerprint is no saved key itself (it has scheme 3's form).
+    if (!k.startsWith("w:") && sc.entries[k] && (!usable || usable(k))) out.push(k);
+  }
+  for (const k of rawKeys(n)) if (sc.entries[k]) out.push(k);
+  return out;
+}
+
+const firstEntry = (sc: Sidecar, keys: string[]): NodeMeta | undefined =>
+  keys.map((k) => sc.entries[k]).find(Boolean);
+
+/**
+ * Overlay a family's annotations onto its nodes, and make every member's
+ * sidecar hold what is shown.
  *
  * A family's identity isn't stable: it gains members when a fork is found,
  * its root changes when the original is deleted, and one turn has a
  * different uuid in each file holding it. So every member's sidecar is read,
- * and a node matches on its semantic identity (`stableIds`).
+ * and a node matches on its semantic identity (`stableIds`) first, in member
+ * order.
  *
- * Sidecars written before that identity existed (v1) key entries by raw
- * uuid, usually in the family root's file only. Those are still found through
- * the node's own, merged-in and copied ids — and the first time one is, it is
- * carried forward under the node's stable ids into EVERY member's sidecar, so
- * it survives the root being deleted later. That carry-forward is the whole
- * migration: idempotent (a node with a v2 entry never looks for v1), with no
- * version flag, since the two key spaces can't collide. A v1 entry whose
- * source transcript was deleted BEFORE this ran can't be mapped to anything
- * on disk, and is not recovered.
+ * Without one, entries saved under an earlier identity scheme are looked for
+ * (`olderKeys`): scheme 2's keys, then scheme 1's raw uuids (usually in the
+ * root's file only). Those are never rewritten or deleted; the hit is carried
+ * forward under the current keys.
+ *
+ * Carried forward to WHICH sidecars: every member's that holds no entry for
+ * the node under its current keys — a member found after the annotation was
+ * written (a new fork), or all of them for an older-scheme hit. So the
+ * annotation survives the member it was written in being deleted later. A
+ * member's existing entry is never overwritten (no conflict is resolved
+ * here), and once the family's sidecars agree a load writes nothing. A
+ * cleared annotation is an absent entry, and absence is never copied, so a
+ * clear can't be undone by this; nor can it reach a sidecar that isn't a
+ * member's when the clear is made (there are no tombstones).
  */
 export function applyAnnotations(nodes: TurnNode[], memberIds: SessionId[]): void {
-  const ids = [...new Set(memberIds)];
-  const metas = ids.map(readMeta);
-  const carry = new Map<string, NodeMeta>();
+  const cars = [...new Set(memberIds)].map(sidecar);
+  const claims = new Map<string, number>();
   for (const n of nodes) {
-    let hit: NodeMeta | undefined;
-    for (const meta of metas) {
-      hit = stableKeys(n).map((k) => meta[k]).find(Boolean);
-      if (hit) break;
-    }
-    if (!hit) {
-      for (const meta of metas) {
-        hit = rawKeys(n).map((k) => meta[k]).find(Boolean);
-        if (hit) break;
-      }
-      if (hit) for (const k of stableKeys(n)) carry.set(k, hit);
-    }
-    if (hit) Object.assign(n, hit);
+    for (const k of new Set([...stableKeys(n), ...(n.legacyIds ?? [])])) claims.set(k, (claims.get(k) ?? 0) + 1);
   }
-  if (carry.size) {
-    for (const sid of ids) {
-      try {
-        updateFile(sid, carry);
-      } catch {
-        /* read-only home: the v1 entries still resolve; retried next load */
-      }
+  const unique = (k: string) => claims.get(k) === 1;
+
+  const fill = new Map<SessionId, Map<string, NodeMeta>>();
+  for (const n of nodes) {
+    const keys = stableKeys(n);
+    const current = cars.map((sc) => firstEntry(sc, keys));
+    let hit = current.find(Boolean);
+    for (const sc of cars) {
+      if (hit) break;
+      hit = firstEntry(sc, olderKeys(sc, n, unique));
+    }
+    if (!hit) continue;
+    Object.assign(n, hit);
+    cars.forEach((sc, i) => {
+      if (current[i]) return;
+      const patches = fill.get(sc.sid) ?? new Map<string, NodeMeta>();
+      for (const k of keys) patches.set(k, hit!);
+      fill.set(sc.sid, patches);
+    });
+  }
+  for (const [sid, patches] of fill) {
+    try {
+      updateFile(sid, patches);
+    } catch {
+      /* read-only home: what was found still shows; retried next load */
     }
   }
 }
@@ -140,14 +196,14 @@ export function applyAnnotations(nodes: TurnNode[], memberIds: SessionId[]): voi
 /**
  * Write an annotation so it survives what `applyAnnotations` has to cope
  * with: into EVERY member's sidecar, under the node's stable ids — one atomic
- * write per sidecar. Any v1 entry for the node in that sidecar gets the same
- * patch, so clearing a label can't let an older entry resurface.
+ * write per sidecar. Any older-scheme entry for the node in that sidecar gets
+ * the same patch, so clearing a label can't let an older entry resurface.
  */
 export function writeAnnotation(node: TurnNode, memberIds: SessionId[], patch: NodeMeta): void {
   for (const sid of new Set(memberIds)) {
-    const existing = readMeta(sid);
+    const sc = sidecar(sid);
     const patches = new Map<string, NodeMeta>(stableKeys(node).map((k) => [k, patch]));
-    for (const k of rawKeys(node)) if (existing[k]) patches.set(k, patch);
+    for (const k of olderKeys(sc, node)) patches.set(k, patch);
     updateFile(sid, patches);
   }
 }
