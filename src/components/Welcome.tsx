@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { when } from "../format.ts";
 import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
-import { filterSessions, ofProvider, railDirs, type RailDir } from "../list.ts";
+import { filterSessions, focusFor, ofProvider, railDirs, shownForks, type RailDir } from "../list.ts";
 import logoUrl from "../../assets/logo.png";
 
 /** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
@@ -196,7 +196,7 @@ export function Welcome() {
         <div className="session-pane-head">
           <input
             className="search"
-            placeholder="Filter by title, directory, or id…"
+            placeholder="Filter by title (forks too), directory, or id…"
             value={filter}
             onChange={(e) => set({ filter: e.target.value })}
           />
@@ -234,43 +234,66 @@ export function Welcome() {
         )}
 
         <ul className="tree-list">
-          {visible.map((s) => (
-            <li key={`${s.provider}:${s.id}`}>
-              <button className="tree-card" onClick={() => void openSession(s.id)}>
-                <span className="tree-title">
-                  <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
-                  {s.title}
-                </span>
-                <span className="muted small tree-sub">
-                  {!cwdFilter && (
-                    <>
-                      <code className="cwd" title={s.cwd}>
-                        {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
-                      </code>
-                      {" · "}
-                    </>
-                  )}
-                  {s.nodeCount} turns
-                  {s.branchPoints > 0 && (
-                    <span className="branch-badge" title="branch points">
-                      ⑂ {s.branchPoints}
-                    </span>
-                  )}
-                  {(s.members ?? 1) > 1 && (
-                    <span className="fork-badge" title="sessions stitched into this tree (forks)">
-                      {s.members} sessions
-                    </span>
-                  )}
-                  {" · "}
-                  <span title={`Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`}>
-                    {when(s.activeAt)}
+          {visible.map((s) => {
+            const forks = shownForks(s, filter);
+            return (
+              <li key={`${s.provider}:${s.id}`} className="tree-card">
+                <button className="tree-main" onClick={() => void openSession(s.id, { focus: focusFor(s, filter) })}>
+                  <span className="tree-title">
+                    <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
+                    {s.title}
                   </span>
-                  {" · "}
-                  <code className="id-short">{s.id.slice(0, 8)}</code>
-                </span>
-              </button>
-            </li>
-          ))}
+                  <span className="muted small tree-sub">
+                    {!cwdFilter && (
+                      <>
+                        <code className="cwd" title={s.cwd}>
+                          {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
+                        </code>
+                        {" · "}
+                      </>
+                    )}
+                    {s.nodeCount} turns
+                    {s.branchPoints > 0 && (
+                      <span className="branch-badge" title="branch points">
+                        ⑂ {s.branchPoints}
+                      </span>
+                    )}
+                    {(s.members ?? 1) > 1 && (
+                      <span className="fork-badge" title="sessions stitched into this tree (forks)">
+                        {s.members} sessions
+                      </span>
+                    )}
+                    {" · "}
+                    <span title={`Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`}>
+                      {when(s.activeAt)}
+                    </span>
+                    {" · "}
+                    <code className="id-short">{s.id.slice(0, 8)}</code>
+                  </span>
+                </button>
+                {/* The family's other chats by name: a fork's title is often the
+                    more descriptive one, and each opens the tree on that fork. */}
+                {forks.shown.length > 0 && (
+                  <div className="fork-line muted small">
+                    <span className="fork-glyph">⑂</span>
+                    {forks.shown.map((f, i) => (
+                      <span key={f.id}>
+                        {i > 0 && " · "}
+                        <button
+                          className={`fork-name ${forks.matched.has(f.id) ? "match" : ""}`}
+                          title={`Open the tree on this fork · ${f.id.slice(0, 8)} · ${when(f.activeAt)}`}
+                          onClick={() => void openSession(s.id, { focus: f.id })}
+                        >
+                          {f.title}
+                        </button>
+                      </span>
+                    ))}
+                    {forks.more > 0 && <span className="fork-more"> · +{forks.more}</span>}
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
 
         {!loading && visible.length === 0 && (

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { childIndex, countBranchPoints } from "../shared/render.ts";
+import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../shared/render.ts";
 import type {
   MemberInfo,
   NodeId,
@@ -1429,6 +1429,7 @@ function buildFamily(group: SessionSummary[]): Family {
     touchedAt: g.touchedAt,
     entrypoint: g.entrypoint,
     files: g.copies.map((c) => c.file),
+    tipId: heldTip(nodes, holdsCopy(g.id)) ?? undefined,
   }));
   return { rootId, nodes, members };
 }
@@ -1476,6 +1477,7 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
     branchPoints: countBranchPoints(childIndex(fam.nodes)),
     resumeCommand: claudeResume(fam.rootId, r.cwd),
     members: group.length,
+    forks: forkSummaries(fam.members, fam.rootId),
     entrypoint: r.entrypoint,
   };
   familyMetas.set(sig, meta);

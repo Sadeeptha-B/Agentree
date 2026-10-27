@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { childIndex, countBranchPoints } from "../../shared/render.ts";
+import { childIndex, countBranchPoints, forkSummaries, heldTip, holdsCopy } from "../../shared/render.ts";
 import type {
   ForkResult,
   MemberInfo,
@@ -751,6 +751,8 @@ interface Tree {
   nodes: TurnNode[];
   /** turn id → the thread a `thread/fork` through that turn goes to. */
   forkVia: Map<string, string>;
+  /** thread id → the turn ids on its current history. */
+  held: Map<string, Set<string>>;
 }
 
 /**
@@ -838,7 +840,7 @@ function buildTree(scan: Scan, fam: Family): Tree {
   if (legacy.length) {
     for (const n of stitchFamily(legacy)) out.push({ ...n, forkBlocked: BLOCK.legacy });
   }
-  return { nodes: mergeSameRoleRuns(out), forkVia };
+  return { nodes: mergeSameRoleRuns(out), forkVia, held: new Map(holders.map((h) => [h.id, h.held])) };
 }
 
 export const codexResumeArgv = RESUME_ARGV.codex;
@@ -879,6 +881,7 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       branchPoints: countBranchPoints(childIndex(all)),
       resumeCommand: root.resumeCommand,
       members: members.length,
+      forks: forkSummaries(members, fam.rootThread),
       entrypoint: "codex",
     },
     members,
@@ -944,9 +947,19 @@ export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
   const scan = scanPages();
   const fam = familyOf(scan, sessionId);
   if (!fam) return null;
-  const { nodes } = buildTree(scan, fam);
+  const { nodes, held } = buildTree(scan, fam);
   const { meta, members } = describe(fam, nodes);
   applyAnnotations(nodes, members.map((m) => m.id));
+  // A thread holds what its current history holds — its own turns and the
+  // ones it continues by reference (a fork copies nothing). Legacy rollouts
+  // have no turn ids; their copies are stitched, so occurrences say it.
+  for (const m of members) {
+    const turns = held.get(m.id);
+    const copy = holdsCopy(m.id);
+    m.tipId =
+      heldTip(nodes, (n) => (n.turnId?.endsWith("#legacy") ? copy(n) : !!n.turnId && !!turns?.has(n.turnId))) ??
+      undefined;
+  }
   return { meta, nodes, members };
 }
 
