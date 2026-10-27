@@ -426,3 +426,26 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
   border-radius: 999px; background: none; color: var(--muted); cursor: pointer;
 }
 .update-actions button.ghost:hover { border-color: var(--accent); color: var(--fg); }
+
+/* An edge that crosses into another session — a fork, or a Codex prompt
+   edit. Dashed so a family tree reads as "these are separate conversations". */
+.edge.cross { stroke-dasharray: 5 4; }
+.lg-cross {
+  width: 18px; height: 0; display: inline-block;
+  border-top: 2px dashed var(--muted);
+}
+
+/* Welcome-screen provider status rows: the "fail loudly" surface. */
+.health { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
+.health-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.health-row.warn { color: #b8862f; }
+.health-row.error { color: #d0453a; }
+.health-row details { display: inline; }
+.health-row summary { cursor: pointer; display: inline; }
+
+/* The session the selected turn belongs to, inside a family tree. */
+.member-block .member-title { font-weight: 600; margin: 2px 0 6px; }
+.fork-badge {
+  display: inline-block; padding: 0 6px; margin-left: 6px; border-radius: 999px;
+  font-size: 10.5px; border: 1px dashed var(--muted); color: var(--muted);
+}

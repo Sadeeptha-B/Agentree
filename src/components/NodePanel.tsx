@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
-import type { ForkResult } from "../../shared/types.ts";
+import type { ActionResult, ForkResult, MemberInfo, ProviderId, SessionRef } from "../../shared/types.ts";
 import { contextAt, costOf, inferWindow, pathToRoot } from "../../shared/render.ts";
 import { Markdown } from "../markdown.tsx";
 import { pct, tokens, when } from "../format.ts";
-import { useMemo } from "react";
 
 function Copy({ value, label }: { value: string; label: string }) {
   const [done, setDone] = useState(false);
@@ -40,10 +39,50 @@ function toolSummary(tools: string[]): string {
     .join(" · ");
 }
 
+/** The harnesses with a VS Code extension Agentree can hand a session to. */
+const NATIVE: Partial<Record<ProviderId, string>> = { claude: "Claude Code", codex: "Codex" };
+
+/**
+ * Open / resume buttons for one session. Inside VS Code the session goes to
+ * its harness's own chat panel (or an integrated terminal); the desktop app
+ * offers the copyable command, spelled for the host OS's shell.
+ */
+function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: string }) {
+  const [status, setStatus] = useState<ActionResult | null>(null);
+  const native = NATIVE[ref_.provider];
+  const run = async (fn: () => Promise<ActionResult>) => {
+    try {
+      setStatus(await fn());
+    } catch (e) {
+      setStatus({ ok: false, error: String(e) });
+    }
+  };
+  return (
+    <>
+      <div className="copy-row">
+        {api.host === "vscode" && native && (
+          <button className="copy" onClick={() => void run(() => api.openNative(ref_))}>
+            open in {native}
+          </button>
+        )}
+        {api.host === "vscode" && (
+          <button className="copy" onClick={() => void run(() => api.resumeInTerminal(ref_))}>
+            resume in terminal
+          </button>
+        )}
+        <Copy value={resumeCmd} label="copy resume command" />
+        <Copy value={ref_.sessionId} label="copy id" />
+      </div>
+      {status && !status.ok && <p className="error-text small hint">{status.error}</p>}
+    </>
+  );
+}
+
 export function NodePanel() {
   const { session, nodes, selected, patch, setStatus } = useStore();
   const [editingLabel, setEditingLabel] = useState(false);
   const [fork, setFork] = useState<ForkResult | null>(null);
+  const [opened, setOpened] = useState<ActionResult | null>(null);
   const [forking, setForking] = useState(false);
 
   // A fork belongs to the turn it was taken at; keep showing it while that turn
@@ -66,35 +105,72 @@ export function NodePanel() {
   const ctx = node ? contextAt(node.id, nodes) : null;
   const depth = node ? pathToRoot(node.id, nodes).length : 0;
 
-  // Built by the provider: each harness spells resume differently
-  // (`claude --resume`, `codex resume`, `copilot --resume=`).
-  const resumeCmd = meta.resumeCommand;
+  // A family tree mixes sessions: resume/open/fork act on the session the
+  // selected turn belongs to, not on the family root.
+  const members = session.members ?? [];
+  const memberId = node?.sourceSessionId ?? meta.id;
+  const member: MemberInfo =
+    members.find((m) => m.id === memberId) ?? {
+      id: meta.id,
+      title: meta.title,
+      parentId: null,
+      cwd: meta.cwd,
+      resumeCommand: meta.resumeCommand,
+      updatedAt: meta.updatedAt,
+    };
+  const parentTitle = member.parentId ? members.find((m) => m.id === member.parentId)?.title : null;
+  const ref_: SessionRef = { provider: meta.provider, sessionId: member.id, cwd: member.cwd };
+
+  const doFork = async () => {
+    if (!node) return;
+    setForking(true);
+    setForkFor(node.id);
+    setOpened(null);
+    try {
+      const res = await api.forkAt(meta.id, node.id);
+      setFork(res);
+      // In VS Code the fork goes straight to the harness's own chat panel.
+      if (res.ok && res.open && api.host === "vscode" && NATIVE[res.open.provider]) {
+        setOpened(await api.openNative(res.open));
+      }
+    } catch (e) {
+      setFork({ ok: false, error: String(e) });
+    } finally {
+      setForking(false);
+    }
+  };
 
   return (
     <aside className="panel">
       <section className="panel-block session-block">
         <h3>
-          Session <span className={`provider-chip ${meta.provider}`}>{meta.provider}</span>
+          Conversation <span className={`provider-chip ${meta.provider}`}>{meta.provider}</span>
+          {members.length > 1 && <span className="muted small">{members.length} sessions</span>}
         </h3>
-        <div className="kv">
-          <span className="muted small">id</span>
-          <code className="id">{meta.id}</code>
-        </div>
         <div className="kv">
           <span className="muted small">cwd</span>
           <code className="path" title={meta.cwd}>
             {meta.cwd || "—"}
           </code>
         </div>
+      </section>
 
-        <div className="copy-row">
-          <Copy value={meta.id} label="copy id" />
-          <Copy value={resumeCmd} label="copy resume command (at tip)" />
+      <section className="panel-block member-block">
+        <h3>
+          Session
+          {member.parentId && <span className="fork-badge">fork</span>}
+          {member.archived && <span className="fork-badge">archived</span>}
+        </h3>
+        <div className="member-title">{member.title}</div>
+        {parentTitle && <p className="muted small hint">forked from “{parentTitle}”</p>}
+        <div className="kv">
+          <span className="muted small">id</span>
+          <code className="id">{member.id}</code>
         </div>
+        <SessionActions ref_={ref_} resumeCmd={member.resumeCommand} />
         <p className="muted small hint">
-          Resumes at the session's last turn. Sessions are per-directory; the command includes
-          the <code>cd</code> for that. To branch from an earlier turn, select it and use
-          “⑂ fork after this turn”.
+          Resumes this session at its own latest turn. To branch from an earlier turn, select it
+          and use “⑂ fork after this turn”.
         </p>
       </section>
 
@@ -132,7 +208,7 @@ export function NodePanel() {
             )}
 
             <div className="panel-actions">
-              {!node.injected && <Copy value={node.id} label="copy node uuid" />}
+              {!node.injected && <Copy value={node.id} label="copy node id" />}
               <button
                 className="ghost"
                 title="Dims this turn and everything under it"
@@ -157,13 +233,14 @@ export function NodePanel() {
 
             {node.injected && (
               <p className="muted small hint">
-                Sent mid-turn; Claude Code wrote no record for it, so it can't be resumed at.
+                Sent mid-turn; Claude Code wrote no record for it, so it can't be forked at.
               </p>
             )}
             {node.midTurn && !node.injected && (
               <p className="muted small hint">
-                Sent mid-turn. Forks of any later turn keep this message; it just can't anchor
-                a resume itself.
+                {meta.provider === "codex"
+                  ? "Sent while Codex was working; it belongs to the same turn, so a fork here includes that whole turn."
+                  : "Sent mid-turn. Forks of any later turn keep this message; it just can't anchor a fork itself."}
               </p>
             )}
 
@@ -172,21 +249,11 @@ export function NodePanel() {
                 className="primary"
                 title={
                   node.injected
-                    ? "No transcript record to resume from"
-                    : "Get a command that resumes the session from this turn"
+                    ? "No transcript record to fork from"
+                    : "Create a new session holding the conversation up to this turn"
                 }
                 disabled={forking || node.injected}
-                onClick={async () => {
-                  setForking(true);
-                  setForkFor(node.id);
-                  try {
-                    setFork(await api.forkAt(meta.id, node.id));
-                  } catch (e) {
-                    setFork({ ok: false, error: String(e) });
-                  } finally {
-                    setForking(false);
-                  }
-                }}
+                onClick={() => void doFork()}
               >
                 {forking ? "forking…" : "⑂ fork after this turn"}
               </button>
@@ -195,15 +262,26 @@ export function NodePanel() {
             {forkResult &&
               (forkResult.ok ? (
                 <div className="fork-result">
+                  <p className="small">
+                    {opened?.ok
+                      ? `Forked and opened in ${NATIVE[meta.provider]}.`
+                      : "Forked into a new session. It joins this tree as soon as it has a turn of its own."}
+                  </p>
+                  {opened && !opened.ok && <p className="error-text small">{opened.error}</p>}
                   <code className="path fork-cmd">{forkResult.command}</code>
                   <div className="copy-row">
-                    <Copy value={forkResult.command} label="⑂ copy fork command" />
+                    <Copy value={forkResult.command} label="⑂ copy resume command" />
                     <Copy value={forkResult.id} label="copy session id" />
+                    {api.host === "vscode" && forkResult.open && !opened?.ok && (
+                      <button
+                        className="copy"
+                        onClick={async () => setOpened(await api.resumeInTerminal(forkResult.open!))}
+                      >
+                        resume in terminal
+                      </button>
+                    )}
                   </div>
-                  <p className="muted small hint">
-                    {forkResult.note ??
-                      "Continues from this turn as a new branch. Nothing is deleted."}
-                  </p>
+                  {forkResult.note && <p className="muted small hint">{forkResult.note}</p>}
                 </div>
               ) : (
                 <div className="fork-result error-text">{forkResult.error}</div>
@@ -225,7 +303,6 @@ export function NodePanel() {
                 }}
               />
             )}
-
           </section>
 
           {node.thinking && (
