@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, nativeImage, nativeTheme, shell } from "electron";
 import path from "node:path";
 
-import { listAllSessions, loadAnySession, forkAnyAt } from "./registry.ts";
+import { allHealth, listAllSessions, loadAnySession, forkAnyAt } from "./registry.ts";
 import { checkForUpdate } from "./update.ts";
 import { writeMeta } from "./meta.ts";
 import { watchTranscripts, type Watcher } from "./watch.ts";
@@ -85,6 +85,8 @@ ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: Node
 ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
   forkAnyAt(sessionId, nodeId),
 );
+
+ipcMain.handle(CH.providerHealth, () => allHealth());
 
 // ---- live transcript watching ----
 //
