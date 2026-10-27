@@ -19,6 +19,11 @@
 > - Codex bases can live in `archived_sessions/`. Codex item ids (`item-1`, …)
 >   aren't unique, so node ids are `<turnId>:<itemId>`.
 > - `~/.copilot/session-state` exists on the target machine (5 sessions).
+>
+> A review of that implementation ([review-findings.md](review-findings.md))
+> was resolved the same day; the resolution is recorded at the top of that
+> file. **AGENTS.md is now the authoritative description of the formats** —
+> where this brief says it overrides AGENTS.md, read it as history.
 
 Context for an agent bringing Agentree up to date with today's Claude Code and
 Codex, used **through their VS Code extensions**, with VS Code Copilot Chat as a
