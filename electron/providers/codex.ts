@@ -241,8 +241,11 @@ interface Page {
    * item type (a tool call too, so a long agent loop stays live). Not the
    * settings, usage, task and `response_item` records the extension writes
    * when it merely loads a thread — those made untouched threads look new.
+   * 0 when the page has no item at all (a fork nobody has spoken in yet).
    */
   activeAt: number;
+  /** When the page was written: its `session_meta` timestamp. */
+  createdAt: number;
   firstUserText: string;
   unknownTypes: Record<string, number>;
 }
@@ -293,6 +296,7 @@ function parsePage(file: string, archived: boolean): Page | null {
     lastOrdinal: 0,
     touchedAt: 0,
     activeAt: 0,
+    createdAt: head.timestamp ? Date.parse(head.timestamp) || 0 : 0,
     firstUserText: "",
     unknownTypes: {},
   };
@@ -866,7 +870,9 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
     // The newest page is where the thread continues (pages are oldest first).
     cwd: ps[ps.length - 1].cwd,
     resumeCommand: resumeCmd(id, ps[ps.length - 1].cwd),
-    activeAt: Math.max(...ps.map((p) => p.activeAt || p.touchedAt)),
+    // A thread with no item of its own (a fork nobody has spoken in) dates
+    // from its creation, never from the records a reload appends.
+    activeAt: Math.max(...ps.map((p) => p.activeAt)) || Math.min(...ps.map((p) => p.createdAt || p.touchedAt)),
     touchedAt: Math.max(...ps.map((p) => p.touchedAt)),
     archived: ps.every((p) => p.archived) || undefined,
   }));
@@ -880,7 +886,9 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       cwd: root.cwd,
       project: root.cwd ? root.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "codex" : "codex",
       title: root.title,
-      activeAt: Math.max(...members.map((m) => m.activeAt)),
+      // The family's last conversation: items only. A quiet fork's creation
+      // is not a conversation — and its reloads must not float the family up.
+      activeAt: Math.max(...fam.pages.map((p) => p.activeAt)) || Math.max(...members.map((m) => m.activeAt)),
       touchedAt: Math.max(...members.map((m) => m.touchedAt)),
       nodeCount: all.length,
       branchPoints: countBranchPoints(childIndex(all)),
