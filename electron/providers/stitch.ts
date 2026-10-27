@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { childIndex, ROOT_KEY } from "../../shared/render.ts";
 import type { NodeId, TurnNode } from "../../shared/types.ts";
 
@@ -26,6 +27,8 @@ import type { NodeId, TurnNode } from "../../shared/types.ts";
  * The keys must be EVIDENCE the copy preserved, never a guess: Claude uses the
  * API message id and prompt id (copied verbatim; uuids are not), legacy Codex
  * and Copilot use role + text, safe there because the prefix is a byte copy.
+ * Text is compared WHOLE (as a digest), never by an opening gist: two prompts
+ * that share a long preamble and differ at the end are different prompts.
  * A shared opening prompt alone never merges two sessions — the families are
  * chosen by the caller from lineage, and keys only align their prefixes.
  */
@@ -35,12 +38,51 @@ export interface FamilyMember {
   parentSessionId: string | null;
   /** The session's own turns, parsed from its own transcript. May be a DAG. */
   nodes: TurnNode[];
-  /** Match key for one of this member's nodes. Defaults to role + text gist. */
+  /** Match key for one of this member's nodes. Defaults to role + full-text digest. */
   keyOf?: (n: TurnNode) => string;
 }
 
-const gist = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
-export const textKey = (n: TurnNode) => `${n.role}:${gist(n.text)}`;
+/** Whitespace-normalised digest of the WHOLE text — an identity, unlike a display gist. */
+export const digest = (s: string) =>
+  crypto.createHash("sha1").update(s.replace(/\s+/g, " ").trim()).digest("hex").slice(0, 20);
+export const textKey = (n: TurnNode) => `${n.role}:${digest(n.text)}`;
+
+/**
+ * Give every node its semantic identity (`TurnNode.stableIds[0]`), the same in
+ * every session holding a copy of it. `own` returns the node's key and whether
+ * that key is unique on its own (an API message id, a prompt id, a Codex turn
+ * id). A weak key — text alone — is qualified by its parent's identity: a
+ * copy repeats the whole prefix, so the chain is the same there.
+ */
+export function assignStableIds(nodes: TurnNode[], own: (n: TurnNode) => { key: string; strong: boolean }): void {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const done = new Map<NodeId, string>();
+  for (const start of nodes) {
+    // Iterative: a text-keyed (Copilot, legacy Codex) chain is as deep as the
+    // conversation is long.
+    const path: TurnNode[] = [];
+    const onPath = new Set<NodeId>();
+    let base = "root";
+    for (let cur: TurnNode | undefined = start; cur; ) {
+      const hit = done.get(cur.id);
+      if (hit) {
+        base = hit;
+        break;
+      }
+      if (onPath.has(cur.id)) break; // malformed (cyclic) transcript
+      onPath.add(cur.id);
+      path.push(cur);
+      if (own(cur).strong) break;
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+    }
+    for (let i = path.length - 1; i >= 0; i--) {
+      const { key, strong } = own(path[i]);
+      base = strong ? key : `${key}@${base}`;
+      done.set(path[i].id, base);
+    }
+  }
+  for (const n of nodes) n.stableIds = [done.get(n.id)!];
+}
 
 /** Parents before children, siblings in file order. */
 function topo(nodes: TurnNode[]): TurnNode[] {
@@ -126,11 +168,15 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
       }
       if (treeId !== undefined) {
         matched.add(n.id);
-        // The copy is dropped from the drawing but not from identity: its id
-        // is what annotations made while this member stood alone are keyed by.
+        // The copy is dropped from the drawing but not from the model: where
+        // else the turn lives, and under which id, is kept per session.
         const kept = outById.get(treeId);
-        if (kept && n.id !== treeId) {
-          kept.aliasIds = [...(kept.aliasIds ?? []), n.id, ...(n.aliasIds ?? [])];
+        if (kept) {
+          kept.occurrences = [
+            ...(kept.occurrences ?? []),
+            { sessionId: m.sessionId, id: n.id },
+            ...(n.occurrences ?? []),
+          ];
         }
       } else {
         // COPIES, never the originals: callers keep parsed node arrays in
@@ -143,10 +189,11 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
           id: treeId,
           parentId: treeParent,
           sourceSessionId: n.sourceSessionId ?? m.sessionId,
-          // A collision-renamed node still answers to its own id.
-          aliasIds: treeId !== n.id ? [n.id, ...(n.aliasIds ?? [])] : n.aliasIds,
+          // A collision-renamed node still records its id in its own session.
+          occurrences:
+            treeId !== n.id ? [{ sessionId: m.sessionId, id: n.id }, ...(n.occurrences ?? [])] : n.occurrences,
           // First own turn under a shared prefix: the edge into it is the fork.
-          crossSession: (parentView !== null && parentMatched && treeParent !== null) || n.crossSession || undefined,
+          branchKind: parentView !== null && parentMatched && treeParent !== null ? "fork" : n.branchKind,
         };
         out.push(copy);
         outById.set(treeId, copy);

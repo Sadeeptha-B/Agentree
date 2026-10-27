@@ -18,7 +18,7 @@ import { codexArchived, codexIndex, codexSessions } from "../paths.ts";
 import { RESUME_ARGV, resumeCommand } from "../shell.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
-import { stitchFamily, type FamilyMember } from "./stitch.ts";
+import { assignStableIds, stitchFamily, textKey, type FamilyMember } from "./stitch.ts";
 
 /**
  * Codex rollouts, paginated format (codex-cli ≥ ~0.151, 2026-09 on).
@@ -384,6 +384,10 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     const nodeId = `${b.turn.id}:${it.id ?? b.turn.nodes.length}`;
     const base = {
       lastRawId: b.turn.id,
+      turnId: b.turn.id,
+      // Turn and item ids are shared by every page and every copy holding
+      // the turn, so the node id is already its semantic identity.
+      stableIds: [nodeId],
       sourceSessionId: page.threadId,
       timestamp: ts,
     };
@@ -503,6 +507,10 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
   }
   // Legacy rollouts can't be forked at a turn through the API (no turn ids),
   // so the whole stream is one pseudo-turn.
+  // Its node ids are per-file, so identity comes from the text chain, the
+  // same in a verbatim copy.
+  for (const n of nodes) n.turnId = `${sid}#legacy`;
+  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false }));
   page.turns = nodes.length ? [{ id: `${sid}#legacy`, firstOrdinal: 0, nodes }] : [];
 }
 
@@ -762,16 +770,24 @@ function buildTree(scan: Scan, fam: Family): Tree {
         return;
       }
       placed.set(t.id, { turn: t, page });
-      // The first own turn after a prefix copied from ANOTHER thread is where
-      // this fork begins.
-      const cross =
-        prev !== null && ((i === 0 && branches) || (afterCopy && prev.sourceSessionId !== page.threadId));
+      // Where a branch begins, and how it was made: the first turn of a page
+      // that cuts into its base is a fork if the page is another thread's,
+      // else a prompt edit of this one; the first own turn after a prefix
+      // copied from ANOTHER thread is a fork too.
+      const kind: TurnNode["branchKind"] =
+        prev === null
+          ? undefined
+          : i === 0 && branches
+            ? base!.threadId !== page.threadId ? "fork" : "edit"
+            : afterCopy && prev.sourceSessionId !== page.threadId
+              ? "fork"
+              : undefined;
       afterCopy = false;
       t.nodes.forEach((n, j) => {
         out.push({
           ...n,
           parentId: j === 0 ? prev?.id ?? null : n.parentId,
-          crossSession: (j === 0 && cross) || undefined,
+          branchKind: j === 0 ? kind : undefined,
           forkBlocked: j < t.nodes.length - 1 ? BLOCK.partial : undefined,
         });
       });
@@ -817,6 +833,8 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       .trim()
       .slice(0, 90) || "Untitled",
     parentId: ps.find((p) => p.forkedFrom)?.forkedFrom ?? null,
+    // Codex records every fork's source itself.
+    parentEvidence: ps.some((p) => p.forkedFrom) ? "explicit" : undefined,
     cwd: ps[0].cwd,
     resumeCommand: resumeCmd(id, ps[0].cwd),
     updatedAt: Math.max(...ps.map((p) => p.touchedAt)),

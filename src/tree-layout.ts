@@ -127,7 +127,7 @@ function isStructural(n: TurnNode, children: Map<string, TurnNode[]>): boolean {
   if (n.status || n.label) return true; // annotated turns stay visible
   // A fork's first turn: where one session ends and another begins is
   // exactly the structure this app exists to show; never bury it in a chain.
-  if (n.crossSession) return true;
+  if (n.branchKind) return true;
   // Everything else — the ordinary user↔assistant back-and-forth between a
   // root, a branch point and a leaf — is chain filler. Notably a branch's
   // FIRST child is not special: keeping it would draw a stray dot under every
@@ -145,7 +145,7 @@ export function buildLayout(opts: BuildOpts): Layout {
       from,
       to,
       onPath: onSelectedPath(from, opts) && onSelectedPath(to, opts),
-      cross: !!(to.kind === "node" ? to.node.crossSession : to.nodes[0].crossSession),
+      cross: !!(to.kind === "node" ? to.node.branchKind : to.nodes[0].branchKind),
     });
 
   /** Filler run starting at `start`, and the structural node it runs into. */

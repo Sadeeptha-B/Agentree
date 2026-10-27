@@ -71,7 +71,7 @@ function createPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
       watchers.get(m.token)?.close();
       watchers.set(
         m.token,
-        watchLater(backend.watchTargets(m.sessionId), () => {
+        watchLater(() => backend.watchTargets(m.sessionId), () => {
           void panel.webview.postMessage({ kind: "changed", token: m.token });
         }),
       );

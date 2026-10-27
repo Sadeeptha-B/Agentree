@@ -17,7 +17,7 @@ import { HealthScan } from "../health.ts";
 import { readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
 import { RESUME_ARGV, resumeCommand } from "../shell.ts";
-import { stitchFamily, type FamilyMember } from "./stitch.ts";
+import { assignStableIds, stitchFamily, textKey, type FamilyMember } from "./stitch.ts";
 
 
 /**
@@ -231,10 +231,14 @@ function stitched(fam: Family): TurnNode[] {
   for (const m of fam.members) {
     const p = parsed(m.dir);
     if (!p) continue;
+    // A fork rewrites event ids, so identity is the text chain — the same in
+    // the copied prefix. (Copies: the parse is cached.)
+    const nodes = p.nodes.map((n) => ({ ...n }));
+    assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false }));
     members.push({
       sessionId: m.ws.id,
       parentSessionId: m.ws.id === fam.rootId ? null : m.ws.forkedFrom,
-      nodes: p.nodes,
+      nodes,
     });
   }
   return mergeSameRoleRuns(stitchFamily(members));
@@ -286,6 +290,8 @@ function membersOf(fam: Family): MemberInfo[] {
       id: m.ws.id,
       title: m.ws.name || p?.nodes.find((n) => n.role === "user")?.text.slice(0, 90) || "Untitled",
       parentId: m.ws.id === fam.rootId ? null : m.ws.forkedFrom,
+      // Agentree wrote it when it made the copy (lineage sidecar).
+      parentEvidence: m.ws.id !== fam.rootId && m.ws.forkedFrom ? "explicit" : undefined,
       cwd: m.ws.cwd,
       resumeCommand: resumeCmd(m.ws.id, m.ws.cwd),
       updatedAt: p?.touchedAt ?? 0,

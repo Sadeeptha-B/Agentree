@@ -176,7 +176,18 @@ export function NodePanel() {
           {member.entrypoint && <span className="muted small"> · {member.entrypoint}</span>}
         </h3>
         <div className="member-title">{member.title}</div>
-        {parentTitle && <p className="muted small hint">forked from “{parentTitle}”</p>}
+        {parentTitle && (
+          <p
+            className="muted small hint"
+            title={
+              member.parentEvidence === "inferred"
+                ? "Neither session records which was copied from which; Agentree inferred it from shared history and which file was created first."
+                : undefined
+            }
+          >
+            {member.parentEvidence === "inferred" ? "probably forked from" : "forked from"} “{parentTitle}”
+          </p>
+        )}
         <div className="kv">
           <span className="muted small">id</span>
           <code className="id">{member.id}</code>

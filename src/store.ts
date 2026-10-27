@@ -3,6 +3,7 @@ import { api } from "./api.ts";
 import { childIndex, newestLeaf, toNodeMap, type NodeMap } from "../shared/render.ts";
 import type {
   NodeId,
+  NodeMeta,
   NodeStatus,
   ProviderHealth,
   SessionDetail,
@@ -88,6 +89,23 @@ function gate(): (run: () => Promise<void>) => Promise<void> {
 const listGate = gate();
 const sessionGate = gate();
 
+/**
+ * Which open view an async result belongs to. Bumped by every open and close;
+ * a result that comes back for an older view is dropped. Without it, a
+ * reload in flight when the user closed the conversation re-opened it.
+ */
+let view = 0;
+
+/** Where a node lives under a re-rooted family: same id, else same semantic identity. */
+function carry(id: NodeId | null, from: NodeMap, to: NodeMap): NodeId | null {
+  if (!id) return null;
+  if (to.has(id)) return id;
+  const ids = new Set(from.get(id)?.stableIds ?? []);
+  if (!ids.size) return null;
+  for (const n of to.values()) if (n.stableIds?.some((s) => ids.has(s))) return n.id;
+  return null;
+}
+
 export const useStore = create<State>((set, get) => ({
   sessions: [],
   health: [],
@@ -129,9 +147,11 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   openSession: async (id) => {
+    const mine = ++view;
     set({ loading: true });
     try {
       const session = await api.getSession(id);
+      if (mine !== view) return;
       if (!session) {
         set({ error: "That session's transcript is no longer on disk." });
         return;
@@ -148,20 +168,26 @@ export const useStore = create<State>((set, get) => ({
         error: null,
       });
     } catch (e) {
-      set({ error: String(e) });
+      if (mine === view) set({ error: String(e) });
     } finally {
-      set({ loading: false });
+      if (mine === view) set({ loading: false });
     }
   },
 
-  close: () =>
+  close: () => {
+    view++;
     set({
       session: null,
       nodes: new Map(),
       children: new Map(),
       selected: null,
       expanded: new Set(),
-    }),
+      error: null,
+    });
+    // The list may have changed while the tree was open (a fork made, a
+    // member deleted); the welcome watch only fires on the NEXT write.
+    void get().refreshSessions();
+  },
 
   // Clicking a node stops the view chasing the tip; clicking the tip resumes it.
   select: (id) =>
@@ -172,11 +198,29 @@ export const useStore = create<State>((set, get) => ({
 
   reloadSession: () =>
     sessionGate(async () => {
+      const mine = view;
       const prev = get().session;
       if (!prev) return;
 
-      const session = await api.getSession(prev.meta.id);
-      if (!session) return; // transcript vanished mid-session; keep what's drawn
+      // A family isn't one file: its root can be deleted while a fork
+      // survives, and the provider then re-roots the family on that fork. So
+      // the view asks for its root, then for the selected turn's session, then
+      // for any other member it knew — the first that loads is the family now.
+      const prevNodes = get().nodes;
+      const selectedSource = get().selected ? prevNodes.get(get().selected!)?.sourceSessionId : undefined;
+      const candidates = [
+        ...new Set([prev.meta.id, selectedSource, ...prev.members.map((m) => m.id)].filter(Boolean) as string[]),
+      ];
+      let session = null;
+      for (const id of candidates) {
+        session = await api.getSession(id);
+        if (mine !== view) return;
+        if (session) break;
+      }
+      if (!session) {
+        set({ error: "This conversation's transcripts are no longer on disk." });
+        return;
+      }
 
       const nodes = toNodeMap(session.nodes);
       const children = childIndex(session.nodes);
@@ -185,9 +229,11 @@ export const useStore = create<State>((set, get) => ({
       // Follow the conversation only if the user was already sitting on the
       // tip. Otherwise they're reading history, and yanking the selection away
       // as new turns land would make the app unusable during a live session.
+      // A re-rooted family draws shared turns under another session's ids;
+      // the selection follows its semantic identity there.
       const wasFollowing = get().following;
-      const kept = get().selected;
-      const selected = wasFollowing || !kept || !nodes.has(kept) ? tip : kept;
+      const kept = carry(get().selected, prevNodes, nodes);
+      const selected = wasFollowing || !kept ? tip : kept;
 
       // `expanded` is intentionally preserved: chain ids are keyed on their
       // first node, so an opened run stays open as turns are appended below it.
@@ -210,7 +256,10 @@ export const useStore = create<State>((set, get) => ({
       nodes: toNodeMap(nodes),
       children: childIndex(nodes),
     });
-    await api.patchNode(session.meta.id, id, patch);
+    // A cleared field travels as null: `undefined` doesn't survive JSON (the
+    // VS Code webview bridge), and a dropped key would mean "leave as is".
+    const wire = Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, v ?? null])) as NodeMeta;
+    await api.patchNode(session.meta.id, id, wire);
   },
 
   setStatus: async (id, status) => {

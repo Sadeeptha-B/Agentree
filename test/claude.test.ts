@@ -4,7 +4,7 @@ import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { childIndex, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
-import { listSessions, loadSession, claudeHealth } from "../electron/transcripts.ts";
+import { listSessions, loadSession, claudeHealth, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
 import { readLineage } from "../electron/lineage.ts";
 import { annotate } from "../electron/registry.ts";
@@ -23,6 +23,13 @@ const QF = "47777777-7777-4777-8777-777777777777";
 const KP = "48888888-8888-4888-8888-888888888888";
 const KN = "49999999-9999-4999-8999-999999999999";
 const NP = "4aaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const AT = "4ccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const PA = "4ddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const PB = "4eeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const P3 = "4fffffff-ffff-4fff-8fff-ffffffffffff";
+const F3 = "50000000-0000-4000-8000-000000000001";
+const G3 = "50000000-0000-4000-8000-000000000002";
+let claudeRoot: string;
 let projects: string;
 const projectDir = (name = "c--work-demo") => path.join(projects, name);
 const readJsonl = (file: string) =>
@@ -55,6 +62,7 @@ beforeAll(() => {
   process.env.CODEX_HOME = path.join(tmp, "no-codex");
   process.env.COPILOT_HOME = path.join(tmp, "no-copilot");
   projects = path.join(tmp, "claude", "projects");
+  claudeRoot = path.join(tmp, "claude");
 });
 
 describe("Claude transcripts", () => {
@@ -86,7 +94,7 @@ describe("Claude transcripts", () => {
       // Two rewind branches inside P, plus the fork's own first prompt.
       expect(kidsOf(d, one(d, "Added vitest."))).toEqual(["Actually, wait", "Ship it", "Try rollup instead"]);
       const forkTurn = one(d, "Try rollup instead");
-      expect(forkTurn.crossSession).toBe(true);
+      expect(forkTurn.branchKind).toBe("fork");
       expect(forkTurn.sourceSessionId).toBe(F);
       one(d, "Explain the build"); // the shared prefix exists once
       expect(d.meta.branchPoints).toBe(1);
@@ -102,7 +110,7 @@ describe("Claude transcripts", () => {
     expect(parents).toEqual({ [P1]: null, [F1]: P1, [G1]: F1 });
     // F1's own reply exists once, and G1 continues from it.
     expect(kidsOf(d, one(d, "Rollback is a revert."))).toEqual(["Script the revert"]);
-    expect(one(d, "Script the revert").crossSession).toBe(true);
+    expect(one(d, "Script the revert").branchKind).toBe("fork");
     // F1's later rewind is its own branch off the first reply.
     expect(kidsOf(d, one(d, "Three steps."))).toEqual(["Detail step one", "Start over with a hotfix"]);
   });
@@ -138,12 +146,39 @@ describe("Claude transcripts", () => {
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(14);
+    expect(h.filesSeen).toBe(17);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(13);
+    expect(h.sessionsParsed).toBe(16);
     expect(h.skipped).toBe(0);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
     expect(h.unknownRecordTypes).toEqual({});
+  });
+});
+
+describe("Claude display merge and fork endpoints", () => {
+  it("keeps a merged node unforkable when its last part can't anchor (no silent drop)", () => {
+    // Prompt + (tools-only reply, not drawn) + mid-turn message fold into one
+    // node. Its only anchor would be the prompt, which excludes the message.
+    const d = loadSession(AT)!;
+    expectTree(d);
+    const merged = d.nodes.find((n) => n.role === "user")!;
+    expect(merged.text).toBe("Run the migration\n\nalso back up first");
+    expect(merged.forkBlocked).toMatch(/mid-turn/);
+    expect(forkClaudeAt(AT, merged.id)).toMatchObject({ ok: false });
+    // The turn after it is the fork point, and it keeps the message.
+    const reply = one(d, "Backed up, then migrated.");
+    expect(reply.forkBlocked).toBeUndefined();
+  });
+
+  it("keeps prompts distinct that share a long opening and lack a promptId", () => {
+    const d = loadSession(PA)!;
+    expectTree(d);
+    const shared = one(d, "Two options.");
+    const kids = (childIndex(d.nodes).get(shared.id) ?? []).map((n) => n.text);
+    expect(kids.map((t) => t.slice(-10).trim()).sort()).toEqual(["use Redis", "use SQLite"]);
+    const redis = d.nodes.find((n) => n.text.endsWith("use Redis"))!;
+    expect(one(d, "Redis answer.").parentId).toBe(redis.id);
+    expect(redis.branchKind).toBe("fork");
   });
 });
 
@@ -240,6 +275,19 @@ describe("Claude fork", () => {
     expect(after.nodes.length).toBe(before.nodes.length);
   });
 
+  it("carries an annotation saved before stable ids forward, so it outlives the root", () => {
+    // The pre-upgrade sidecar: one entry, under the root's own uuid.
+    writeMeta(PA, "pa-a1", { label: "existing annotation" });
+    expect(one(loadSession(PA)!, "Two options.").label).toBe("existing annotation");
+    // Loading copied it under the turn's stable id into every member's file...
+    expect(JSON.parse(fs.readFileSync(path.join(process.env.AGENTREE_HOME!, "meta", `${PB}.json`), "utf8"))).toMatchObject({
+      "m:msg_pa1": { label: "existing annotation" },
+    });
+    // ...so the root can go and the fork still shows it.
+    fs.rmSync(path.join(projectDir("c--work-preamble"), `${PA}.jsonl`));
+    expect(one(loadSession(PB)!, "Two options.").label).toBe("existing annotation");
+  });
+
   it("annotations survive the session they were made in being deleted", () => {
     // Annotated on the family (written to every member, under every id)...
     annotate(P1, one(loadSession(P1)!, "Step one is tagging.").id, { label: "keep" });
@@ -250,3 +298,84 @@ describe("Claude fork", () => {
     expect(one(d, "Step one is tagging.").label).toBe("keep");
   });
 });
+
+describe("Claude parentage evidence", () => {
+  it("keeps creation order over a renamed title, and says the direction is inferred", async () => {
+    // Created P3 → F3 → G3, a second apart; G3 was renamed, so its title
+    // carries no "(fork)". Title order alone would make it F3's parent.
+    const dir = projectDir("c--work-rename");
+    fs.mkdirSync(dir, { recursive: true });
+    const src = path.join(claudeRoot, "rename-src", "c--work-rename");
+    for (const id of [P3, F3, G3]) {
+      fs.copyFileSync(path.join(src, `${id}.jsonl`), path.join(dir, `${id}.jsonl`));
+      await new Promise((r) => setTimeout(r, 1100));
+    }
+    const d = loadSession(G3)!;
+    expectTree(d);
+    expect(d.meta.id).toBe(P3);
+    const member = (id: string) => d.members.find((m) => m.id === id)!;
+    expect(member(F3)).toMatchObject({ parentId: P3, parentEvidence: "inferred" });
+    expect(member(G3)).toMatchObject({ parentId: F3, parentEvidence: "inferred" });
+    // F3's own turn is F3's, and the dashed edge is where G3 begins.
+    expect(one(d, "End with a question.").sourceSessionId).toBe(F3);
+    expect(one(d, "Which question?")).toMatchObject({ branchKind: "fork", sourceSessionId: G3 });
+  }, 15_000);
+});
+
+describe("Fork invariants over every fixture family", () => {
+  /** The displayed text of a path, as one normalised string. */
+  const flat = (texts: string[]) => texts.join("\n\n").replace(/\s+/g, " ").trim();
+
+  it("every enabled fork holds exactly what the selected node shows, and adds nothing to the tree", () => {
+    let checked = 0;
+    for (const s of listSessions()) {
+      const before = loadSession(s.id)!;
+      const map = toNodeMap(before.nodes);
+      for (const n of before.nodes) {
+        if (n.forkBlocked) continue;
+        const res = forkClaudeAt(s.id, n.id);
+        expect(res.ok, `${s.id}: ${n.text}`).toBe(true);
+        if (!res.ok) continue;
+        checked++;
+        // The fork's own transcript, alone, draws the selected path — all of
+        // it (nothing shown is left out) and nothing after it.
+        const file = path.join(path.dirname(locateFile(res.id)), `${res.id}.jsonl`);
+        const own = mergeSameRoleRuns(parseFile(file).nodes);
+        expect(flat(own.map((x) => x.text)), n.text).toBe(flat(pathToRoot(n.id, map).map((x) => x.text)));
+        // And an unchanged fork stitches in completely: no node, no root added.
+        const after = loadSession(s.id)!;
+        expectTree(after);
+        expect(after.nodes.length, `fork of "${n.text}" added history`).toBe(before.nodes.length);
+        fs.rmSync(file);
+      }
+    }
+    expect(checked).toBeGreaterThan(30);
+  });
+
+  it("a fork of a compacted fork keeps the pre-compact history (second generation)", () => {
+    // KN is the extension's fork of compacted KP: its boundary's logical
+    // parent points into KP. Forking KN's own reply must still copy it all.
+    const d = loadSession(KN)!;
+    const res = forkClaudeAt(KN, one(d, "Issue three fixed.").id);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const recs = readJsonl(path.join(projectDir("c--work-compact"), `${res.id}.jsonl`));
+    expect(recs[0].message.content).toBe("Audit the module");
+    const boundary = recs.find((r) => r.subtype === "compact_boundary");
+    expect(boundary.parentUuid).toBeNull();
+    // Its logical link points INSIDE the copy now.
+    expect(recs.some((r) => r.uuid === boundary.logicalParentUuid)).toBe(true);
+    const after = loadSession(KN)!;
+    expectTree(after);
+    expect(after.nodes.filter((n) => n.parentId === null)).toHaveLength(1);
+    expect(after.nodes.length).toBe(d.nodes.length);
+  });
+});
+
+function locateFile(id: string): string {
+  for (const dir of fs.readdirSync(projects)) {
+    const f = path.join(projects, dir, `${id}.jsonl`);
+    if (fs.existsSync(f)) return f;
+  }
+  throw new Error(`no transcript for ${id}`);
+}

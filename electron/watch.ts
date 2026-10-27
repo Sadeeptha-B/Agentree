@@ -145,24 +145,40 @@ export function watchTranscripts(targets: WatchTarget[], onChange: () => void): 
   };
 }
 
+/** Waits between attempts to resolve watch targets that failed (worker restarting, say). */
+const RETRY_MS = [1000, 2000, 5000, 10000, 30000];
+
 /**
- * A watcher whose targets arrive asynchronously (from the backend worker).
- * Closing it before they arrive is fine: nothing is ever started.
+ * A watcher whose targets come from the backend worker. Closing it before
+ * they arrive is fine: nothing is ever started.
+ *
+ * Two gaps it closes. Resolution can fail (the worker crashed and is being
+ * restarted), and the UI has no refresh button to fall back on — so it
+ * retries, backing off, until it gets targets or is closed. And the view
+ * read the store BEFORE the watch existed, so anything written in between
+ * would be missed: once installed, it fires `onChange` once to reconcile.
  */
-export function watchLater(targets: Promise<WatchTarget[]>, onChange: () => void): Watcher {
+export function watchLater(resolve: () => Promise<WatchTarget[]>, onChange: () => void): Watcher {
   let inner: Watcher | null = null;
   let closed = false;
-  targets.then(
-    (t) => {
-      if (!closed) inner = watchTranscripts(t, onChange);
-    },
-    () => {
-      /* the view just doesn't follow the disk; it still reloads on demand */
-    },
-  );
+  let retry: NodeJS.Timeout | null = null;
+  const attempt = (n: number) => {
+    resolve().then(
+      (t) => {
+        if (closed) return;
+        inner = watchTranscripts(t, onChange);
+        onChange();
+      },
+      () => {
+        if (!closed) retry = setTimeout(() => attempt(n + 1), RETRY_MS[Math.min(n, RETRY_MS.length - 1)]);
+      },
+    );
+  };
+  attempt(0);
   return {
     close() {
       closed = true;
+      if (retry) clearTimeout(retry);
       inner?.close();
     },
   };

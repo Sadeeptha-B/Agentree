@@ -136,7 +136,7 @@ ipcMain.handle(CH.watchStart, (e, token: string, sessionId: string | null) => {
   const sender = e.sender;
   watchers.set(
     key,
-    watchLater(backend.watchTargets(sessionId), () => {
+    watchLater(() => backend.watchTargets(sessionId), () => {
       if (!sender.isDestroyed()) sender.send(CH.changed, token);
     }),
   );
