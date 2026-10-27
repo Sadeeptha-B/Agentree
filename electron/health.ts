@@ -20,6 +20,7 @@ export class HealthScan {
       filesSeen: 0,
       skipped: 0,
       sessionsParsed: 0,
+      failed: 0,
       listed: 0,
       formatVersions: {},
       unknownRecordTypes: {},
@@ -36,6 +37,14 @@ export class HealthScan {
   }
   parsed(): void {
     this.h.sessionsParsed++;
+  }
+  /**
+   * A file that should have been a session and wasn't. Never fold this into
+   * `skipped`: "nothing to show" and "couldn't understand it" look identical
+   * in the list, and only the second one means the format moved.
+   */
+  failed(): void {
+    this.h.failed++;
   }
   listed(n: number): void {
     this.h.listed = n;
@@ -58,10 +67,16 @@ export class HealthScan {
 
   done(): ProviderHealth {
     const h = this.h;
-    const candidates = h.filesSeen - h.skipped;
+    // Every file lands in exactly one of skipped / parsed / failed, so the
+    // candidates are the ones that were meant to be sessions.
+    const candidates = h.sessionsParsed + h.failed;
     if (h.present && candidates > 0 && h.sessionsParsed / candidates < 0.5) {
       h.warnings.push(
         `Only ${h.sessionsParsed} of ${candidates} transcripts parsed — the on-disk format may have changed.`,
+      );
+    } else if (h.failed > 0) {
+      h.warnings.push(
+        `${h.failed} transcript${h.failed === 1 ? "" : "s"} couldn't be read or understood and ${h.failed === 1 ? "is" : "are"} not listed.`,
       );
     }
     return h;

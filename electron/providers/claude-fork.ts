@@ -21,11 +21,21 @@ import {
  * "Fork conversation" (read from its `forkSession`, extension 2.1.310), so the
  * extension and the CLI resume the result like any fork they made themselves:
  *
- *  - the records on the parent chain ending at the anchor, in order, minus
- *    `progress` records;
+ *  - the records on the chain ending at the anchor, in order, minus
+ *    `progress` records. The chain follows `logicalParentUuid` across a
+ *    `/compact` boundary, as the extension's `getTranscript(…, true)` does, so
+ *    a fork of a compacted session carries its whole history;
  *  - every record gets a fresh uuid; parentUuid points at the previous copied
- *    record; `sessionId` is the new id; timestamps are kept, except the last
+ *    record — except where the source's was null (a compact boundary), which
+ *    stays null, so the CLI still resumes from the compaction summary.
+ *    `logicalParentUuid` is left pointing into the source, as the extension
+ *    leaves it; the parser resolves it by file order;
+ *  - a queued_command attachment's `source_uuid` is remapped onto the copy,
+ *    and a `model_refusal_fallback` record is marked `neutralizedByFork`;
+ *  - `sessionId` is the new id; timestamps are kept, except the last
  *    record's, which becomes "now";
+ *  - the source's `summary` for the anchor, if it has one, re-pointed at the
+ *    copy's leaf;
  *  - a trailing `custom-title` "<title> (fork)".
  *
  * Plus one field the extension doesn't write but the Agent SDK's
@@ -49,8 +59,12 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
   const node = family?.nodes.find((n) => n.id === nodeId);
   if (!family || !node) return { ok: false, error: "That turn is not in this conversation any more." };
 
-  const refusal = refuse(node);
-  if (refusal) return { ok: false, error: refusal };
+  // The provider decided at parse time which turns can anchor a fork; the
+  // panel showed the same reason.
+  if (node.forkBlocked) return { ok: false, error: node.forkBlocked };
+  if ((node.lastRawId ?? node.id).startsWith(INJECTED_PREFIX)) {
+    return { ok: false, error: "This turn has no transcript record to fork at." };
+  }
 
   const sourceId = node.sourceSessionId ?? familyId;
   const loc = locate(sourceId);
@@ -65,14 +79,15 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
   for (const r of records) if (r.uuid) byUuid.set(r.uuid, r);
   if (!byUuid.has(anchor)) return { ok: false, error: "The fork point's record is missing from the transcript." };
 
-  // The physical parent chain — parentUuid only. A compact boundary has a null
-  // parentUuid, so the copy starts there, exactly the history the CLI loads.
+  // The logical chain: parentUuid, or across a compact boundary its
+  // logicalParentUuid — the extension's getTranscript(anchor, true).
   const chain: RawRecord[] = [];
   const seen = new Set<string>();
   for (let cur = byUuid.get(anchor); cur && !seen.has(cur.uuid!); ) {
     seen.add(cur.uuid!);
     chain.push(cur);
-    cur = cur.parentUuid ? byUuid.get(cur.parentUuid) : undefined;
+    const up = cur.parentUuid ?? cur.logicalParentUuid;
+    cur = up ? byUuid.get(up) : undefined;
   }
   chain.reverse();
   const copied = chain.filter((r) => r.type !== "progress");
@@ -83,14 +98,20 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
   const newId = crypto.randomUUID();
   const now = new Date().toISOString();
   const forkedFrom = { sessionId: sourceId, messageUuid: anchor };
+  const fresh = new Map(copied.map((r) => [r.uuid!, crypto.randomUUID()]));
   let prev: string | null = null;
   const lines: string[] = [];
   copied.forEach((r, i) => {
-    const uuid = crypto.randomUUID();
+    const uuid = fresh.get(r.uuid!)!;
+    const att = r.attachment as (RawRecord["attachment"] & { source_uuid?: string }) | undefined;
     const out: Record<string, unknown> = {
       ...r,
+      ...(r.type === "system" && r.subtype === "model_refusal_fallback" ? { neutralizedByFork: true } : {}),
+      ...(att?.type === "queued_command" && att.source_uuid && fresh.has(att.source_uuid)
+        ? { attachment: { ...att, source_uuid: fresh.get(att.source_uuid) } }
+        : {}),
       uuid,
-      parentUuid: prev,
+      parentUuid: r.parentUuid ? prev : null,
       sessionId: newId,
       timestamp: i === copied.length - 1 ? now : r.timestamp,
       forkedFrom,
@@ -99,6 +120,10 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
     lines.push(JSON.stringify(out));
     prev = uuid;
   });
+  const summary = [...records].reverse().find(
+    (r) => r.type === "summary" && (r as { leafUuid?: string }).leafUuid === copied[copied.length - 1].uuid,
+  ) as { summary?: string } | undefined;
+  if (summary?.summary) lines.push(JSON.stringify({ type: "summary", leafUuid: prev, summary: summary.summary }));
   const title = `${parseFile(loc.file).title || "Forked session"} (fork)`;
   lines.push(JSON.stringify({ type: "custom-title", sessionId: newId, customTitle: title }));
 
@@ -124,22 +149,6 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
       ? "Heads up: this prefix includes a message delivered mid-turn (hollow node). Claude Code wrote no record for it, so the fork does NOT contain that instruction."
       : undefined,
   };
-}
-
-function refuse(node: TurnNode): string | null {
-  if (node.injected || (node.lastRawId ?? node.id).startsWith(INJECTED_PREFIX)) {
-    // Reconstructed from the message queue — there is no record to fork at.
-    return "This turn was delivered mid-turn and has no transcript record.";
-  }
-  if (node.midTurn) {
-    // A queued_command attachment is a real record, but the resume loader
-    // indexes only messages. The message is not lost: any fork below keeps it.
-    return "This mid-turn message can't anchor a fork itself. Fork the turn after it — forks that pass this point keep the message.";
-  }
-  if (node.preCompact) {
-    return "This turn predates the session's last /compact. Claude Code only loads messages after the compaction, so a fork here would not contain it.";
-  }
-  return null;
 }
 
 /**

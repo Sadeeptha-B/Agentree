@@ -12,10 +12,10 @@ import type {
 } from "../shared/types.ts";
 import { HealthScan, minorVersion } from "./health.ts";
 import { readLineage } from "./lineage.ts";
-import { readMeta } from "./meta.ts";
+import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
-import { resumeCommand } from "./shell.ts";
-import { stitchFamily, type FamilyMember } from "./providers/stitch.ts";
+import { RESUME_ARGV, resumeCommand } from "./shell.ts";
+import { overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
   const parts = dirName.split("-").filter(Boolean);
@@ -367,17 +367,20 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       model: last.model ?? head.model,
       stopReason: last.stopReason ?? null,
       absorbedIds: parts.slice(1).flatMap((p) => [p.id, ...(p.absorbedIds ?? [])]),
+      aliasIds: parts.flatMap((p) => p.aliasIds ?? []).length
+        ? parts.flatMap((p) => p.aliasIds ?? [])
+        : undefined,
       // The merged turn ends where its last ANCHORABLE part ends — that's the
       // record a fork has to resume after. An injected tail has no transcript
       // record at all, and a mid-turn attachment's uuid is a record the CLI's
       // resume loader doesn't index; either one becoming the anchor produces
-      // a fork the CLI can only reject.
+      // a fork the CLI can only reject. With no anchorable part at all, the
+      // last part's reason stands for the whole run.
       ...(() => {
-        const lastReal = [...parts].reverse().find((p) => !p.injected && !p.midTurn);
-        return {
-          lastRawId: lastReal ? lastReal.lastRawId ?? lastReal.id : undefined,
-          preCompact: lastReal?.preCompact,
-        };
+        const anchor = [...parts].reverse().find((p) => !p.forkBlocked);
+        return anchor
+          ? { lastRawId: anchor.lastRawId ?? anchor.id, preCompact: anchor.preCompact, forkBlocked: undefined }
+          : { lastRawId: last.lastRawId ?? last.id, preCompact: last.preCompact, forkBlocked: last.forkBlocked };
       })(),
       // Only wholly-synthetic runs are unforkable; one real record in the run
       // gives the merged turn a resume point.
@@ -506,6 +509,18 @@ export interface Parsed {
   /** Stitch evidence per node id: `m:<message.id>` / `u:<promptId>|<gist>`. */
   keys: Map<NodeId, string>;
   /**
+   * Every assistant API message id in the file. The API mints one per
+   * response, and a copy-fork preserves the ones it copies, so two files
+   * sharing ANY of them share history — whichever branch the fork copied.
+   */
+  messageIds: string[];
+  /**
+   * Set when the file should have been a session and isn't: unreadable, no
+   * parseable line at all, or conversation records that yielded no turn.
+   * Bookkeeping-only files (the CLI writes those) leave it unset.
+   */
+  problem?: "unreadable" | "malformed" | "unrecognized";
+  /**
    * custom-title (last) > ai-title (last) > first real prompt. The prompt is
    * computed BEFORE merging: a merged node can start with slash-command
    * plumbing followed by the real question.
@@ -516,48 +531,71 @@ export interface Parsed {
   cwd: string;
   entrypoint?: string;
   version?: string;
-  /** First assistant API message id — shared by every copy-fork of this session. */
-  firstMessageId?: string;
   /** Explicit lineage stamped by SDK / Agentree forks. */
   forkedFrom?: string;
   unknownTypes: Record<string, number>;
 }
 
-const EMPTY = (sessionId: string): Parsed => ({
+const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
   sessionId,
   nodes: [],
   keys: new Map(),
+  messageIds: [],
+  problem,
   title: "",
   touchedAt: 0,
   cwd: "",
   unknownTypes: {},
 });
 
-/** Read a transcript's records. Torn lines (a session mid-append) are skipped. */
-export function readRecords(file: string): RawRecord[] | null {
+/**
+ * Read a transcript's records. Torn lines (a session mid-append) are skipped
+ * but counted, so a file that is ALL unparseable can be told apart from an
+ * empty one.
+ */
+function readLines(file: string): { records: RawRecord[]; bad: number } | null {
   let raw: string;
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch {
     return null;
   }
-  const out: RawRecord[] = [];
+  const records: RawRecord[] = [];
+  let bad = 0;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      out.push(JSON.parse(line) as RawRecord);
+      const r = JSON.parse(line) as unknown;
+      if (r && typeof r === "object") records.push(r as RawRecord);
+      else bad++;
     } catch {
-      /* torn line */
+      bad++; // torn line
     }
   }
-  return out;
+  return { records, bad };
 }
+
+export const readRecords = (file: string): RawRecord[] | null => readLines(file)?.records ?? null;
+
+/**
+ * Why a fork can't anchor at a turn — one place, so the panel and the fork
+ * writer can't disagree.
+ */
+const BLOCK = {
+  injected: "This message was delivered mid-turn and Claude Code wrote no record for it, so there is nothing to fork at.",
+  midTurn:
+    "This mid-turn message can't anchor a fork itself. Fork the turn after it — forks that pass this point keep the message.",
+  preCompact:
+    "This turn is from before the session's last /compact. Claude Code resumes a compacted session from its summary, so Agentree only forks after the compaction.",
+};
 
 /** Project a transcript file into the node list. Read-only — we never write here. */
 export function parseFile(file: string): Parsed {
   const sessionId = path.basename(file).replace(/\.jsonl$/, "");
-  const all = readRecords(file);
-  if (!all) return EMPTY(sessionId);
+  const read = readLines(file);
+  if (!read) return EMPTY(sessionId, "unreadable");
+  if (read.records.length === 0) return EMPTY(sessionId, read.bad > 0 ? "malformed" : undefined);
+  const all = read.records;
 
   // Pass 1: the FULL lineage, including record types we don't display.
   //
@@ -634,9 +672,22 @@ export function parseFile(file: string): Parsed {
     if (!rec.uuid) continue;
     // Lineage is recorded for EVERY record, displayable or not, so that
     // resolveParent can re-link children across whatever we filter out.
+    //
     // `logicalParentUuid` bridges a compact boundary's physical null parent —
-    // without it a compacted session falls apart into a forest.
-    parentOf.set(rec.uuid, rec.parentUuid ?? rec.logicalParentUuid ?? null);
+    // without it a compacted session falls apart into a forest. In a
+    // copy-fork it is STALE: the extension's fork gives every record a fresh
+    // uuid but leaves this field pointing into the parent's file (read from
+    // its forkSession, 2.1.310). A copy is written in chain order, so the
+    // record just before the boundary is that logical parent.
+    let parent = rec.parentUuid ?? null;
+    if (parent === null && rec.logicalParentUuid) {
+      parent = parentOf.has(rec.logicalParentUuid)
+        ? rec.logicalParentUuid
+        : seq.length
+          ? seq[seq.length - 1]
+          : null;
+    }
+    parentOf.set(rec.uuid, parent);
     seq.push(rec.uuid);
 
     if (rec.type === "system" && rec.subtype === "compact_boundary") {
@@ -685,13 +736,13 @@ export function parseFile(file: string): Parsed {
   // group; `resolveParent` below then re-links children past the absorbed ones.
   const groups: RawRecord[][] = [];
   const groupOfKey = new Map<string, RawRecord[]>();
-  let firstMessageId: string | undefined;
+  const messageIds: string[] = [];
 
   for (const rec of records) {
     const key =
       rec.type === "assistant" && rec.message?.id ? `msg:${rec.message.id}` : null;
-    if (key && !firstMessageId) firstMessageId = rec.message!.id;
     const existing = key ? groupOfKey.get(key) : undefined;
+    if (key && !existing) messageIds.push(rec.message!.id!);
     if (existing) {
       existing.push(rec);
     } else {
@@ -765,6 +816,9 @@ export function parseFile(file: string): Parsed {
     // count and wreck the overlays.
     const u = last.message?.usage ?? head.message?.usage;
     const id = head.uuid!;
+    const injected = id.startsWith(INJECTED_PREFIX);
+    const midTurn = !!head.agentreeMidTurn;
+    const beforeCompact = preCompact.has(last.uuid!);
 
     nodes.push({
       id,
@@ -782,12 +836,19 @@ export function parseFile(file: string): Parsed {
       stopReason: last.message?.stop_reason ?? null,
       isSidechain: head.isSidechain || undefined,
       // No transcript record backs this turn — see spliceInterjections.
-      injected: id.startsWith(INJECTED_PREFIX) || undefined,
+      injected: injected || undefined,
       // Backed by a queued_command attachment — real record, but not a valid
       // resume anchor itself.
-      midTurn: head.agentreeMidTurn || undefined,
-      // Anchor predates the last /compact; the CLI cannot resume there.
-      preCompact: preCompact.has(last.uuid!) || undefined,
+      midTurn: midTurn || undefined,
+      // Anchor predates the last /compact.
+      preCompact: beforeCompact || undefined,
+      forkBlocked: injected
+        ? BLOCK.injected
+        : midTurn
+          ? BLOCK.midTurn
+          : beforeCompact
+            ? BLOCK.preCompact
+            : undefined,
       timestamp: head.timestamp ? Date.parse(head.timestamp) : 0,
       usage: u
         ? {
@@ -801,13 +862,24 @@ export function parseFile(file: string): Parsed {
 
     // Stitch evidence a copy-fork preserves verbatim (uuids are NOT preserved):
     // the API message id for replies, the prompt id plus text for prompts.
+    // NOT the timestamp: a fork re-stamps its last copied record, so a fork
+    // ending on a prompt without a promptId (older transcripts) would no
+    // longer match its own source. Stitching only matches under an already
+    // matched parent, which is what keeps the text alone safe there.
     keys.set(
       id,
       head.type === "assistant" && head.message?.id
         ? `m:${head.message.id}`
-        : `u:${head.promptId ?? head.timestamp ?? ""}|${gist(text)}`,
+        : `u:${head.promptId ?? ""}|${gist(text)}`,
     );
   }
+  // Conversation records that produced nothing is what a changed record shape
+  // looks like — as opposed to a file of pure bookkeeping, which has none.
+  const problem = nodes.length === 0 && records.some((r) => r.type === "user" || r.type === "assistant")
+    ? "unrecognized"
+    : nodes.length === 0 && read.bad > all.length
+      ? "malformed"
+      : undefined;
   const titleDraft = visible.find(
     (d) => d.head.type === "user" && !d.synthetic && !d.text.startsWith("[Request interrupted"),
   );
@@ -816,6 +888,8 @@ export function parseFile(file: string): Parsed {
     sessionId,
     nodes,
     keys,
+    messageIds,
+    problem,
     // A name the user chose with `/rename` beats the CLI's generated title,
     // which beats anything inferred from the first prompt.
     title:
@@ -826,7 +900,6 @@ export function parseFile(file: string): Parsed {
     cwd,
     entrypoint,
     version,
-    firstMessageId,
     forkedFrom,
     unknownTypes,
   };
@@ -874,7 +947,7 @@ function readCwd(file: string): string {
   return "";
 }
 
-export const claudeResumeArgv = (sessionId: SessionId) => ["claude", "--resume", sessionId];
+export const claudeResumeArgv = RESUME_ARGV.claude;
 
 /** Sessions are per-directory, so the change of directory is part of the command. */
 const claudeResume = (sessionId: SessionId, cwd: string) =>
@@ -908,8 +981,9 @@ interface FileSummary {
   branchPoints: number;
   entrypoint?: string;
   version?: string;
-  firstMessageId?: string;
+  messageIds: string[];
   forkedFrom?: string;
+  problem?: Parsed["problem"];
   unknownTypes: Record<string, number>;
 }
 
@@ -946,8 +1020,9 @@ function summarise(file: string, dirName: string): FileSummary | null {
     branchPoints: countBranchPoints(childIndex(merged)),
     entrypoint: parsed.entrypoint,
     version: parsed.version,
-    firstMessageId: parsed.firstMessageId,
+    messageIds: parsed.messageIds,
     forkedFrom: parsed.forkedFrom,
+    problem: parsed.problem,
     unknownTypes: parsed.unknownTypes,
   };
   summaries.set(file, s);
@@ -980,12 +1055,14 @@ function summariseDir(dirName: string, seen?: Set<string>): FileSummary[] {
  * Group one project directory's transcripts into fork families.
  *
  * The VS Code extension's "Fork conversation" writes a NEW transcript holding a
- * copy of the active chain (fresh uuids, same API message ids, same prompt
- * ids, same timestamps) and records no lineage at all. Every such copy starts
- * with the same first assistant message id as its source — a value the API
- * mints once per response, so two independent sessions never share it, no
- * matter how similar their opening prompts. Explicit lineage (`forkedFrom` on
- * SDK/Agentree forks, Agentree's sidecar) links families too.
+ * copy of one chain of its source (fresh uuids, same API message ids, same
+ * prompt ids, same timestamps) and records no lineage at all. The API mints a
+ * message id once per response, so two files that share ANY assistant message
+ * id share history, however similar or different their opening prompts. Any,
+ * not the first: a fork copies the branch it was taken on, which need not
+ * contain the file's earliest reply (a regenerated first answer, say).
+ * Explicit lineage (`forkedFrom` on SDK/Agentree forks, Agentree's sidecar)
+ * links families too.
  */
 function groupFamilies(files: FileSummary[]): FileSummary[][] {
   const byId = new Map(files.map((f) => [f.id, f]));
@@ -1001,16 +1078,16 @@ function groupFamilies(files: FileSummary[]): FileSummary[][] {
   };
 
   const lineage = readLineage();
-  const byFirst = new Map<string, string>();
+  const byMessage = new Map<string, string>();
   for (const f of files) {
     if (f.nodeCount === 0) continue;
     if (f.forkedFrom && byId.has(f.forkedFrom)) union(f.id, f.forkedFrom);
     const side = lineage[f.id];
     if (side && byId.has(side)) union(f.id, side);
-    if (f.firstMessageId) {
-      const other = byFirst.get(f.firstMessageId);
+    for (const m of f.messageIds) {
+      const other = byMessage.get(m);
       if (other) union(f.id, other);
-      else byFirst.set(f.firstMessageId, f.id);
+      else byMessage.set(m, f.id);
     }
   }
 
@@ -1025,64 +1102,78 @@ function groupFamilies(files: FileSummary[]): FileSummary[][] {
   return [...groups.values()];
 }
 
-/** How many leading keys two root-first key paths share. */
-function sharedPrefix(a: string[], b: string[]): number {
-  let k = 0;
-  while (k < a.length && k < b.length && a[k] === b[k]) k++;
-  return k;
-}
-
-/** Root-first key path along a parse's newest chain (its active conversation). */
-function activeKeys(p: Parsed): string[] {
-  const kids = childIndex(p.nodes);
-  const byId = new Map(p.nodes.map((n) => [n.id, n]));
-  let leaf: TurnNode | undefined;
-  for (const n of p.nodes) {
-    if (!kids.has(n.id) && (!leaf || n.timestamp >= leaf.timestamp)) leaf = n;
-  }
-  const out: string[] = [];
-  const seen = new Set<string>();
-  let cur = leaf;
-  while (cur && !seen.has(cur.id)) {
-    seen.add(cur.id);
-    out.push(p.keys.get(cur.id) ?? "");
-    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-  }
-  return out.reverse();
-}
+const asMember = (id: string, p: Parsed, parentSessionId: string | null = null): FamilyMember => ({
+  sessionId: id,
+  parentSessionId,
+  nodes: p.nodes,
+  keyOf: (n) => p.keys.get(n.id) ?? n.id,
+});
 
 /**
- * Decide who forked from whom inside one family.
+ * Decide who forked from whom inside one family. Three steps, each unable to
+ * contradict the one before:
  *
- * Explicit lineage wins. Otherwise members are ordered by how many " (fork)"
- * suffixes the extension stamped on their titles, then by file creation time
- * (a fork's file is created after its source's — but a copied or restored
- * directory resets creation times, so the title evidence goes first). Each
- * member's parent is the EARLIER member it shares the longest prefix with: a
- * fork of a fork shares more with its direct parent than with the root.
+ *  1. Explicit lineage (`forkedFrom`, the sidecar) — an edge that would close
+ *     a cycle is dropped rather than trusted.
+ *  2. An order with every explicit ancestor before its descendants; inside
+ *     that, by how many " (fork)" suffixes the extension stamped on titles,
+ *     then by file creation time. Both are weak (a rename drops the suffix, a
+ *     restored directory resets creation times), which is why they only order
+ *     what step 1 left free.
+ *  3. A member without explicit lineage takes the EARLIER member whose tree
+ *     holds the most of its history (`overlap`, over every branch of both): a
+ *     fork of a fork overlaps its direct parent more than the root, even after
+ *     that parent rewound. Every edge points backwards in the order, so the
+ *     result is a forest — never a cycle.
  */
 function familyParents(group: FileSummary[], parsed: Map<string, Parsed>): Map<string, string | null> {
   const lineage = readLineage();
   const ids = new Set(group.map((g) => g.id));
+
+  const explicit = new Map<string, string>();
+  const isAncestor = (a: string, of: string) => {
+    const seen = new Set<string>();
+    for (let cur = explicit.get(of); cur && !seen.has(cur); cur = explicit.get(cur)) {
+      if (cur === a) return true;
+      seen.add(cur);
+    }
+    return false;
+  };
+  for (const m of [...group].sort((a, b) => a.createdMs - b.createdMs)) {
+    const p = [m.forkedFrom, lineage[m.id]].find((x) => x && ids.has(x) && x !== m.id);
+    if (p && p !== m.id && !isAncestor(m.id, p)) explicit.set(m.id, p);
+  }
+
   const forkDepth = (t: string) => (t.match(/\(fork\)/g) ?? []).length;
-  const order = [...group].sort(
+  const remaining = [...group].sort(
     (a, b) => forkDepth(a.title) - forkDepth(b.title) || a.createdMs - b.createdMs,
   );
-  const keys = new Map(order.map((g) => [g.id, activeKeys(parsed.get(g.id)!)]));
+  const order: FileSummary[] = [];
+  const placed = new Set<string>();
+  while (remaining.length) {
+    const i = Math.max(
+      0,
+      remaining.findIndex((m) => !explicit.has(m.id) || placed.has(explicit.get(m.id)!)),
+    );
+    const [m] = remaining.splice(i, 1);
+    order.push(m);
+    placed.add(m.id);
+  }
 
+  const fm = new Map(group.map((g) => [g.id, asMember(g.id, parsed.get(g.id)!)]));
   const out = new Map<string, string | null>();
   order.forEach((m, i) => {
-    const explicit = [m.forkedFrom, lineage[m.id]].find((p) => p && ids.has(p) && p !== m.id);
-    if (explicit) {
-      out.set(m.id, explicit);
+    const e = explicit.get(m.id);
+    if (e) {
+      out.set(m.id, e);
       return;
     }
     let best: string | null = null;
-    let bestLen = 0;
+    let bestN = 0;
     for (let j = 0; j < i; j++) {
-      const len = sharedPrefix(keys.get(m.id)!, keys.get(order[j].id)!);
-      if (len > bestLen) {
-        bestLen = len;
+      const n = overlap(fm.get(m.id)!, fm.get(order[j].id)!);
+      if (n > bestN) {
+        bestN = n;
         best = order[j].id;
       }
     }
@@ -1101,19 +1192,11 @@ interface Family {
 function buildFamily(group: FileSummary[]): Family {
   const parsed = new Map(group.map((g) => [g.id, parseFile(g.file)]));
   const parents = group.length > 1 ? familyParents(group, parsed) : new Map([[group[0].id, null]]);
-  const rootId =
-    group.find((g) => !parents.get(g.id))?.id ??
-    [...group].sort((a, b) => a.createdMs - b.createdMs)[0].id;
+  const rootId = [...group]
+    .sort((a, b) => a.createdMs - b.createdMs)
+    .find((g) => !parents.get(g.id))!.id;
 
-  const fm: FamilyMember[] = group.map((g) => {
-    const p = parsed.get(g.id)!;
-    return {
-      sessionId: g.id,
-      parentSessionId: parents.get(g.id) ?? null,
-      nodes: p.nodes,
-      keyOf: (n) => p.keys.get(n.id) ?? n.id,
-    };
-  });
+  const fm = group.map((g) => asMember(g.id, parsed.get(g.id)!, parents.get(g.id) ?? null));
   // Root first so its node ids are the ones the shared prefix keeps.
   fm.sort((a, b) => (a.sessionId === rootId ? -1 : b.sessionId === rootId ? 1 : 0));
 
@@ -1199,7 +1282,8 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
       const files = summariseDir(dirName, seen);
       for (const f of files) {
         health.file();
-        if (f.nodeCount === 0) health.skipped();
+        if (f.problem) health.failed();
+        else if (f.nodeCount === 0) health.skipped();
         else health.parsed();
         health.version(f.version ? `claude ${minorVersion(f.version)}` : undefined);
         health.unknown(f.unknownTypes);
@@ -1238,15 +1322,7 @@ export function loadSession(sessionId: SessionId): SessionDetail | null {
   }
 
   const fam = buildFamily(group);
-  // Annotations are written under the family root's id, but a family's root
-  // can change (a fork found later, a root deleted) — read every member's.
-  for (const m of fam.members) {
-    const meta = readMeta(m.id);
-    for (const n of fam.nodes) {
-      const mm = meta[n.id] ?? n.absorbedIds?.map((id) => meta[id]).find(Boolean);
-      if (mm) Object.assign(n, mm);
-    }
-  }
+  applyAnnotations(fam.nodes, fam.members.map((m) => m.id));
 
   return {
     meta: familyMeta(group, fam),

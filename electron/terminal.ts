@@ -77,23 +77,36 @@ export function terminalLaunch(
   return hit ? { cmd: hit[0], args: hit[1] } : null;
 }
 
-export function openTerminal(argv: string[], cwd: string): ActionResult {
+/**
+ * Resolves once the launcher process has actually started (or failed to):
+ * spawn reports a missing binary asynchronously, and answering `ok` before
+ * that would tell the user a window is opening when nothing will.
+ */
+export function openTerminal(argv: string[], cwd: string): Promise<ActionResult> {
   const launch = terminalLaunch(argv, usableCwd(cwd));
-  if (!launch) return { ok: false, error: "No terminal emulator found on PATH." };
-  try {
-    const child = spawn(launch.cmd, launch.args, {
-      cwd: launch.cwd,
-      // POSIX: outlive the app. Windows: cmd.exe exits as soon as `start`
-      // has opened the new console, so it needs neither.
-      detached: process.platform !== "win32",
-      stdio: "ignore",
-      windowsHide: true,
-      windowsVerbatimArguments: launch.verbatim,
-    });
-    child.on("error", () => {});
-    child.unref();
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: `Couldn't open a terminal: ${e instanceof Error ? e.message : String(e)}` };
-  }
+  if (!launch) return Promise.resolve({ ok: false, error: "No terminal emulator found on PATH." });
+  const failed = (e: unknown): ActionResult => ({
+    ok: false,
+    error: `Couldn't open a terminal: ${e instanceof Error ? e.message : String(e)}`,
+  });
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(launch.cmd, launch.args, {
+        cwd: launch.cwd,
+        // POSIX: outlive the app. Windows: cmd.exe exits as soon as `start`
+        // has opened the new console, so it needs neither.
+        detached: process.platform !== "win32",
+        stdio: "ignore",
+        windowsHide: true,
+        windowsVerbatimArguments: launch.verbatim,
+      });
+      child.once("spawn", () => {
+        child.unref();
+        resolve({ ok: true });
+      });
+      child.once("error", (e) => resolve(failed(e)));
+    } catch (e) {
+      resolve(failed(e));
+    }
+  });
 }
