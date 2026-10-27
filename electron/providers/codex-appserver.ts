@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { configuredPath } from "../settings.ts";
 
 /**
  * Minimal client for `codex app-server` — newline-delimited JSON-RPC over
@@ -24,10 +25,11 @@ import path from "node:path";
 /**
  * Locate a codex binary without a shell. The Codex VS Code extension bundles
  * one (newest installed version first), which is the build the user's chat
- * panel actually runs; otherwise PATH. `AGENTREE_CODEX_BIN` overrides both.
+ * panel actually runs; otherwise PATH. `AGENTREE_CODEX_BIN`, or the codex
+ * binary setting, overrides both.
  */
 export function findCodex(): { cmd: string; shell: boolean } | null {
-  const override = process.env.AGENTREE_CODEX_BIN;
+  const override = configuredPath("codexBin");
   // A .cmd/.bat (npm's Windows shim) only starts through cmd.exe.
   if (override) return { cmd: override, shell: /\.(cmd|bat)$/i.test(override) };
   const exe = process.platform === "win32" ? "codex.exe" : "codex";
@@ -148,7 +150,7 @@ async function withAppServer<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> {
   const bin = findCodex();
   if (!bin) {
     throw new Error(
-      "Couldn't find a codex binary (looked in the Codex VS Code extension and on PATH). Set AGENTREE_CODEX_BIN to its path.",
+      "Couldn't find a codex binary (looked in the Codex VS Code extension and on PATH). Set its path in Agentree's settings, or in AGENTREE_CODEX_BIN.",
     );
   }
   // Through cmd.exe the command line is re-parsed, so a path with spaces

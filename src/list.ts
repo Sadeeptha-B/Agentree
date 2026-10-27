@@ -59,18 +59,24 @@ export interface RailDir {
   n: number;
 }
 
+/** Which time the list sorts and dates by (the "sort conversations by" setting). */
+export type SortBy = "active" | "touched";
+export const timeOf = (s: { activeAt: number; touchedAt: number }, by: SortBy = "active") =>
+  by === "touched" ? s.touchedAt : s.activeAt;
+
 /** Directories ranked by their most recent conversation, so the rail reads in the list's order. */
-export function railDirs(sessions: SessionMeta[]): RailDir[] {
+export function railDirs(sessions: SessionMeta[], by: SortBy = "active"): RailDir[] {
   const dirs = new Map<string, RailDir & { latest: number }>();
   for (const s of sessions) {
     for (const path of dirsOf(s)) {
       const key = cwdKey(path);
       const d = dirs.get(key);
-      if (!d) dirs.set(key, { key, path, n: 1, latest: s.activeAt });
+      const t = timeOf(s, by);
+      if (!d) dirs.set(key, { key, path, n: 1, latest: t });
       else {
         d.n++;
-        if (s.activeAt > d.latest) {
-          d.latest = s.activeAt;
+        if (t > d.latest) {
+          d.latest = t;
           d.path = path;
         }
       }
@@ -85,6 +91,8 @@ export interface ListFilter {
   cwd: string;
   /** One agent, or "" for all of them. */
   provider: ProviderId | "";
+  /** Newest first by this time; activity unless the settings say otherwise. */
+  sortBy?: SortBy;
 }
 
 /** The sessions of the selected agent — what the rail counts and the list draws from. */
@@ -103,5 +111,5 @@ export function filterSessions(sessions: SessionMeta[], f: ListFilter): SessionM
   });
   // `listSessions` already sorts this way, but the ordering is the point of
   // the screen, so don't rely on it holding.
-  return [...list].sort((a, b) => b.activeAt - a.activeAt);
+  return [...list].sort((a, b) => timeOf(b, f.sortBy) - timeOf(a, f.sortBy));
 }

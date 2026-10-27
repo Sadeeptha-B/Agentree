@@ -1,5 +1,6 @@
-import type { NodeMeta, SessionId } from "../shared/types.ts";
+import type { NodeMeta, SessionId, SettingsPatch } from "../shared/types.ts";
 import { allHealth, annotate, forkAnyAt, listAllSessions, loadAnySession, watchTargets } from "./registry.ts";
+import { settingsState, writeSettings } from "./settings.ts";
 
 /**
  * Everything that touches the transcript stores, as one table of calls.
@@ -21,6 +22,11 @@ export const methods = {
   forkAt: (sessionId: SessionId, nodeId: string) => forkAnyAt(sessionId, nodeId),
   providerHealth: () => allHealth(),
   watchTargets: (sessionId: SessionId | null) => watchTargets(sessionId),
+  getSettings: () => settingsState(),
+  setSettings: (patch: SettingsPatch) => {
+    writeSettings(patch);
+    return settingsState();
+  },
 };
 
 export type Methods = typeof methods;

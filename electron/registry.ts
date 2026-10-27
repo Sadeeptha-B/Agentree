@@ -26,6 +26,7 @@ import {
   locateCopilot,
 } from "./providers/copilot.ts";
 import { writeAnnotation } from "./meta.ts";
+import { readSettings } from "./settings.ts";
 import { claudeProjects, codexArchived, codexIndex, codexSessions, copilotState } from "./paths.ts";
 import type { WatchTarget } from "./watch.ts";
 
@@ -94,6 +95,15 @@ export const PROVIDERS: Provider[] = [claude, codex, copilot];
 export const providerById = (id: ProviderId): Provider | undefined =>
   PROVIDERS.find((p) => p.id === id);
 
+/**
+ * The agents the settings say to scan. One turned off isn't scanned, listed,
+ * opened or watched at all — unlike the list's agent chips, which only filter.
+ */
+const enabled = (): Provider[] => {
+  const on = readSettings().providers;
+  return PROVIDERS.filter((p) => on[p.id] !== false);
+};
+
 function guarded<T>(p: Provider, fn: () => T, fallback: T): T {
   try {
     return fn();
@@ -107,7 +117,7 @@ const failures = new Map<ProviderId, string>();
 
 export function listAllSessions(): SessionMeta[] {
   const out: SessionMeta[] = [];
-  for (const p of PROVIDERS) {
+  for (const p of enabled()) {
     failures.delete(p.id);
     out.push(...guarded(p, () => p.list(), []));
   }
@@ -133,7 +143,7 @@ export function dedupeSessions(list: SessionMeta[]): SessionMeta[] {
 }
 
 export function allHealth(): ProviderHealth[] {
-  return PROVIDERS.map((p) => {
+  return enabled().map((p) => {
     const h = guarded(p, () => p.health(), null);
     const err = failures.get(p.id);
     const base: ProviderHealth = h ?? {
@@ -155,7 +165,7 @@ export function allHealth(): ProviderHealth[] {
 }
 
 function owner(id: SessionId): Provider | undefined {
-  return PROVIDERS.find((p) => guarded(p, () => p.owns(id), false));
+  return enabled().find((p) => guarded(p, () => p.owns(id), false));
 }
 
 export function loadAnySession(id: SessionId): SessionDetail | null {
@@ -202,10 +212,11 @@ const codexTargets = (): WatchTarget[] => [
  */
 export function watchTargets(sessionId: SessionId | null): WatchTarget[] {
   if (sessionId === null) {
+    const on = new Set(enabled().map((p) => p.id));
     return [
-      { kind: "dir", path: claudeProjects(), poll: false },
-      ...codexTargets(),
-      { kind: "dir", path: copilotState(), poll: true },
+      ...(on.has("claude") ? [{ kind: "dir" as const, path: claudeProjects(), poll: false }] : []),
+      ...(on.has("codex") ? codexTargets() : []),
+      ...(on.has("copilot") ? [{ kind: "dir" as const, path: copilotState(), poll: true }] : []),
     ];
   }
   // Every project directory a member of the family lives in: a tree grows

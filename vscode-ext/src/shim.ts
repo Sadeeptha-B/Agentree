@@ -45,6 +45,8 @@ const api: AgentreeApi = {
   patchNode: (sessionId, nodeId, patch) => invoke("patchNode", sessionId, nodeId, patch),
   forkAt: (sessionId, nodeId) => invoke("forkAt", sessionId, nodeId),
   providerHealth: () => invoke("providerHealth"),
+  getSettings: () => invoke("getSettings"),
+  setSettings: (patch) => invoke("setSettings", patch),
   host: "vscode",
   openNative: (ref) => invoke("openNative", ref),
   resumeInTerminal: (ref) => invoke("resumeInTerminal", ref),

@@ -92,7 +92,10 @@ function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: stri
 }
 
 export function NodePanel() {
-  const { session, nodes, selected, patch, setStatus } = useStore();
+  const { session, nodes, selected, patch, setStatus, settings } = useStore();
+  // A fresh fork opens in the harness's chat panel: by default only in VS
+  // Code, where that panel is right there; the desktop app shows the buttons.
+  const openForks = settings?.settings.openForkInChat ?? api.host === "vscode";
   const [editingLabel, setEditingLabel] = useState(false);
   const [fork, setFork] = useState<ForkResult | null>(null);
   const [opened, setOpened] = useState<ActionResult | null>(null);
@@ -143,8 +146,7 @@ export function NodePanel() {
     try {
       const res = await api.forkAt(meta.id, node.id);
       setFork(res);
-      // In VS Code the fork goes straight to the harness's own chat panel.
-      if (res.ok && res.open && api.host === "vscode" && NATIVE[res.open.provider]) {
+      if (res.ok && res.open && openForks && NATIVE[res.open.provider]) {
         setOpened(await api.openNative(res.open));
       }
     } catch (e) {
