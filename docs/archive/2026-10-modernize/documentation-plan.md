@@ -1,6 +1,6 @@
 # Documentation approach after modernization
 
-> **Implemented as a documentation structure, 2026-10-27.** The four current documents are linked from the [repository README](../../../README.md). This proposal is retained as the rationale for consolidation. The owner subsequently authorized grouping historical documents in this folder. Implementation of this plan does not resolve the [open round 3 findings](review-findings-round-3.md).
+> **Implemented as a documentation structure, 2026-10-27.** The four current documents are linked from the [repository README](../../../README.md). This proposal is retained as the rationale for consolidation. The owner subsequently authorized grouping historical documents in this folder. The [round 3 findings](review-findings-round-3.md) were resolved separately; see its resolution.
 
 Proposal based on `58cf671..b400dbd`, 2026-10-27. This is an information-architecture and maintenance proposal; existing files have not been moved or rewritten by this review.
 

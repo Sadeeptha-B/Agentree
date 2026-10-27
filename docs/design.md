@@ -1,8 +1,8 @@
 # Agentree design and engineering notes
 
-Current implementation context through `b400dbd`, consolidated on 2026-10-27 from the engineering material formerly in `AGENTS.md`. This document preserves provider research, observed behavior, rationale and earlier failed approaches. Working commands and ownership boundaries live in [AGENTS.md](../AGENTS.md); user workflows, settings and limitations live in the [user guide](user-guide.md).
+Current implementation context, consolidated on 2026-10-27 from the engineering material formerly in `AGENTS.md` and updated for the round 3 resolution. This document preserves provider research, observed behavior, rationale and earlier failed approaches. Working commands and ownership boundaries live in [AGENTS.md](../AGENTS.md); user workflows, settings and limitations live in the [user guide](user-guide.md).
 
-> **Open review:** the [round 3 review](archive/2026-10-modernize/review-findings-round-3.md) has eight unaddressed findings, including two P1 history-correctness defects. Consolidating these notes fixes no application behavior. Relevant sections below distinguish intended contracts from known violations. Read the affected finding before changing identity, membership, metadata, provider settings or persistence.
+> **Round 3 review:** all eight findings of the [round 3 review](archive/2026-10-modernize/review-findings-round-3.md) were resolved on 2026-10-27; its [resolution](archive/2026-10-modernize/review-findings-round-3.md#resolution) maps each to its fix and regression test. The contracts they established are described below: [membership and focus](#membership-focus-and-family-lifecycle), the [identity scheme](#identity-scheme-and-compatibility), [metadata across copies](#one-session-several-folders), [settings isolation](#settings) and [annotation reconciliation](#annotations).
 
 ## Contents
 
@@ -63,8 +63,9 @@ electron/providers/codex.ts         Codex provider: paginated page graph, legacy
 electron/providers/codex-appserver.ts  JSON-RPC client for `codex app-server` (thread/fork)
 electron/providers/copilot.ts       Copilot CLI event logs → nodes, fork-by-copy
 electron/providers/stitch.ts        key-based stitching of copy-forked sessions into one tree
+electron/identity.ts           semantic node identity (stableIds): digests, bounded qualification, older schemes
 electron/lineage.ts            fork-parentage sidecar (~/.agentree/lineage.json)
-electron/meta.ts               sidecar annotation store (~/.agentree/meta/), alias-aware read/write
+electron/meta.ts               sidecar annotation store (~/.agentree/meta/): every identity scheme, member reconciliation
 electron/watch.ts              live view: fs.watch + stat polling of targets the backend resolved
 shared/types.ts                node/session/health types + the IPC contract
 shared/render.ts               lineage walks, branch counting, token math
@@ -153,22 +154,26 @@ keep them apart, because each answers a different question:
 
 | Layer | Field | Answers |
 |---|---|---|
-| **message** (semantic) | `stableIds` | which message is this, in every copy? Claude `m:<message.id>` / `u:<promptId>|<digest>`, Codex `<turnId>:<itemId>`; text-only evidence (no prompt id, Copilot, legacy Codex) is qualified by its parent's identity. Keys annotations, carries a selection across a re-rooted reload |
-| **occurrence** (physical) | `sourceSessionId`, `occurrences` | which session supplies the drawn message, and which other members have copies under their own raw ids? An occurrence of a part does not prove membership of the whole merged group |
+| **message** (semantic) | `stableIds` (`legacyIds`) | which message is this, in every copy? Claude `m:<message.id>` / `u:<promptId>|<digest>`, Codex `<turnId>:<itemId>`; text-only evidence (no prompt id, Copilot, legacy Codex) is qualified by its parent's identity ([scheme](#identity-scheme-and-compatibility)). Keys annotations, carries a selection across a re-rooted reload |
+| **occurrence** (physical) | `sourceSessionId`, `occurrences` | which session supplies the drawn message, and which other members have copies under their own raw ids? |
+| **membership** | `heldBy` | which member sessions' history holds ALL of this node — the sessions that open or resume onto it? |
 | **vendor turn** | `turnId` | which unit of work can a fork cut after? (Codex turn; Claude records are each an anchor) |
 | **display group** | `absorbedIds`, `lastRawId`, `forkBlocked` | what the same-role merge folded together, and the ONE anchor a fork after it uses |
 | **edge** | `branchKind` | how the branch into it was made: `fork` (a new session) or `edit` (a Codex prompt edit, same thread) |
 
 The rule that ties them: **display grouping never has authority over a fork
-cut.** The merge never folds across vendor turns, and a merged node's anchor
-and verdict are its LAST part's. The intended contract is that an enabled
-"fork after this turn" includes every message the node shows and nothing
-after it. This last-anchor rule does not establish that the selected member
-holds the whole group: [round 3 finding 2](archive/2026-10-modernize/review-findings-round-3.md#r3-2)
-shows a quiet fork's endpoint being merged with later parent-only history. (The
-first version fell back to an earlier anchorable part and silently forked
-before a shown mid-turn message or second prompt; two such nodes existed in
-the owner's Codex history.) Physical file locators live on the session
+cut, nor over membership.** The merge never folds across vendor turns, and a
+merged node's anchor and verdict are its LAST part's, so an enabled "fork
+after this turn" includes every message the node shows and nothing after it.
+(The first version fell back to an earlier anchorable part and silently
+forked before a shown mid-turn message or second prompt; two such nodes
+existed in the owner's Codex history.) Nor does the merge fold across a
+member's **endpoint**: a run continues only into a part held by exactly the
+sessions that held the part before it. So whoever holds a copy of any part
+of a merged node holds all of it, and a quiet fork's selected endpoint shows
+only what it contains. (Before, a quiet fork that copied one reply was drawn
+ending on that reply merged with its parent's next one — [round 3 finding 2](archive/2026-10-modernize/review-findings-round-3.md#r3-2).)
+Physical file locators live on the session
 (`MemberInfo.files`), not on occurrences: a session stored in several files
 is read as one record set, so every anchor resolves whichever file holds
 it (see "One session, several folders").
@@ -179,41 +184,65 @@ Canonical display ownership, member history and action intent are separate:
 
 - `sourceSessionId` is the canonical session supplying a drawn node. Shared
   history appears once; it can belong to several members simultaneously.
-- For copied Claude/Copilot histories, `holdsCopy()` currently accepts a node
-  owned by the member or having any occurrence for it. The same-role merge
-  unions occurrences. This is lossy at partial-group endpoints (finding 2);
-  it must not be treated as proof of complete group membership.
-- Codex membership is determined from each thread's current page/base history,
-  not just physical occurrences: an inherited turn need not be copied into
-  that thread's files. `MemberInfo.tipId` is computed by the provider.
-- `openSession(id, {focus})` uses the member's tip to choose a node, but does
-  not retain the focused member. The panel derives Open/Resume from the node's
-  canonical owner. Thus a quiet fork can select shared history yet offer its
-  parent's actions ([finding 3](archive/2026-10-modernize/review-findings-round-3.md#r3-3)).
+- `heldBy` lists every member whose history holds the whole node, set by the
+  provider on a loaded family. Claude, Copilot and legacy Codex: the owner
+  plus every session with a copy (`copyHolders`: owner and occurrences),
+  which is exact because the merge never crosses an endpoint. Codex: the
+  threads whose current page/base history holds the turn — an inherited turn
+  need not be copied into a thread's files, so occurrences can't say it.
+- `MemberInfo.tipId` is the newest leaf among the nodes that list the member
+  in `heldBy` (`assignTips`), the same rule for every provider.
+- **Focus is view state** (`State.focus` in the renderer store). Opening a
+  member by name (`openSession(id, {focus})`) selects its tip and focuses it.
+  Open/Resume act on the focused member wherever the selected node lists it
+  in `heldBy`, otherwise on the node's canonical owner (`actionTarget` in
+  `shared/render.ts`). A node held by several members offers a selector in
+  the panel's Session block, which changes the focus. Selecting nodes keeps
+  the focus; a reload keeps it while the member is still in the family;
+  opening the family without one clears it. Before, a quiet fork's shared
+  node offered its parent's actions ([finding 3](archive/2026-10-modernize/review-findings-round-3.md#r3-3)).
 - A fork's first own node receives the fork edge/tag. A quiet fork still
   counts as a member and appears in the list's fork names, but creates no
   distinct drawn suffix.
 - Families can gain members, lose their original root, or split if the
   evidence linking them disappears. Reload tries surviving known members
-  and carries selection by `stableIds`; it cannot reconstruct an identity or
-  relationship for which no surviving evidence exists. Annotation survival
-  has an additional membership-growth defect, described under [Annotations](#annotations).
+  (the focused member among the first) and carries selection by `stableIds`;
+  it cannot reconstruct an identity or relationship for which no surviving
+  evidence exists. Annotations are reconciled as membership grows (see
+  [Annotations](#annotations)).
 
-These are current implementation facts and intended distinctions, not a claim
-that the unresolved endpoint/focus fixes already exist. A fix must preserve
-exact member paths and action targets through grouping and reload.
+### Identity scheme and compatibility
 
-Stable keys are also a persistence contract. In the current implementation,
-the whole-text digest is the first 20 hex characters of SHA-1 after whitespace
-runs are collapsed and surrounding whitespace trimmed. Strong message/prompt
-keys can stand alone; a weak text key is qualified by the parent's identity
-as a literal `key@parentIdentity` string (or `key@root`). Whitespace folding can
-merge meaningful code differences ([finding 1](archive/2026-10-modernize/review-findings-round-3.md#r3-1));
-literal ancestor strings cause quadratic total identity size in weak-key
-chains ([finding 7](archive/2026-10-modernize/review-findings-round-3.md#r3-7)).
-Meaning-preserving normalization and bounded encoding remain work to do, with
-compatibility for already written sidecars; no new identity version is
-introduced by this documentation change.
+Stable keys are a persistence contract: annotations are saved under them.
+`electron/identity.ts` owns the scheme; this is **scheme 3**.
+
+- Text is digested **exactly as parsed** — the first 20 hex characters of
+  SHA-1 over the whole text, whitespace included. Indentation and line breaks
+  are meaning in code, and every copy-fork preserves text byte for byte.
+  (Scheme 2 folded whitespace runs, so two prompts differing only in an
+  indented line collided: [finding 1](archive/2026-10-modernize/review-findings-round-3.md#r3-1).)
+- A **strong** key stands alone: `m:<message.id>`, `u:<promptId>|<digest>`,
+  Codex `<turnId>:<itemId>`.
+- A **weak** key (text only: a Claude prompt with no prompt id, Copilot,
+  legacy Codex) is qualified by its parent's identity at a fixed size:
+  `w:` + 24 hex of SHA-1 over the JSON array `[key, parentIdentity]`
+  (`"root"` without a parent). Exact copies get identical keys; the same text
+  under another parent gets another. (Scheme 2 used the literal
+  `key@parentIdentity`, quadratic in a long chain: [finding 7](archive/2026-10-modernize/review-findings-round-3.md#r3-7).
+  On the owner's history the longest key went from 945 characters to 91.)
+
+Earlier keys stay readable (`meta.ts`, see [Annotations](#annotations)):
+
+| Scheme | Form | Found by |
+|---|---|---|
+| 1 | Raw per-file uuids | The node's own, absorbed and occurrence ids |
+| 2 | Strong keys with a whitespace-folded digest; weak keys as `k_n@…@k_1@base` literals | `legacyIds`: each part's scheme-2 identity where it differs, computed with the same bounded hash over the folded keys. A saved literal is converted to that form by folding it from its base (`scheme2Fingerprint`), so the quadratic string is never rebuilt |
+| 3 | As above | `stableIds` |
+
+There is no version field: the forms don't collide (scheme-2 weak keys
+contain `@`, scheme-3 weak keys start `w:`). A scheme-2 key that two nodes of
+the family now claim — the folded-whitespace collision itself — is given to
+neither; it stays on disk, unmigrated.
 
 ## Harnesses, one tree model
 
@@ -409,25 +438,32 @@ folder and continues it, under the **same session id**, in the new one.
 Verified on the target machine: an 11.8 MB copy in the old folder whose 838
 uuids are all in the 23.5 MB copy in the new one (a record-for-record
 prefix). Session ids are therefore indexed across folders before grouping,
-and one id's copies are resolved by uuid containment (`resolveSource`):
+and one id's copies are resolved into one logical session (`resolveSource`)
+by **two separate reductions** (`logicalRecords`):
 
-- a copy whose uuids are all in another copy is a **shadow**: never parsed,
-  counted as hidden in health, but kept in the cache signatures and watched,
-  so a shadow that grows is re-resolved;
-- copies neither of which contains the other **diverged** (same prefix, a
-  different suffix each). They are read as the union of their records, the
-  oldest-activity copy first, then each other copy from its first new uuid.
-  Shared UUIDs allow both continuations to draw without content matching.
-  This is conversation deduplication, not proof that every record is preserved.
+- **Conversation** (records with a uuid) is deduplicated by uuid
+  containment. A copy whose uuids are all in another copy is a **shadow**: its
+  conversation is not parsed, it counts as hidden in health, but it is kept
+  in the cache signatures and watched, so a shadow that grows is re-resolved.
+  Copies neither of which contains the other **diverged** (same prefix, a
+  different suffix each); their conversation is the union of their records,
+  the oldest-activity copy first, then each other copy from its first new
+  uuid. Shared uuids let both continuations draw without content matching.
+  A uuid two copies rewrote differently keeps the first copy's payload.
+- **Metadata** — the uuid-less records Agentree reads: `custom-title`,
+  `ai-title`, `summary` — is taken from **every** copy, shadows and the part
+  of a diverged copy before its first new uuid included, ordered by when each
+  copy was last written (file mtime, then activity, then path), each in file
+  order; the parser and fork writer take the last. These records carry no
+  timestamp, so the write order of the files holding them is the only order
+  there is. Before, a contained copy's newer rename was ignored, and so was
+  a diverged copy's rename made before it diverged ([round 3 finding 5](archive/2026-10-modernize/review-findings-round-3.md#r3-5)).
+- The logical session's `touchedAt` is the newest of any copy's; its
+  creation time is its oldest copy's.
 
-**Unresolved metadata boundary:** contained copies are omitted wholesale,
-including UUID-less title records. The diverged-copy union starts at the first
-unseen UUID and ignores repeated UUIDs; metadata before that point can also
-be lost. UUID containment does not establish complete record equivalence,
-and conflicting payloads for one UUID are not independently reconciled.
-[Round 3 finding 5](archive/2026-10-modernize/review-findings-round-3.md#r3-5)
-reproduces a newer rename being ignored. Conversation deduplication and
-metadata reduction need separate policies; no such fix is implied here.
+UUID containment proves conversation records are held elsewhere, nothing
+more; it is never used to drop metadata. Queue operations (uuid-less but
+positional, for mid-turn messages) travel with the conversation stream.
 
 Never pick a copy by recency or size: that silently drops a real branch.
 The fork writer reads the same union and writes next to the newest copy that
@@ -476,13 +512,16 @@ parent that grew after the fork just keeps its extra turns.
   `u:<promptId>|<digest of the whole text>` for prompts. Never the
   timestamp, which a fork re-stamps on its last record; never an opening
   gist, which merged two prompts sharing a long preamble and hung one's
-  answer under the other. Without a `promptId` (older transcripts) two
-  prompts currently merge when their whitespace-normalized text matches under
-  the same matched parent. Exact same-text copies are indistinguishable and
-  branch at their replies, but distinct code indentation can also be collapsed
-  incorrectly (round 3 finding 1). Legacy Codex and Copilot use role + the same
-  whole-text digest: copied prefixes preserve text, but normalization still
-  needs to avoid equating distinct continuations.
+  answer under the other; never whitespace-folded text, which merged two
+  prompts differing only in indentation. Without a `promptId` (older
+  transcripts) two prompts merge only when their exact text matches under
+  the same matched parent: exact same-text copies are indistinguishable and
+  branch at their replies. Legacy Codex and Copilot use role + the same exact
+  whole-text digest; their copied prefixes are byte copies.
+- One whitespace-folded comparison remains, deliberately: matching a queued
+  mid-turn message against the records of the same transcript
+  (`spliceInterjections`), where the queue holds the text as typed. It is a
+  dedup inside one file, never an identity.
 - A copy that merges into an existing node is recorded as an **occurrence**
   (`{sessionId, id}`), not dropped.
 - Stitching runs on **unmerged** per-message nodes. The same-role merge runs
@@ -625,7 +664,9 @@ cost branch structure.
 A linear run of consecutive same-role nodes becomes one node: an agent loop
 (assistant → assistant → assistant), or a slash command's several user records.
 It only merges where the parent has exactly one child, never across sessions,
-never across vendor turns (`turnId`), and never into a fork's first turn. The
+never across vendor turns (`turnId`), never into a fork's first turn, and
+never across a member's endpoint (the next part must be held by the same
+sessions, `copyHolders`). The
 merged node's fork anchor and `forkBlocked` are its **last** part's, so a run
 ending in a mid-turn attachment is unforkable as a whole ("fork the turn
 after it"). Usage is **summed** here, because each part
@@ -633,9 +674,13 @@ is a distinct API call. That's the opposite of the per-block merge, where every
 record repeats one message's usage. Absorbed ids are retained so sidecar
 annotations still resolve.
 
-Here “across sessions” means different canonical `sourceSessionId` values.
-It does not prevent crossing a copied member's endpoint within a shared run;
-that unresolved distinction is [round 3 finding 2](archive/2026-10-modernize/review-findings-round-3.md#r3-2).
+“Across sessions” means different canonical `sourceSessionId` values; the
+endpoint rule covers what that can't see, a copied member ending inside a run
+its parent owns ([round 3 finding 2](archive/2026-10-modernize/review-findings-round-3.md#r3-2)).
+So the same transcript can draw as one node alone and as two in a family
+with a quiet fork ending between them. Display grouping is a view, and
+annotations are keyed per part, so a label made on the merged node shows on
+both parts after such a split.
 
 ### Most "branches" were an artifact
 
@@ -772,6 +817,12 @@ The tree follows the transcripts on disk.
   (`watchLater`). A failed resolution (worker restarting) is retried with
   back-off, and once the watch is live it fires one change to reconcile
   anything written between the read and the watch.
+- Resolution goes through the `Provider` interface (`watchTargets`), like
+  list/load/fork: a session's targets come from the enabled provider that
+  owns it, the welcome list's from each enabled provider, each guarded so one
+  failing provider leaves the others' targets. A disabled provider's
+  discovery is never invoked. (Before, opening any tree first scanned Claude's
+  folders, enabled or not: [round 3 finding 6](archive/2026-10-modernize/review-findings-round-3.md#r3-6).)
 - The renderer drops results for a view that's gone: every open/close bumps a
   view generation, and a reload that resolves after a close is discarded.
 - A family can lose its root (its transcript deleted) while a fork survives.
@@ -801,16 +852,11 @@ The tree follows the transcripts on disk.
   choice).
 - Clicking a fork name, or opening a card whose search hit only a fork,
   opens the tree **focused** on that member: the selection lands on
-  `MemberInfo.tipId`, the newest leaf among the turns the member holds. The
-  provider decides "holds": Claude and Copilot by `sourceSessionId` or an
-  occurrence, Codex by the thread's current history (a fork by reference
-  copies nothing, so it has no occurrences). A fork with no turn of its own
-  lands on the turn it was forked at.
-- The intended exact member endpoint and focused-member action context have
-  known gaps: a merge can extend a quiet fork's selected display beyond its
-  prefix, and its shared node can route Open/Resume to the parent. See
-  [membership and focus](#membership-focus-and-family-lifecycle) and round 3
-  findings 2–3 before relying on those behaviors as invariants.
+  `MemberInfo.tipId`, the newest leaf among the nodes the member holds
+  (`heldBy`), and Open/Resume act on that member over its whole history,
+  shared prefix included. A fork with no turn of its own lands on the turn
+  it was forked at, showing nothing past it. See
+  [membership and focus](#membership-focus-and-family-lifecycle).
 - Health rows sit above the list. Their provider chips are the agent filter
   (one agent, or all; `providerFilter` in the store). It combines with the
   directory filter and the search, and the rail counts only what it lets
@@ -850,17 +896,21 @@ lives, never how a transcript is interpreted**: no setting touches the
 parsers, stitching, fork rules or health thresholds.
 
 - Scan settings are applied in the worker: `registry.enabled` excludes agents
-  from listing/loading/fork routing, but non-null watch-target discovery still
-  probes disabled providers ([round 3 finding 6](archive/2026-10-modernize/review-findings-round-3.md#r3-6)).
-  Complete scan/watch isolation is the intended contract, not yet a guarantee.
+  from listing, loading, fork routing, health and watch-target discovery —
+  every store call goes through the `Provider` interface, so a disabled
+  agent's discovery functions are never invoked (a test spies on them).
   All-archived Codex families can be listed (`archived` on the entry); data locations go
   environment variable > setting > default (`paths.ts`, `configuredPath`).
   `AGENTREE_HOME` is environment-only: the settings live in it.
 - View settings are applied in the renderer: the sort time, remembered view
   state (compress, directory and agent filters, saved debounced) and whether
   a new fork opens in the chat panel (unset: VS Code yes, desktop no).
-  Disabling remembered state clears `view`, but an already scheduled 500 ms
-  save can recreate it ([finding 8](archive/2026-10-modernize/review-findings-round-3.md#r3-8)).
+  With remembering off **no view is kept**, enforced in three places: turning
+  it off cancels a pending 500 ms save; a save that fires rechecks the flag;
+  and `validate` drops `view` whenever `rememberView` is false, so whichever
+  write reaches the worker last, none recreates it. Settings responses are
+  applied in request order: one that answers after a newer write was sent is
+  dropped ([finding 8](archive/2026-10-modernize/review-findings-round-3.md#r3-8)).
 - The file is validated field by field, so a hand-broken file falls back
   per field, and cached by (mtime, size), so a write from the other host's
   worker is picked up. Writes are atomic per file, like the sidecars.
@@ -901,28 +951,33 @@ by the turn's **semantic identity** (`stableIds`), not by a uuid:
 
 - **writing** (`registry.annotate` → `writeAnnotation`) loads the family and
   writes the patch into **every member's** file under the node's stable ids:
-  one atomic replacement per sidecar, however many ids;
-- **reading** (`applyAnnotations`) checks every member's file for any of
-  them.
+  one atomic replacement per sidecar, however many ids. Any older-scheme
+  entry for the node in that file gets the same patch, so a cleared label
+  can't resurface through it;
+- **reading** (`applyAnnotations`) checks every member's file, in member
+  order, for any of the node's current keys; without a hit, for the keys an
+  [earlier identity scheme](#identity-scheme-and-compatibility) saved it
+  under (scheme 2, then scheme 1's raw uuids, usually in the root's file only).
 
-**Migration (v1 → v2).** Sidecars written before stable ids key entries by
-raw uuid, usually in the root's file only. Reading still finds those through
-the node's own, merged-in and copied ids, and the first time one is found it
-is carried forward under the stable ids into every member's file. That is the
-current migration: lazy, idempotent (a node with a v2 entry never looks for
-v1), and without a persisted version flag. Here v1/v2 describe key schemes,
-not JSON schema-version fields; Codex's raw and semantic node IDs already
-coincide. Writes also patch any v1 entry they find, so a cleared label can't
-resurface through that entry. A v1 entry
-whose source transcript was deleted before Agentree ever loaded the family
-with this version has nothing on disk to map to, and is not recovered.
+**Reconciliation.** What is shown is made durable: every member's sidecar
+that holds no entry for the node under its current keys gets the shown entry
+— a member discovered after the annotation was written (a new fork), or
+every member for an older-scheme hit (the migration, lazy and idempotent).
+So an annotation survives the deletion of the member it was written in,
+once the enlarged family has been loaded ([round 3 finding 4](archive/2026-10-modernize/review-findings-round-3.md#r3-4)).
+Rules that keep this from going wrong:
 
-**Membership-growth defect:** stable-key hits are read but are not replicated
-into a member discovered after the annotation was written. Loading the enlarged
-family before deleting its original root still does not backfill that new
-member, so the annotation can disappear after root removal. This is separate
-from the legacy-before-first-load limitation
-([round 3 finding 4](archive/2026-10-modernize/review-findings-round-3.md#r3-4)).
+- a member's existing entry is never overwritten: no conflict is resolved
+  by a read, and once the family's sidecars agree a load writes nothing;
+- a cleared annotation is an absent entry, and absence is never copied, so
+  reconciliation can't undo a clear made through `writeAnnotation`;
+- older-scheme entries are read, never rewritten or deleted.
+
+Not covered: a clear can only reach the sidecars of the members known when
+it is made (there are no tombstones), so a stale entry in a sidecar that
+rejoins later is shown again. An entry whose transcript was deleted before
+any family holding the node was loaded has nothing on disk to map to, and is
+not recovered.
 
 Sidecar writes are atomic per file, not across processes: the desktop app and
 the extension writing the same sidecar at the same moment can lose one side's
@@ -937,25 +992,23 @@ Under the configured Agentree home (the guide owns its location/overrides):
 |---|---|
 | `settings.json` | Validated settings object; absent/invalid fields fall back independently. Saved view is optional. See the [configuration contract](user-guide.md#settings-and-data-locations) and `electron/settings.ts` |
 | `lineage.json` | Object mapping child session IDs to parent IDs; written for Agentree-made Claude/Copilot forks. Claude validates explicit parentage against cycles. Copilot needs this because it regenerates `workspace.yaml` |
-| `meta/<sessionId>.json` | Object mapping semantic/raw node keys to `{label?, status?, note?}`. Status is `favorite` or `dead-end`; merged nodes can have several keys. Read lookup takes the first matching entry in member/key order; there is no timestamp-based conflict resolution |
+| `meta/<sessionId>.json` | Object mapping node keys (any [identity scheme](#identity-scheme-and-compatibility)) to `{label?, status?, note?}`. Status is `favorite` or `dead-end`; merged nodes can have several keys. Read lookup takes the first matching entry in member/key order; there is no timestamp-based conflict resolution |
 
 Cleared annotation fields are removed from JSON, and an empty entry is removed.
-There are no persisted tombstones or explicit identity/schema versions.
-Writes merge a patch with current file contents and use a temporary file plus
-rename. That protects against a partial JSON replacement, not concurrent
-read/modify/write lost updates. Adding reconciliation must account for stale
-entries and clears rather than blindly resurrecting old values.
+There are no persisted tombstones and no version field; key schemes are told
+apart by form. Writes merge a patch with current file contents and use a
+temporary file plus rename. That protects against a partial JSON replacement,
+not concurrent read/modify/write lost updates.
 
 `meta.ts` also attempts the old `~/.agentview` → Agentree-home directory rename
 once at module import when the default location is in use and the new home
 does not exist. An explicit `AGENTREE_HOME` suppresses that migration, another
 reason to set disposable roots before importing stores in probes.
 
-Keep future identity normalization, bounded-key encoding and annotation
-reconciliation backward-compatible. A provider-qualified ID or different hash
-cannot simply replace existing keys without defining how saved metadata and
-re-rooted selections are found. The round 3 report proposes fix directions;
-it does not define an already implemented replacement format.
+Keep any future identity change backward-compatible the same way: a new
+scheme must say how keys saved under each earlier one are found (as
+`legacyIds` and `scheme2Fingerprint` do) and when the hit is ambiguous. A
+provider-qualified ID or different hash cannot simply replace existing keys.
 
 ## Windows
 
@@ -994,13 +1047,12 @@ it does not define an already implemented replacement format.
 
 ## Tests
 
-The [round 3 review](archive/2026-10-modernize/review-findings-round-3.md#verification-and-its-limits)
-records 81 passing tests, typecheck and both production builds at `b400dbd`.
-Its eight additional reproductions assert defects outside that coverage;
-they do not make those defects passing regression tests. The examples below
-describe useful existing coverage, not a promise that every possible member
-endpoint or native resume was checked. Working commands and safe probe rules
-are maintained in [AGENTS.md](../AGENTS.md#commands-and-verification).
+After the [round 3 resolution](archive/2026-10-modernize/review-findings-round-3.md#resolution):
+101 tests in 12 files, typecheck and both production builds pass. Each round 3
+finding has a regression test that failed on the pre-fix code. The examples
+below describe coverage, not a promise that every possible member endpoint
+or native resume was checked. Working commands and safe probe rules are
+maintained in [AGENTS.md](../AGENTS.md#commands-and-verification).
 
 `npm test` (vitest) runs over synthetic fixtures generated by
 `test/fixtures/make-fixtures.mjs`. Record shapes are copied from real
@@ -1019,7 +1071,13 @@ dangling parent, one root per path), not session counts.
   logical parent), a malformed file (failed, not hidden), annotation aliases
   and survival of a deleted root, and the fork writer's output (format,
   lineage, fork-of-fork, logical chain across /compact, a prompt without
-  `promptId` as the endpoint, pre-compact refusal).
+  `promptId` as the endpoint, pre-compact refusal). Round 3: prompts that
+  differ only in indentation; quiet forks ending between two assistant and
+  between two user records (exact `heldBy`, tips, the fork at that endpoint,
+  and the focused member's action target); annotations saved under scheme 2
+  (folded and literal-chain keys, an ambiguous one, clearing them); a label
+  made before its fork existed outliving the original; a rename in a
+  contained copy and in a diverged copy before its first new record.
 - **Codex:** a `.zst` edit page, a fork through an archived thread, a
   guardian thread, a missing base, a copied-prefix fork in the item
   vocabulary, early usage, a rename in the index, an unknown item vocabulary
@@ -1037,8 +1095,16 @@ dangling parent, one root per path), not session counts.
   the retry on its replacement must survive the old worker's late `exit`;
   disposal is final.
 - **Renderer store** (`src/store.test.ts`, in `src/` for the DOM config):
-  a reload resolving after close, a family whose root was deleted, and
-  cleared fields sent as `null`.
+  a reload resolving after close, a family whose root was deleted, cleared
+  fields sent as `null`, the focused member's Open/Resume payload across
+  selection and reload, disabling remembered view inside the save debounce,
+  and an older settings response arriving last.
+- **Identity** (`test/identity.test.ts`): text-keyed identity size grows
+  linearly, copies agree, the same text under another parent and
+  whitespace-only differences stay distinct, scheme-2 literals are
+  recognised; text-keyed stitching keeps indentation variants apart.
+- **Registry**: no duplicate list entries; watch discovery never invokes a
+  disabled provider. **Settings**: no view kept while remembering is off.
 - **App-server client:** the real client against `test/fake-codex` — the
   request shape, a JSON-RPC error, a server exiting mid-request, and on
   Windows a `.cmd` override with a space in its path. The synthetic rollouts
@@ -1076,6 +1142,6 @@ the parser.
 
 ## Known gaps
 
-The [user guide](user-guide.md#limitations-and-open-review) owns the user-facing limitations. The [current roadmap](roadmap.md) tracks remaining work and links the unresolved review. Detailed reproductions and acceptance conditions remain in the [round 3 report](archive/2026-10-modernize/review-findings-round-3.md); earlier handoffs, review resolutions and the completed roadmap are in the [historical record](archive/2026-10-modernize/README.md).
+The [user guide](user-guide.md#limitations) owns the user-facing limitations. The [current roadmap](roadmap.md) tracks remaining work. Review reproductions, acceptance conditions and their resolutions remain in the [round 3 report](archive/2026-10-modernize/review-findings-round-3.md); earlier handoffs, review resolutions and the completed roadmap are in the [historical record](archive/2026-10-modernize/README.md).
 
 Observed counts and timings in these notes describe particular 2026-10-27 datasets, rather than release guarantees. Source inspection, fixture coverage and an executed vendor resume are different strengths of evidence. Keep that distinction when updating a claim.

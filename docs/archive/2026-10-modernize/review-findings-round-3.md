@@ -1,6 +1,42 @@
 # Full modernization review, round 3 — 2026-10-27
 
-> **OPEN — documentation consolidation, 2026-10-27.** All eight findings remain unaddressed. Moving this report and consolidating the documentation does not resolve them. Reviewed range: `58cf671..b400dbd`. See the [current roadmap](../../roadmap.md) and [design notes](../../design.md).
+> **Historical review, `58cf671..b400dbd`; resolved.** The original report follows the resolution below unchanged; its line references are to `b400dbd`. Current contracts are in the [design notes](../../design.md), remaining work in the [roadmap](../../roadmap.md).
+
+<a id="resolution"></a>
+
+> **Resolution (2026-10-27, same branch, after `f1ed0b9`).** All eight
+> findings had merit; each was reproduced by a regression test that fails
+> on the pre-fix code and passes after it. Findings 2 and 3 were fixed
+> together at the model boundary, as the architecture assessment advised:
+> a node now records **membership** (`heldBy`: every member whose history
+> holds all of it) apart from canonical ownership, the display merge never
+> folds across a member's endpoint, and member focus is renderer view state.
+> Findings 1 and 7 were one persistence change: identity scheme 3, with a
+> written compatibility path for scheme 2's keys. Owner-confirmed decisions
+> (raw Codex reads, app-server-only Codex forks, the reimplemented Claude
+> fork, no SDK) stand.
+>
+> | # | Fix | Test |
+> |---|---|---|
+> | 1 | Text identities digest the exact parsed text (`electron/identity.ts`); stitching keys too. Annotations saved under the folded digest are found through `legacyIds` and carried forward; a folded key two nodes now claim is given to neither. Matching a queued message within one transcript keeps whitespace folding, documented as a dedup, not an identity | claude: indentation-only prompt pair; scheme-2 keys incl. ambiguous; identity: text-keyed stitching |
+> | 2 | `mergeSameRoleRuns` continues a run only into a part held by the same sessions (`copyHolders`), so a merged node's holders hold all of it; tips come from `heldBy` for every provider (`assignTips`) | claude: quiet forks ending between two assistant and two user records; tip, `heldBy`, and the fork at that endpoint |
+> | 3 | Store keeps `focus`; Open/Resume use `actionTarget` (focused member where it holds the node, else the owner); a selector on shared nodes changes focus; focus survives selection and reload while a member | store: action payload across selection/reload, focus dropped when the member leaves; claude: target on real provider output |
+> | 4 | `applyAnnotations` fills every member sidecar lacking an entry for a shown annotation (new members, older-scheme hits); never overwrites, never copies absence, writes nothing once sidecars agree | claude: label made before its fork, original deleted; no write on a settled load |
+> | 5 | `logicalRecords` deduplicates conversation by uuid but reduces `custom-title`/`ai-title`/`summary` across every copy (shadows included) in file-write order | claude: rename in a contained copy; diverged copy renamed before its first new uuid |
+> | 6 | `Provider.watchTargets`; the registry asks only enabled providers (the owner for a session, each guarded for the list) | registry: disabled provider's discovery never invoked |
+> | 7 | Weak keys are `w:` + 24 hex of SHA-1 over `[key, parentIdentity]`; scheme-2 literals are matched by folding them to the same form (`scheme2Fingerprint`), never rebuilt | identity: linear size, copies agree, same text under another parent distinct |
+> | 8 | Disabling cancels a pending save, a firing save rechecks, `validate` keeps no `view` while `rememberView` is off, and settings responses older than the latest request are dropped | store: off inside the debounce; out-of-order response. settings: late view write |
+>
+> Verification: 101 tests in 12 files (81 before), typecheck and both
+> production builds pass; host bundles still contain no provider code. A
+> read-only audit of the owner's real stores (scratch Agentree home) found the
+> same 154 families (61 Claude, 87 Codex, 5 Copilot; 20 multi-member) and
+> 1,510 nodes as before the change, with identical members, roots, branch
+> points, titles and member tips, no duplicate ids, dangling parents or
+> cycles, and unchanged scan times (~5.5 s cold, ~30 ms warm). The longest
+> semantic id fell from 945 to 91 characters. No saved annotations existed
+> there, so the scheme-2 migration is covered by fixtures only. Not done: a
+> rendered UI check of the new member selector, or any native resume.
 
 Reviewed **`58cf671..b400dbd`**, including the roadmap implementation and follow-up commits: 119 changed files, not just the commits since the previous review. Read alongside `AGENTS.md`, `CLAUDE.md`, README, the user guide, both handoffs, roadmap, previous findings and their resolution notes.
 

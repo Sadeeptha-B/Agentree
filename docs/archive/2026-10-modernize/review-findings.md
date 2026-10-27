@@ -1,6 +1,6 @@
 # Modernization review — 2026-10-27
 
-> **Historical review, `58cf671..91185af`.** Its resolution and subsequent corrections remain below. The [round 3 review](review-findings-round-3.md) is still open. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md); historical references below retain their original context.
+> **Historical review, `58cf671..91185af`.** Its resolution and subsequent corrections remain below. The later [round 3 review](review-findings-round-3.md) has its own resolution. Engineering material previously in `AGENTS.md` now lives in [design.md](../../design.md); historical references below retain their original context.
 
 > **Resolution (2026-10-27, same branch).** Every finding below was checked
 > against the code and, where possible, the owner's data or the real vendor
