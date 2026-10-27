@@ -103,5 +103,10 @@ describe("tree layout with fork tags", () => {
       n("l1", "r", { branchKind: "fork", sourceSessionId: "a", label: "mine" }),
     ];
     expect(Object.fromEntries(forkTags(nodes, members))).toEqual({ a1: "Try rollup", b1: "Benchmarks", c1: "Docs pass" });
+    // A default "<parent> (fork)" title names nothing; the id tells forks apart.
+    const native = [member("root", "Root"), { ...member("d0000000-1", "Root (fork)"), parentId: "root" }];
+    expect(forkTags([n("r", null), n("d1", "r", { branchKind: "fork", sourceSessionId: "d0000000-1" })], native).get("d1")).toBe(
+      "fork d0000000",
+    );
   });
 });
