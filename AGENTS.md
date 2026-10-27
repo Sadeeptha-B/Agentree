@@ -749,6 +749,10 @@ The tree follows the transcripts on disk.
     loads with `thread_settings_applied`, `task_*`, `token_count`,
     `token_usage_record` and a `response_item`; five threads idle for days
     looked minutes old when sorted by every record.
+    A Codex fork nobody has spoken in has no item at all, and its reloads
+    append the same bookkeeping: it dates from its creation
+    (`session_meta`), and the family's time counts items only — before,
+    one reloaded quiet fork floated a September family to the top.
   - `touchedAt`, the newest timestamp on **any** record ("last file
     change"), shown in the card's tooltip.
 
