@@ -128,12 +128,15 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
       if (treeId !== undefined) {
         matched.add(n.id);
         // The copy is dropped from the drawing but not from the model: where
-        // else the turn lives, and under which id, is kept per session.
+        // else the turn lives, under which id, and the work its session
+        // recorded under it after copying it, are kept per session. A copy's
+        // own records — the re-stamped last one too — are its start and end,
+        // never activity, so copied history adds none.
         const kept = outById.get(treeId);
         if (kept) {
           kept.occurrences = [
             ...(kept.occurrences ?? []),
-            { sessionId: m.sessionId, id: n.id },
+            { sessionId: m.sessionId, id: n.id, ...(n.activeUntil ? { activeUntil: n.activeUntil } : {}) },
             ...(n.occurrences ?? []),
           ];
         }

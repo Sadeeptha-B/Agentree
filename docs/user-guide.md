@@ -185,9 +185,10 @@ conversation, on one graph.
 - **Time runs left to right on one axis for every lane**: turns drawn one
   above the other happened at about the same time. A pause of 20 minutes or
   more with no recorded activity (counted from the last message, tool call
-  or tool result before it, so a long agent reply or tool run isn't a
-  pause, nor work still going from the night before) is drawn as a short
-  shaded break labelled with its length, and a
+  or tool result before it in any chat, so a long agent reply or tool run
+  isn't a pause, nor a fork's work under a turn it shares, nor work still
+  going from the night before) is drawn as a short shaded break labelled
+  with its length, and a
   burst of turns keeps a minimum spacing, so the axis is to scale only
   between breaks. A short dotted lead-in means the turn continues one from
   an earlier day.

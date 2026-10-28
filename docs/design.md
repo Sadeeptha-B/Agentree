@@ -272,8 +272,16 @@ records). Codex: items other than messages, within the node's own turn.
 Copilot: non-message activity events after it (tool runs, `assistant.turn_end`).
 A drawn turn's own records never count for the turn before it, so a reply
 isn't kept busy until the next prompt. A merged node takes the latest of its
-parts'. Only the day view's idle time reads it (`activeEndOf`); display,
-"latest" and fork points never do.
+parts'. Activity is a fact about a physical copy, not about the drawn node:
+when stitching draws a shared turn once, each other copy keeps its own on its
+occurrence (`occurrences[].activeUntil`), the work its session recorded under
+the turn after copying it (a fork that went on with a tool run). A copy's own
+records, the re-stamped last one included, are its start and end, never
+activity, so copied history adds none. Codex needs no such rule: a fork's
+work after a shared turn is a turn of its own. Only the day view's idle time
+reads any of this (`activeEndOf`, and the occurrences as runs); display,
+"latest" and fork points never do
+([day-view round 4, finding 3](archive/day-view/review-findings-day-view-round-4.md#dv4-3)).
 
 ### Identity scheme and compatibility
 
@@ -1001,12 +1009,14 @@ build; nothing about parsing, stitching or identity is specific to it.
   records can reach the window, and keeps the nodes whose **start**
   (`timestamp`) falls in it — a node belongs to the day it started, like the
   list's dates. A disabled provider is never listed or loaded (tested).
-  Nodes that started earlier and end at or after `start` come along as
-  `running` (`DayRun`: lane, start, end): no mark, but the day isn't idle
-  while they run (see Layout). Running is by recorded activity
-  (`activeEndOf`: the end, or `activeUntil`), so a tool run past midnight
-  counts too. Their chat is listed so the filters apply to them; a lane is
-  drawn only for a chat with turns.
+  Work in the window with no mark of its own in its lane comes along as
+  `running` (`DayRun`: lane, start, end): nodes that started earlier and
+  whose recorded activity (`activeEndOf`) reaches `start`, so a tool run
+  past midnight counts too; and a member's work under its copy of a shared
+  turn (an occurrence's `activeUntil`), in **that member's** lane, from the
+  turn's start. No mark, but the day isn't idle while they run (see
+  Layout). Their chat is listed, so the filters apply to them as to that
+  lane; a lane is drawn only for a chat with turns.
 - **Which families load.** No record of a family is newer than `touchedAt`
   or older than `startedAt`, so only families with `touchedAt >= start` and
   `startedAt < end` are loaded. `startedAt` is a *narrowing bound only*: each
@@ -1057,7 +1067,15 @@ build; nothing about parsing, stitching or identity is specific to it.
   ([round 2, finding 1](archive/day-view/review-findings-day-view-round-2.md#dv2-1);
   [round 3, findings 1 and 2](archive/day-view/review-findings-day-view-round-3.md#dv3-1)).
   The family is usually one the same pass just reloaded, so this rarely
-  costs a load. `openSession(family, { focus: lane, select: ref })` selects
+  costs a load. An answer is adopted only for the intent it was asked
+  about: the pending target (each request a new object) and the selected
+  key, in the snapshot it was picked from. If either changed while the
+  worker read, `loadDay` drops the answer and asks again from the newer
+  intent. That snapshot is still on screen, so a turn picked meanwhile is
+  sent by its drawn end, never kept by its key; a newer request for the same
+  day isn't consumed by an older answer, nor moved to that answer's day
+  ([round 4, findings 1 and 2](archive/day-view/review-findings-day-view-round-4.md#dv4-1)).
+  This is the tree's `view` rule, for the day. `openSession(family, { focus: lane, select: ref })` selects
   by `locate`, else the usual tip. Opening asks for the focused lane's
   family first, since the family it was listed in may have split since
   ([finding 3](archive/day-view/review-findings-day-view.md#dv-3)).
@@ -1094,9 +1112,11 @@ build; nothing about parsing, stitching or identity is specific to it.
   recorded activity: from the latest `activeEndOf` (end, or the activity
   under it) of every earlier turn, in any lane, to the next start — an
   hour-long reply, or one message followed by an hour of tool calls, then a
-  prompt a minute later, is one idle minute, not a break. `running` turns
-  seed that end, so work that ran past midnight keeps the next morning busy
-  until it stopped. Display spans alone didn't establish this: Copilot's
+  prompt a minute later, is one idle minute, not a break. Runs join that end
+  in start order, before the first turn starting after them: work that ran
+  past midnight keeps the next morning busy until it stopped, and a fork's
+  work under a shared reply keeps the parent's next prompt from looking
+  idle, without making the pause before that work busy. Display spans alone didn't establish this: Copilot's
   `assistant.turn_end` and trailing tool events never reached the layout
   ([round 3, finding 3](archive/day-view/review-findings-day-view-round-3.md#dv3-3)).
   A harness that writes nothing while it works still reads as idle.
@@ -1463,12 +1483,15 @@ dangling parent, one root per path), not session counts.
   through the fork, never in an unrelated chat with the same opening text;
   a Claude end split past the window is found there, not as its shorter
   head; a conversation's latest-ending turn; and `activeUntil` from Copilot
-  tool runs and `turn_end`, a Codex command within its turn, and a run past
-  midnight as `running`. `test/endpoints.test.ts`: Claude tool results and
+  tool runs and `turn_end`, a Codex command within its turn, a run past
+  midnight as `running`, and a Copilot fork's work under a reply it shares
+  as a run in the fork's lane (within a day and past midnight; a Claude
+  fork's re-stamped copy as none). `test/endpoints.test.ts`: Claude tool results and
   tool-only replies count for the reply, the next prompt doesn't.
   `src/day-layout.test.ts`: tracks, breaks measured from the latest
-  activity (a long reply, a tool run, or one running in from the day
-  before, isn't idle), a chat landing on its latest-ending turn, lanes as
+  activity (a long reply, a tool run, one running in from the day before,
+  or a fork's run from when it started, isn't idle), a chat landing on its
+  latest-ending turn, lanes as
   tall as their wrapped names and folders (fuzzed too; wide scripts and
   emoji counted wide), dots that shrink
   with zoom without touching, time labels kept apart at any zoom, ticks,
@@ -1480,9 +1503,11 @@ dangling parent, one root per path), not session counts.
   end kept after its group split, the focused chat's family asked first),
   a day refresh sending the drawn turn and its holders and following what
   the worker found (re-rooted; on another day, deselected; a turn picked
-  meanwhile stands), `showInDay` from a tree (the tree closes, hiding
-  filters give way, a target for a day left meanwhile is dropped) and from
-  a card whose latest turn started the day before, stale day results, and
+  meanwhile asked for again by its drawn end, across a split), `showInDay`
+  from a tree (the tree closes, hiding filters give way, a target for a day
+  left meanwhile is dropped), from a card whose latest turn started the day
+  before, and twice for one day (the newer request stands), stale day
+  results, and
   the day markup (lane folders only under All conversations, no paths in
   the chat list, the ◷ card button, the empty day's latest turn).
   **Registry:** with `AGENTREE_READ_ONLY_STORES` a fork is refused before
