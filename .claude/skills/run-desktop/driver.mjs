@@ -183,6 +183,26 @@ const COMMANDS = {
     return "OK";
   },
 
+  /** wheel <css> <deltaY> [shift] — a browser-native wheel over the element's centre (zoom; with shift, pan). */
+  async wheel(arg) {
+    const [sel, dy, shift] = arg.split(/\s+/);
+    NEED_ARG(sel && dy, "wheel <css selector> <deltaY> [shift]");
+    const box = await evaluate(`(() => {
+      const r = document.querySelector(${JSON.stringify(sel)})?.getBoundingClientRect();
+      return r && { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`);
+    if (!box) return "NOT_FOUND";
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x: box.x,
+      y: box.y,
+      deltaX: 0,
+      deltaY: Number(dy),
+      modifiers: shift === "shift" ? 8 : 0,
+    });
+    return "OK";
+  },
+
   /** type <text> — type into the focused element. */
   async type(text) {
     await send("Input.insertText", { text });

@@ -75,6 +75,7 @@ describe("day view", () => {
   const activity: DayActivity = {
     start,
     end: new Date(2026, 9, 29).getTime(),
+    running: [],
     chats: [
       { provider: "claude", familyId: P, sessionId: P, title: "Build walkthrough", familyTitle: "Build walkthrough", cwd: "/work", parentSessionId: null },
       { provider: "claude", familyId: P, sessionId: F, title: "Try rollup", familyTitle: "Build walkthrough", cwd: "/work", parentSessionId: P },
@@ -119,7 +120,7 @@ describe("day view", () => {
       listMode: "day",
       day: "2026-10-28",
       sessions: [latest],
-      dayActivity: { start, end: start + 1, chats: [], turns: [] },
+      dayActivity: { start, end: start + 1, chats: [], turns: [], running: [] },
     });
     const html = renderToStaticMarkup(<Welcome />);
     expect(html).toContain("No activity on");

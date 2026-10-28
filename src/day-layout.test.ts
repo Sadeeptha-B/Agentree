@@ -168,7 +168,33 @@ describe("day layout", () => {
     expect(stepLane(l, key("a2"), 1)).toBe(key("b1")); // 4 min away, b2 is 4 too: the earlier wins
     expect(stepLane(l, key("b2"), -1)).toBe(key("a2"));
     expect(stepLane(l, key("a1"), -1)).toBeNull();
-    expect(laneLatest(l.lanes[1])).toBe(key("b2"));
+    expect(laneLatest(l, l.lanes[1])?.key).toBe(key("b2"));
+  });
+
+  it("lands a chat on its latest-ENDING turn, as the tree ranks its tip", () => {
+    // test/endpoints.test.ts's branch: answer A runs 10:01–10:03, answer B starts and ends at 10:02.
+    const a = chat("A");
+    const l = buildDayLayout(
+      [
+        turn(a, "q", null, 0),
+        turn(a, "ansA", "q", 1, { role: "assistant", endedAt: T0 + 3 * MIN }),
+        turn(a, "ansB", "q", 2, { role: "assistant" }),
+      ],
+      [a],
+    );
+    expect(laneLatest(l, l.lanes[0])?.turn.id).toBe("ansA");
+    // ←/→ still walk in start order.
+    expect(stepInLane(l, dot(l, "ansA").key, 1)).toBe(dot(l, "ansB").key);
+  });
+
+  it("isn't idle while a turn from before the day is still running", () => {
+    const a = chat("A");
+    const b = chat("B");
+    // A's reply ran 23:55–00:30 (yesterday's mark); B talks at 00:01 and 00:02; A's next prompt is at 00:31.
+    const turns = [turn(b, "b1", null, 1), turn(b, "b2", "b1", 2), turn(a, "a2", "a1", 31)];
+    expect(buildDayLayout(turns, [a, b]).breaks).toHaveLength(1);
+    const running = [{ provider: "claude" as const, familyId: "A", sessionId: "A", start: T0 - 5 * MIN, end: T0 + 30 * MIN }];
+    expect(buildDayLayout(turns, [a, b], running).breaks).toEqual([]);
   });
 
   it("ignores turns whose chat isn't listed, and chats without turns", () => {

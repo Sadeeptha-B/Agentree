@@ -57,7 +57,7 @@ export function descendToNewestLeaf(id: NodeId, children: Map<string, TurnNode[]
 export const oldest = (ts: number[]): number => (ts.length && ts.every((t) => t > 0) ? Math.min(...ts) : 0);
 
 /** When a node's last part was written: a merged or streamed node ends after it starts. */
-export const endOf = (n: TurnNode): number => Math.max(n.timestamp, n.endedAt ?? 0);
+export const endOf = (n: Pick<TurnNode, "timestamp" | "endedAt">): number => Math.max(n.timestamp, n.endedAt ?? 0);
 
 /** The latest-ending of `list`; the first in list order on a tie. */
 const latest = (list: TurnNode[]): NodeId => list.reduce((a, b) => (endOf(a) >= endOf(b) ? a : b)).id;
@@ -159,23 +159,33 @@ export function resolveForkPoint(nodes: TurnNode[], p: ForkPoint): TurnNode | nu
 export const refOf = (n: TurnNode): NodeRef => ({ point: forkPointOf(n), ...(n.stableIds ? { stableIds: n.stableIds } : {}) });
 
 /**
- * Where a drawn node lives in a newer snapshot of its family. First the node
- * that ends where it did: new membership can split a display group under the
- * same head id, and the head alone would quietly shorten the selected
- * prefix. Then the same id (a group that grew, or was folded into a longer
- * one), then the same semantic identity (a re-rooted family draws it under
- * other ids). Null when none does.
+ * Where a drawn node lives in a newer snapshot. First the node that ends
+ * where it did: new membership can split a display group under the same
+ * head id, and the head alone would quietly shorten the selected prefix.
+ * Then the same id (a group that grew, or was folded into a longer one),
+ * then the same semantic identity (a re-rooted family draws it under other
+ * ids). Null when none does.
+ *
+ * Over anything that knows its own `NodeRef`: a family's nodes (`locate`),
+ * or the day view's turns, which carry theirs. One rule for every snapshot
+ * a selection crosses — a tree reload, a day refresh, a day turn opened in
+ * its tree.
  */
-export function locate(nodes: Iterable<TurnNode>, ref: NodeRef): TurnNode | null {
-  const all = [...nodes];
-  const same = resolveForkPoint(all, ref.point);
-  if (same) return same;
-  const byId = all.find((n) => n.id === ref.point.nodeId);
-  if (byId) return byId;
+export function locateBy<T>(items: Iterable<T>, refOfItem: (item: T) => NodeRef, ref: NodeRef): T | null {
+  const all = [...items].map((item) => ({ item, r: refOfItem(item) }));
+  const ends = (r: NodeRef) => r.point.sessionId === ref.point.sessionId && r.point.endId === ref.point.endId;
+  const same = all.find(({ r }) => r.point.nodeId === ref.point.nodeId);
+  if (same && ends(same.r)) return same.item;
+  const hits = all.filter(({ r }) => ends(r));
+  if (hits.length === 1) return hits[0].item;
+  if (same) return same.item;
   const ids = new Set(ref.stableIds ?? []);
   if (!ids.size) return null;
-  return all.find((n) => n.stableIds?.some((s) => ids.has(s))) ?? null;
+  return all.find(({ r }) => r.stableIds?.some((s) => ids.has(s)))?.item ?? null;
 }
+
+/** `locateBy` over a family's nodes. */
+export const locate = (nodes: Iterable<TurnNode>, ref: NodeRef): TurnNode | null => locateBy(nodes, refOf, ref);
 
 /** Why a fork whose point no longer resolves was refused. */
 export const FORK_POINT_GONE =
