@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { startBackend } from "./backend-client.ts";
 import { nativeLink } from "./native.ts";
+import { handOffRefused } from "./readonly.ts";
 import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { watchLater, type Watcher } from "./watch.ts";
@@ -109,6 +110,8 @@ ipcMain.handle(CH.setSettings, (_e, patch: SettingsPatch) => backend.setSettings
 // Hand a session to VS Code: the OS routes the vscode:// deep link to the
 // harness's extension, exactly as a click on the link would.
 ipcMain.handle(CH.openNative, async (_e, ref: SessionRef): Promise<ActionResult> => {
+  const refused = handOffRefused();
+  if (refused) return refused;
   const link = nativeLink(ref);
   if (!link) return { ok: false, error: "This harness has no VS Code extension to open sessions in." };
   try {
@@ -125,6 +128,8 @@ ipcMain.handle(CH.openNative, async (_e, ref: SessionRef): Promise<ActionResult>
 // The worker says what to run — argv plus the environment that points the
 // harness at the store Agentree read it from; this process only opens the window.
 ipcMain.handle(CH.resumeInTerminal, async (_e, ref: SessionRef): Promise<ActionResult> => {
+  const refused = handOffRefused();
+  if (refused) return refused;
   const launch = await backend.resumeLaunch(ref.provider, ref.sessionId);
   if (!launch) return { ok: false, error: "Unknown session." };
   return openTerminal(launch.argv, ref.cwd, launch.env);

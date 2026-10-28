@@ -21,6 +21,7 @@ const chat = (sessionId: string, opts: Partial<DayChat> = {}): DayChat => ({
 
 const turn = (c: DayChat, id: string, parentId: string | null, minute: number, opts: Partial<DayTurn> = {}): DayTurn => ({
   id,
+  ref: { point: { nodeId: id, sessionId: c.sessionId, endId: id } },
   parentId,
   sessionId: c.sessionId,
   familyId: c.familyId,
@@ -57,6 +58,28 @@ describe("day layout", () => {
     // Just under the threshold is drawn to scale (capped), not as a break.
     const near = buildDayLayout([turn(a, "q1", null, 0), turn(a, "q2", "q1", IDLE_BREAK / MIN - 1)], [a]);
     expect(near.breaks).toEqual([]);
+  });
+
+  it("is idle only while nothing runs: a long reply is not a pause", () => {
+    const a = chat("A");
+    const b = chat("B");
+    // A reply running 09:00–10:00, then a prompt at 10:01: one idle minute.
+    const working = buildDayLayout(
+      [turn(a, "q1", null, 0), turn(a, "r1", "q1", 0, { role: "assistant", endedAt: T0 + 60 * MIN }), turn(a, "q2", "r1", 61)],
+      [a],
+    );
+    expect(working.breaks).toEqual([]);
+    // The pause is measured from the latest end in ANY lane, and labelled with its length.
+    const l = buildDayLayout(
+      [
+        turn(a, "a1", null, 0, { endedAt: T0 + 50 * MIN }),
+        turn(b, "b1", null, 10, { endedAt: T0 + 30 * MIN }),
+        turn(b, "b2", "b1", 95),
+      ],
+      [a, b],
+    );
+    expect(l.breaks).toEqual([{ x0: dot(l, "b1").x, x1: dot(l, "b2").x, ms: 45 * MIN }]);
+    expect(l.ticks.filter((t) => t.kind === "resume").map((t) => t.t)).toEqual([T0 + 95 * MIN]);
   });
 
   it("puts a second branch of one chat on its own track", () => {

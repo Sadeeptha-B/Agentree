@@ -11,7 +11,7 @@ import type {
   TurnNode,
 } from "../shared/types.ts";
 import { HealthScan, minorVersion } from "./health.ts";
-import { readLineage } from "./lineage.ts";
+import { lineageOf, readLineage } from "./lineage.ts";
 import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
 import { resumeCommandFor } from "./launch.ts";
@@ -1570,6 +1570,10 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
   const activeAt = Math.max(...group.map((g) => g.activeAt));
   const touchedAt = Math.max(...group.map((g) => g.touchedAt));
   const startedAt = oldest(group.map((g) => g.startedAt));
+  // Every copy of every member, and the lineage entries that can group and
+  // orient them: what a load reads, annotations aside.
+  const sig = `${signature(group)}|${lineageOf(group.map((g) => g.id))}`;
+  const revision = digest(sig);
 
   if (group.length === 1) {
     const g = group[0];
@@ -1582,6 +1586,7 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
       activeAt,
       touchedAt,
       startedAt,
+      revision,
       nodeCount: g.nodeCount,
       branchPoints: g.branchPoints,
       resumeCommand: claudeResume(g.id, g.cwd),
@@ -1590,7 +1595,6 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
     };
   }
 
-  const sig = signature(group);
   const hit = familyMetas.get(sig);
   if (hit) return hit;
   const fam = built ?? buildFamily(group);
@@ -1604,6 +1608,7 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
     activeAt,
     touchedAt,
     startedAt,
+    revision,
     nodeCount: fam.nodes.length,
     branchPoints: countBranchPoints(childIndex(fam.nodes)),
     resumeCommand: claudeResume(fam.rootId, r.cwd),

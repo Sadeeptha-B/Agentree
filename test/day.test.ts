@@ -1,17 +1,21 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DayActivity } from "../shared/types.ts";
 
-// Disposable homes before any provider is imported. Claude and Codex read the
-// committed fixtures (read-only); Copilot reads one synthetic session written
-// here, whose turns straddle midnight.
+// Disposable homes before any provider is imported. Claude and Codex read
+// copies of the fixtures (the last suite rewrites them); Copilot reads one
+// synthetic session written here, whose turns straddle midnight.
 const COPILOT_ID = "c0c0c0c0-0000-4000-8000-000000000001";
 vi.hoisted(() => {
   const p = require("node:path") as typeof import("node:path");
   const fs = require("node:fs") as typeof import("node:fs");
   const tmp = fs.mkdtempSync(p.join((require("node:os") as typeof import("node:os")).tmpdir(), "agentree-day-"));
   process.env.AGENTREE_HOME = p.join(tmp, "agentree");
-  process.env.CLAUDE_CONFIG_DIR = p.join(__dirname, "fixtures", "claude", "2.1");
-  process.env.CODEX_HOME = p.join(__dirname, "fixtures", "codex", "0.162", "home");
+  fs.cpSync(p.join(__dirname, "fixtures", "claude", "2.1"), p.join(tmp, "claude"), { recursive: true });
+  fs.cpSync(p.join(__dirname, "fixtures", "codex", "0.162", "home"), p.join(tmp, "codex"), { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = p.join(tmp, "claude");
+  process.env.CODEX_HOME = p.join(tmp, "codex");
   process.env.COPILOT_HOME = p.join(tmp, "copilot");
   const id = "c0c0c0c0-0000-4000-8000-000000000001";
   const dir = p.join(tmp, "copilot", "session-state", id);
@@ -152,5 +156,43 @@ describe("dayActivity", () => {
     expect(a.turns.length).toBeGreaterThan(0);
     expect(a.turns.every((t) => t.provider !== "claude")).toBe(true);
     expect(a.chats.every((c) => c.provider !== "claude")).toBe(true);
+  });
+});
+
+describe("day cache revisions", () => {
+  // Runs last: it rewrites the copied stores.
+  it("re-projects a family whose files changed under unchanged times and counts", () => {
+    const X = "01900000-0000-7000-8000-000000000001";
+    const P = "11111111-1111-4111-8111-111111111111";
+    const meta = (id: string) => listAllSessions().find((m) => m.id === id)!;
+    dayActivity(OCT1, OCT1 + DAY);
+    const [x0, p0] = [meta(X), meta(P)];
+
+    // A rename touches only Codex's name index.
+    fs.appendFileSync(
+      path.join(process.env.CODEX_HOME!, "session_index.jsonl"),
+      JSON.stringify({ id: X, thread_name: "Renamed X", updated_at: "2026-10-01T10:09:00.000Z" }) + "\n",
+    );
+    // A record written again under the same uuid and timestamp, with new text.
+    const file = path.join(process.env.CLAUDE_CONFIG_DIR!, "projects", "c--work-demo", `${P}.jsonl`);
+    const line = fs.readFileSync(file, "utf8").split("\n").find((l) => l.includes('"uuid":"p-a2"'))!;
+    fs.appendFileSync(file, line.replace("Added vitest.", "Added vitest and a CI job.") + "\n");
+
+    const [x1, p1] = [meta(X), meta(P)];
+    // What the old key was made of didn't move; the revision did.
+    expect([x1.touchedAt, x1.activeAt, x1.nodeCount, x1.members]).toEqual([x0.touchedAt, x0.activeAt, x0.nodeCount, x0.members]);
+    expect([p1.touchedAt, p1.activeAt, p1.nodeCount, p1.members]).toEqual([p0.touchedAt, p0.activeAt, p0.nodeCount, p0.members]);
+    expect(x1.revision).not.toBe(x0.revision);
+    expect(p1.revision).not.toBe(p0.revision);
+
+    vi.mocked(claude.loadSession).mockClear();
+    vi.mocked(codex.loadCodexSession).mockClear();
+    const a = dayActivity(OCT1, OCT1 + DAY);
+    // Only the two families written to are read again.
+    expect(loads()).toBe(2);
+    expect(a.chats.find((c) => c.sessionId === X)?.title).toBe("Renamed X");
+    const tree = loadAnySession(P)!.nodes.find((n) => n.id === "p-a2")!;
+    expect(tree.text).toContain("CI job");
+    expect(a.turns.find((t) => t.id === "p-a2")?.preview).toBe(tree.text.replace(/\s+/g, " ").trim());
   });
 });

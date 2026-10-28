@@ -80,8 +80,8 @@ describe("day view", () => {
       { provider: "claude", familyId: P, sessionId: F, title: "Try rollup", familyTitle: "Build walkthrough", cwd: "/work", parentSessionId: P },
     ],
     turns: [
-      { id: "u1", parentId: null, sessionId: P, familyId: P, provider: "claude", role: "user", preview: "Explain the build", timestamp: start + 3_600_000 },
-      { id: "f1", parentId: "u1", sessionId: F, familyId: P, provider: "claude", role: "user", preview: "Try rollup instead", timestamp: start + 7_200_000, branchKind: "fork" },
+      { id: "u1", ref: { point: { nodeId: "u1", sessionId: P, endId: "u1" } }, parentId: null, sessionId: P, familyId: P, provider: "claude", role: "user", preview: "Explain the build", timestamp: start + 3_600_000 },
+      { id: "f1", ref: { point: { nodeId: "f1", sessionId: F, endId: "f1" } }, parentId: "u1", sessionId: F, familyId: P, provider: "claude", role: "user", preview: "Try rollup instead", timestamp: start + 7_200_000, branchKind: "fork" },
     ],
   };
 

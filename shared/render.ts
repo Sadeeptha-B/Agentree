@@ -1,4 +1,4 @@
-import type { ForkPoint, ForkSummary, MemberInfo, NodeId, SessionDetail, SessionId, SessionRef, TurnNode, UsageSnapshot } from "./types.ts";
+import type { ForkPoint, ForkSummary, MemberInfo, NodeId, NodeRef, SessionDetail, SessionId, SessionRef, TurnNode, UsageSnapshot } from "./types.ts";
 
 export type NodeMap = Map<NodeId, TurnNode>;
 export const ROOT_KEY = "\0root";
@@ -153,6 +153,28 @@ export function resolveForkPoint(nodes: TurnNode[], p: ForkPoint): TurnNode | nu
   if (same && endsAt(same, p)) return same;
   const hits = nodes.filter((n) => endsAt(n, p));
   return hits.length === 1 ? hits[0] : null;
+}
+
+/** What a drawn node stands for, to find it again in a newer snapshot (`locate`). */
+export const refOf = (n: TurnNode): NodeRef => ({ point: forkPointOf(n), ...(n.stableIds ? { stableIds: n.stableIds } : {}) });
+
+/**
+ * Where a drawn node lives in a newer snapshot of its family. First the node
+ * that ends where it did: new membership can split a display group under the
+ * same head id, and the head alone would quietly shorten the selected
+ * prefix. Then the same id (a group that grew, or was folded into a longer
+ * one), then the same semantic identity (a re-rooted family draws it under
+ * other ids). Null when none does.
+ */
+export function locate(nodes: Iterable<TurnNode>, ref: NodeRef): TurnNode | null {
+  const all = [...nodes];
+  const same = resolveForkPoint(all, ref.point);
+  if (same) return same;
+  const byId = all.find((n) => n.id === ref.point.nodeId);
+  if (byId) return byId;
+  const ids = new Set(ref.stableIds ?? []);
+  if (!ids.size) return null;
+  return all.find((n) => n.stableIds?.some((s) => ids.has(s))) ?? null;
 }
 
 /** Why a fork whose point no longer resolves was refused. */

@@ -414,11 +414,14 @@ describe("day view state", () => {
     })),
     [member("P", null)],
   );
+  /** A turn as the day view drew it: by where it ended. */
+  const drawn = (id: string, endId = id) => ({ point: { nodeId: id, sessionId: "P", endId } });
   const activity = (day: string, ids: string[]): DayActivity => ({
     ...dayBounds(day),
     chats: [],
     turns: ids.map((id) => ({
       id,
+      ref: { point: { nodeId: id, sessionId: "P", endId: id } },
       parentId: null,
       sessionId: "P",
       familyId: "P",
@@ -431,7 +434,7 @@ describe("day view state", () => {
 
   it("opens a turn picked in the day view, with the collapsed run hiding it opened", async () => {
     api.getSession.mockResolvedValueOnce(linear);
-    await useStore.getState().openSession("P", { focus: "P", select: "u2" });
+    await useStore.getState().openSession("P", { focus: "P", select: drawn("u2") });
     const s = useStore.getState();
     expect(s.selected).toBe("u2");
     expect(s.focus).toBe("P");
@@ -440,9 +443,45 @@ describe("day view state", () => {
     expect(s.following).toBe(false);
   });
 
+  it("opens a turn picked in the day view on the range it was drawn with, after its group split", async () => {
+    // The day view drew P's reply as one node through p-a2; a quiet fork then split it.
+    const split = detail(
+      "P",
+      [
+        node("p-u1", null, "Q", "u:q", "P", ["P", "F"]),
+        node("p-a1", "p-u1", "A", "m:a", "P", ["P", "F"]),
+        node("p-a2", "p-a1", "B", "m:b", "P"),
+        node("p-u2", "p-a2", "Q2", "u:q2", "P"),
+      ],
+      [member("P", null), member("F", "P")],
+    );
+    api.getSession.mockImplementation(async (id: string) => (id === "P" ? split : null));
+    await useStore.getState().openSession("P", {
+      focus: "P",
+      select: { point: { nodeId: "p-a1", sessionId: "P", endId: "p-a2" }, stableIds: ["m:a", "m:b"] },
+    });
+    // The end it was drawn with, not the shorter node under the same head.
+    expect(useStore.getState().selected).toBe("p-a2");
+    api.getSession.mockReset();
+  });
+
+  it("asks for the focused chat's family first: the family it was listed in may have split", async () => {
+    // The day view drew F's turn in family P; deleting the bridge left F on its own.
+    api.getSession.mockImplementation(async (id: string) => (id === "F" ? reRooted : null));
+    await useStore.getState().openSession("P", {
+      focus: "F",
+      select: { point: { nodeId: "f-a1-old", sessionId: "P", endId: "gone" }, stableIds: ["m:a"] },
+    });
+    expect(api.getSession.mock.calls[0]).toEqual(["F"]);
+    // Found again by its semantic identity, under F's own id.
+    expect(useStore.getState()).toMatchObject({ selected: "f-a1", focus: "F" });
+    expect(useStore.getState().session?.meta.id).toBe("F");
+    api.getSession.mockReset();
+  });
+
   it("falls back to the tip when the picked turn is no longer in the family", async () => {
     api.getSession.mockResolvedValueOnce(linear);
-    await useStore.getState().openSession("P", { select: "gone" });
+    await useStore.getState().openSession("P", { select: drawn("gone") });
     expect(useStore.getState()).toMatchObject({ selected: "a3", following: true });
     expect(useStore.getState().expanded.size).toBe(0);
   });
@@ -476,7 +515,7 @@ describe("day view state", () => {
   it("comes back to the same day and turn when the tree is closed", async () => {
     useStore.getState().set({ listMode: "day", day: "2026-10-01", daySelected: "claude:P:u2" });
     api.getSession.mockResolvedValueOnce(linear);
-    await useStore.getState().openSession("P", { select: "u2" });
+    await useStore.getState().openSession("P", { select: drawn("u2") });
     useStore.getState().close();
     expect(useStore.getState()).toMatchObject({ listMode: "day", day: "2026-10-01", daySelected: "claude:P:u2" });
   });

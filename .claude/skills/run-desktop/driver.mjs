@@ -21,6 +21,8 @@ const PORT = Number(process.env.AGENTREE_DRIVER_PORT || 9333);
 let child = null;
 let ws = null;
 let mode = null;
+/** This run's temp directory: the copied fixtures, the scratch Agentree home, the Chromium profile. */
+let home = null;
 let seq = 0;
 const waiting = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -66,7 +68,7 @@ const NEED_ARG = (a, usage) => {
 };
 
 const COMMANDS = {
-  /** launch [fixtures|real] — fixtures (default): the committed test fixtures; real: your stores, read-only. */
+  /** launch [fixtures|real] — fixtures (default): a temp copy of the test fixtures; real: your stores, read-only. */
   async launch(arg) {
     if (child) return "already launched";
     mode = arg === "real" ? "real" : "fixtures";
@@ -80,11 +82,19 @@ const COMMANDS = {
     delete env.ELECTRON_RUN_AS_NODE;
     delete env.AGENTVIEW_DEV_URL;
     if (mode === "fixtures") {
-      env.CLAUDE_CONFIG_DIR = path.join(REPO, "test", "fixtures", "claude", "2.1");
-      env.CODEX_HOME = path.join(REPO, "test", "fixtures", "codex", "0.162", "home");
-      env.COPILOT_HOME = path.join(tmp, "copilot");
+      // A copy: a fork made while driving writes next to its source, and
+      // must never land in the committed fixtures.
+      const fixtures = path.join(tmp, "fixtures");
+      fs.cpSync(path.join(REPO, "test", "fixtures", "claude", "2.1"), path.join(fixtures, "claude"), { recursive: true });
+      fs.cpSync(path.join(REPO, "test", "fixtures", "codex", "0.162", "home"), path.join(fixtures, "codex"), { recursive: true });
+      env.CLAUDE_CONFIG_DIR = path.join(fixtures, "claude");
+      env.CODEX_HOME = path.join(fixtures, "codex");
+      env.COPILOT_HOME = path.join(fixtures, "copilot");
     } else {
       for (const v of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME"]) delete env[v];
+      // The app itself refuses every fork, open and resume (electron/readonly.ts),
+      // whatever control or key triggers it.
+      env.AGENTREE_READ_ONLY_STORES = "1";
     }
     const electron = createRequire(path.join(REPO, "package.json"))("electron");
     child = spawn(electron, [`--remote-debugging-port=${PORT}`, `--user-data-dir=${path.join(tmp, "profile")}`, "."], {
@@ -108,6 +118,7 @@ const COMMANDS = {
       }
     }
     if (!target) throw new Error(`no page on port ${PORT} (another app on it? set AGENTREE_DRIVER_PORT)`);
+    home = tmp;
     ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       ws.addEventListener("open", resolve);
@@ -125,7 +136,7 @@ const COMMANDS = {
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 860, deviceScaleFactor: 1, mobile: false });
     // Ready: the welcome screen has scanned (the count replaces "scanning…").
     await waitFor(`/\\d+ conversations/.test(document.body.innerText)`, "the conversation list", 60_000);
-    return `launched (${mode}); AGENTREE_HOME=${env.AGENTREE_HOME}`;
+    return `launched (${mode}); stores and AGENTREE_HOME under ${tmp}`;
   },
 
   /** ss [name] — screenshot of the window. */
@@ -141,7 +152,6 @@ const COMMANDS = {
   /** click <css> — DOM click on the first match; SVG elements get a dispatched click event. */
   async click(sel) {
     NEED_ARG(sel, "click <css selector>");
-    guard(await evaluate(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? ""`));
     return evaluate(`(() => {
       const el = document.querySelector(${JSON.stringify(sel)});
       if (!el) return "NOT_FOUND";
@@ -153,7 +163,6 @@ const COMMANDS = {
   /** click-text <text> — click the first button or link whose text contains <text>. */
   async "click-text"(text) {
     NEED_ARG(text, "click-text <text>");
-    guard(text);
     return evaluate(`(() => {
       const els = [...document.querySelectorAll('button, a, [role="button"]')];
       const t = ${JSON.stringify(text)};
@@ -263,9 +272,16 @@ const COMMANDS = {
 
   async quit() {
     ws?.close();
-    child?.kill();
+    if (child) {
+      const gone = new Promise((r) => child.once("exit", r));
+      child.kill();
+      await Promise.race([gone, sleep(5_000)]);
+    }
     child = null;
     ws = null;
+    // The copied stores and scratch home go with the run.
+    if (home) fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    home = null;
     return "bye";
   },
 
@@ -273,16 +289,6 @@ const COMMANDS = {
     return `commands: ${Object.keys(COMMANDS).join(", ")} (see SKILL.md)`;
   },
 };
-
-/**
- * Forks write into the harness's own store. On real stores that is never
- * done from here (AGENTS.md: never test forks against original stores).
- */
-function guard(text) {
-  if (mode === "real" && /fork after|fork this/i.test(text)) {
-    throw new Error("refused: forking writes to your real store; launch fixtures for fork checks");
-  }
-}
 
 const interactive = process.stdin.isTTY;
 const rl = readline.createInterface({ input: process.stdin, terminal: interactive });

@@ -57,10 +57,18 @@ export function DayView() {
   const selected = (daySelected && layout?.byKey.get(daySelected)) || null;
   const select = (key: string | null) => set({ daySelected: key });
   const open = (d: DayDot) =>
-    void openSession(d.turn.familyId, { focus: d.turn.sessionId, select: d.turn.id });
+    void openSession(d.turn.familyId, { focus: d.turn.sessionId, select: d.turn.ref });
 
   const svgRef = useRef<SVGSVGElement>(null);
-  const [view, setView] = useState<View>({ tx: LABEL_W, ty: 0, k: 1 });
+  // The timeline is the keyboard's target: picking a chat or a turn from a
+  // button moves focus here, so Enter opens the turn instead of pressing the
+  // button again.
+  const timelineRef = useRef<HTMLDivElement>(null);
+  // A viewport kept from before a tree was opened from this day: Esc comes
+  // back to the same place, not to a fresh fit.
+  const kept = useStore.getState().dayViewport;
+  const restored = kept?.day === day ? kept : null;
+  const [view, setView] = useState<View>(restored ?? { tx: LABEL_W, ty: 0, k: 1 });
   const [hover, setHover] = useState<DayDot | null>(null);
   const [hoverLane, setHoverLane] = useState<number | null>(null);
   const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
@@ -81,16 +89,26 @@ export function DayView() {
     setView({ tx, ty: 0, k });
   };
 
-  // Once per loaded day (not per refresh): after that the viewport is the user's.
-  const fitted = useRef<string | null>(null);
+  // Once per loaded day (not per refresh): after that the viewport is the
+  // user's. A selection kept from earlier is brought into view.
+  const fitted = useRef<string | null>(restored ? day : null);
   useEffect(() => {
     if (!layout || layout.dots.length === 0 || fitted.current === day) return;
     fitted.current = day;
     fitRef.current(true);
+    revealRef.current(useStore.getState().daySelected);
   }, [layout, day]);
 
+  // Kept for the way back from a tree (the view unmounts while it is open).
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  useEffect(() => {
+    return () => useStore.getState().set({ dayViewport: { day: useStore.getState().day, ...viewRef.current } });
+  }, []);
+
   // Keep the selection in view when the keyboard moves it.
-  const reveal = (key: string | null) => {
+  const revealRef = useRef<(key: string | null) => void>(() => {});
+  const reveal = (revealRef.current = (key: string | null) => {
     const d = key && layout?.byKey.get(key);
     const el = svgRef.current;
     if (!d || !el) return;
@@ -105,6 +123,13 @@ export function DayView() {
       else if (sy > h - 40) ty -= sy - (h - 40);
       return { ...v, tx, ty };
     });
+  });
+
+  /** Select a turn (or none) from anywhere — a key, a lane, the card — and keep it in view and in focus. */
+  const pick = (key: string | null) => {
+    select(key);
+    reveal(key);
+    timelineRef.current?.focus({ preventScroll: true });
   };
 
   // Arrows walk the day: ←/→ within the chat, ↑/↓ to the chat above or below
@@ -133,10 +158,7 @@ export function DayView() {
     else if (e.key === "ArrowRight") next = stepInLane(layout, cur, 1);
     else if (e.key === "ArrowUp") next = stepLane(layout, cur, -1);
     else next = stepLane(layout, cur, 1);
-    if (next) {
-      select(next);
-      reveal(next);
-    }
+    if (next) pick(next);
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => keyRef.current(e);
@@ -231,7 +253,12 @@ export function DayView() {
             )}
           </div>
         ) : (
-          <div className="canvas day-canvas">
+          <div
+            className="canvas day-canvas"
+            ref={timelineRef}
+            tabIndex={0}
+            aria-label="Day timeline: arrow keys move between turns and chats, Enter opens the selected turn"
+          >
             <div className="canvas-tools day-tools">
               <button className="ghost" onClick={() => fitRef.current(false)} title="Fit the whole day to the view">
                 fit
@@ -292,11 +319,7 @@ export function DayView() {
               lanes={layout.lanes}
               view={view}
               selectedLane={selected?.lane ?? null}
-              onPick={(lane) => {
-                const key = laneLatest(lane);
-                select(key);
-                reveal(key);
-              }}
+              onPick={(lane) => pick(laneLatest(lane))}
               onHover={setHoverLane}
             />
 
@@ -334,10 +357,7 @@ export function DayView() {
         <DayCard
           layout={layout}
           selected={selected}
-          onPick={(key) => {
-            select(key);
-            reveal(key);
-          }}
+          onPick={pick}
           onOpen={open}
         />
       </div>

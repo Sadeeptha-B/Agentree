@@ -9,7 +9,9 @@ import { laneKey, turnKey } from "./day.ts";
  * The axis is compressed time. Spacing follows the clock, capped so one slow
  * reply doesn't stretch the day, and never closer than `MIN_GAP` within a
  * track, so a burst of turns doesn't pile up. A pause of `IDLE_BREAK` or more
- * collapses into a fixed-width break that says how long it was.
+ * — nothing running: measured from the latest END of every earlier turn, so
+ * an agent working through a long reply is not idle — collapses into a
+ * fixed-width break that says how long it was.
  */
 
 export const PAD = 40;
@@ -27,7 +29,7 @@ export const MIN_GAP = 16;
 export const PX_PER_MIN = 6;
 /** Longest step between two consecutive turns that aren't a break. */
 export const MAX_STEP = 120;
-/** A pause at least this long is drawn as a break, not to scale. */
+/** A pause with nothing running at least this long is drawn as a break, not to scale. */
 export const IDLE_BREAK = 20 * 60_000;
 export const BREAK_W = 56;
 /** Closest two time labels may be. */
@@ -64,7 +66,7 @@ export type DayEdge =
 export interface DayBreak {
   x0: number;
   x1: number;
-  /** Idle time, ms. */
+  /** Idle time, ms: from the latest end of the turns before it to the next start. */
   ms: number;
 }
 
@@ -184,7 +186,11 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
   const byKey = new Map<string, DayDot>();
   const breaks: DayBreak[] = [];
   const lastX = new Map<string, number>();
+  /** Turns drawn just after a break: where the time labels resume. */
+  const resumed = new Set<string>();
   let prev: DayDot | null = null;
+  /** The latest end of every turn so far, in any lane: until then, something was running. */
+  let busyUntil = 0;
   for (const t of drawn) {
     const key = turnKey(t);
     const lane = laneOf.get(laneKey(t))!;
@@ -194,9 +200,10 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
     let idle = 0;
     if (prev) {
       const dt = t.timestamp - prev.turn.timestamp;
-      if (dt >= IDLE_BREAK) {
-        idle = dt;
+      if (t.timestamp - busyUntil >= IDLE_BREAK) {
+        idle = t.timestamp - busyUntil;
         x = prev.x + BREAK_W;
+        resumed.add(key);
       } else {
         x = prev.x + Math.min(MAX_STEP, (dt / 60_000) * PX_PER_MIN);
       }
@@ -205,6 +212,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
     if (held !== undefined) x = Math.max(x, held + MIN_GAP);
     if (idle && prev) breaks.push({ x0: prev.x, x1: x, ms: idle });
     lastX.set(slot, x);
+    busyUntil = Math.max(busyUntil, t.timestamp, t.endedAt ?? 0);
     const dot: DayDot = {
       key,
       turn: t,
@@ -229,7 +237,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
   }
 
   const width = (dots.length ? dots[dots.length - 1].x : PAD) + PAD;
-  return { lanes, dots, byKey, edges, breaks, ticks: ticksFor(dots), width, height: y + PAD };
+  return { lanes, dots, byKey, edges, breaks, ticks: ticksFor(dots, resumed), width, height: y + PAD };
 }
 
 /**
@@ -238,7 +246,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
  * inside a break, which is labelled with its length instead). A label too
  * close to the one before it is dropped; hours yield to the other two.
  */
-function ticksFor(dots: DayDot[]): DayTick[] {
+function ticksFor(dots: DayDot[], resumed: Set<string>): DayTick[] {
   const raw: DayTick[] = [];
   for (let i = 0; i < dots.length; i++) {
     const b = dots[i];
@@ -248,7 +256,7 @@ function ticksFor(dots: DayDot[]): DayTick[] {
     }
     const a = dots[i - 1];
     const dt = b.turn.timestamp - a.turn.timestamp;
-    if (dt >= IDLE_BREAK) {
+    if (resumed.has(b.key)) {
       raw.push({ x: b.x, t: b.turn.timestamp, kind: "resume" });
       continue;
     }
