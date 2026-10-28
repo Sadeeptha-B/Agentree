@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import { configuredPath } from "./settings.ts";
+import type { ProviderId, SettingsPaths } from "../shared/types.ts";
+import { configuredPath, PATH_ENV } from "./settings.ts";
 
 /**
  * Every on-disk root Agentree reads or writes, resolved lazily.
@@ -24,6 +25,26 @@ export const codexArchived = () => path.join(codexHome(), "archived_sessions");
 export const codexIndex = () => path.join(codexHome(), "session_index.jsonl");
 
 export const copilotState = () => path.join(configuredPath("copilotHome") || path.join(home(), ".copilot"), "session-state");
+
+/** The setting (and, through `PATH_ENV`, the variable) that relocates each harness's store. */
+export const HOME_SETTING: Record<ProviderId, keyof SettingsPaths> = {
+  claude: "claudeConfigDir",
+  codex: "codexHome",
+  copilot: "copilotHome",
+};
+
+/**
+ * What a harness's own process — a fork subprocess, a resumed CLI — needs in
+ * its environment to use the store Agentree reads: the harness's variable,
+ * whenever Agentree's root for it isn't the default. A root set by a saved
+ * setting is invisible to the harness otherwise; one set by the variable is
+ * restated, so a command pasted into another shell still finds it.
+ */
+export function harnessEnv(provider: ProviderId): Record<string, string> {
+  const key = HOME_SETTING[provider];
+  const dir = configuredPath(key);
+  return dir ? { [PATH_ENV[key]]: dir } : {};
+}
 
 /** Agentree's own sidecars: annotations, fork lineage, settings. Environment only. */
 export { agentreeHome } from "./settings.ts";

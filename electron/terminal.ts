@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ActionResult } from "../shared/types.ts";
-import { quote, resumeCommand } from "./shell.ts";
+import { commandLine, resumeCommand, type Env } from "./shell.ts";
 
 /**
  * Open a NEW OS terminal window running a resume command — the desktop app's
@@ -36,11 +36,17 @@ const onPath = (exe: string): boolean =>
 export const usableCwd = (cwd: string): string =>
   cwd && fs.existsSync(cwd) ? cwd : os.homedir();
 
+/**
+ * `env` is written into the command itself, not passed to the launcher: on
+ * macOS and many Linux emulators the window's shell isn't a child of the
+ * launcher and wouldn't inherit it.
+ */
 export function terminalLaunch(
   argv: string[],
   cwd: string,
   platform: NodeJS.Platform = process.platform,
   has: (exe: string) => boolean = onPath,
+  env: Env = {},
 ): Launch | null {
   if (platform === "win32") {
     // `start` is what gives the shell a NEW console window: Node's `detached`
@@ -49,14 +55,14 @@ export function terminalLaunch(
     // done here, verbatim: Windows paths can't contain `"`, and the PowerShell
     // command uses single quotes only, so double-quoting both is safe even
     // for paths with `&` or `^` in them.
-    const ps = argv.map((a) => quote(a, "win32")).join(" ");
+    const ps = commandLine(argv, env, "win32");
     return {
       cmd: "cmd.exe",
       args: ["/d", "/c", `start "" /D "${cwd}" powershell.exe -NoExit -Command "${ps}"`],
       verbatim: true,
     };
   }
-  const posix = resumeCommand(cwd, argv, "posix");
+  const posix = resumeCommand(cwd, argv, { env, platform: "posix" });
   if (platform === "darwin") {
     // AppleScript string literal: escape backslashes and double quotes.
     const script = posix.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -82,8 +88,8 @@ export function terminalLaunch(
  * spawn reports a missing binary asynchronously, and answering `ok` before
  * that would tell the user a window is opening when nothing will.
  */
-export function openTerminal(argv: string[], cwd: string): Promise<ActionResult> {
-  const launch = terminalLaunch(argv, usableCwd(cwd));
+export function openTerminal(argv: string[], cwd: string, env: Env = {}): Promise<ActionResult> {
+  const launch = terminalLaunch(argv, usableCwd(cwd), process.platform, onPath, env);
   if (!launch) return Promise.resolve({ ok: false, error: "No terminal emulator found on PATH." });
   const failed = (e: unknown): ActionResult => ({
     ok: false,

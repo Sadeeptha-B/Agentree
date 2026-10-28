@@ -6,10 +6,10 @@ import type { NodeId, TurnNode } from "../shared/types.ts";
  * annotations in `~/.agentree/meta/` are keyed by it, so a change here must
  * keep earlier keys findable (`legacyIds`, and `scheme2Fingerprint` below).
  *
- * Current scheme (3), per node:
+ * Current scheme (4), per node:
  *
  *  - a STRONG own key — unique by itself: a Claude API message id
- *    (`m:<id>`), a prompt id with its text (`u:<promptId>|<digest>`), a
+ *    (`m:<id>`), a prompt id with its text (`p:<promptId>|<digest>`), a
  *    Codex `<turnId>:<itemId>` — is the identity;
  *  - a WEAK own key — text alone (Copilot, legacy Codex, a Claude prompt
  *    with no prompt id) — is qualified by the parent's identity, as a
@@ -22,11 +22,22 @@ import type { NodeId, TurnNode } from "../shared/types.ts";
  * Text is digested EXACTLY as the parser produced it: indentation and line
  * breaks are meaning in code, and a copy preserves them byte for byte.
  *
- * Earlier schemes, still read (meta.ts): (1) raw per-file uuids; (2) like
- * this one, but the digest folded whitespace runs (two prompts differing
- * only in indentation collided), and a weak key was qualified by the
- * parent's identity as a literal string, `key@parentIdentity` — quadratic in
- * a long text-keyed chain.
+ * Every SAVED key of a scheme has a form no other scheme saves with a
+ * different meaning, so where a key came from is never a guess:
+ *
+ *  - (1) raw per-file uuids;
+ *  - (2) the digest folded whitespace runs, prompt keys were
+ *    `u:<promptId>|<digest>`, and a weak key was the literal string
+ *    `key@parentIdentity` — quadratic in a long text-keyed chain;
+ *  - (3) exact digests and `w:` weak keys as now, but prompt keys still
+ *    `u:<promptId>|<digest>` — the same form as scheme 2's, so a saved `u:`
+ *    key can be either: scheme 2's key for one prompt is scheme 3's for
+ *    another that differs from it only in whitespace;
+ *  - (4) prompt keys moved to `p:`, a form no earlier scheme saved. (A weak
+ *    prompt's hash input keeps its `u:|<digest>` form.)
+ *
+ * `m:` and Codex keys never changed meaning; `w:` keys mean the same in
+ * schemes 3 and 4 wherever their chain of parents does.
  */
 
 const sha1 = (s: string) => crypto.createHash("sha1").update(s).digest("hex");
@@ -48,25 +59,32 @@ export interface OwnKey {
   key: string;
   /** Unique on its own, so not qualified by the parent. */
   strong: boolean;
-  /** The same key under scheme 2's digest, when it differs. */
-  legacyKey?: string;
+  /**
+   * The same node's own key under each earlier scheme still read — scheme 2,
+   * then scheme 3 — where it differs from `key`.
+   */
+  earlier?: [scheme2?: string, scheme3?: string];
 }
 
+const EARLIER = 2;
+
 /**
- * Give every node its identity (`stableIds[0]`) and, where scheme 2 keyed it
- * differently, the bounded fingerprint of that older key (`legacyIds`,
- * see `scheme2Fingerprint`). `own` returns the node's key; parents come
- * from `parentId`.
+ * Give every node its identity (`stableIds[0]`) and, where an earlier scheme
+ * keyed it differently, those schemes' identities (`legacyIds`): each chain is
+ * qualified within its own scheme, so a scheme-2 weak identity is the bounded
+ * fingerprint `scheme2Fingerprint` computes for its saved literal. `own`
+ * returns the node's keys; parents come from `parentId`.
  */
 export function assignStableIds(nodes: TurnNode[], own: (n: TurnNode) => OwnKey): void {
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const done = new Map<NodeId, { id: string; legacy: string }>();
+  /** Per node: [current, scheme 2, scheme 3]. */
+  const done = new Map<NodeId, string[]>();
   for (const start of nodes) {
     // Iterative: a text-keyed (Copilot, legacy Codex) chain is as deep as the
     // conversation is long.
     const path: TurnNode[] = [];
     const onPath = new Set<NodeId>();
-    let base = { id: ROOT, legacy: ROOT };
+    let base: string[] = Array(EARLIER + 1).fill(ROOT);
     for (let cur: TurnNode | undefined = start; cur; ) {
       const hit = done.get(cur.id);
       if (hit) {
@@ -80,17 +98,18 @@ export function assignStableIds(nodes: TurnNode[], own: (n: TurnNode) => OwnKey)
       cur = cur.parentId ? byId.get(cur.parentId) : undefined;
     }
     for (let i = path.length - 1; i >= 0; i--) {
-      const { key, strong, legacyKey = key } = own(path[i]);
-      base = strong
-        ? { id: key, legacy: legacyKey }
-        : { id: qualify(key, base.id), legacy: qualify(legacyKey, base.legacy) };
+      const { key, strong, earlier = [] } = own(path[i]);
+      const keys = [key, ...Array.from({ length: EARLIER }, (_, s) => earlier[s] ?? key)];
+      const parent = base;
+      base = keys.map((k, s) => (strong ? k : qualify(k, parent[s])));
       done.set(path[i].id, base);
     }
   }
   for (const n of nodes) {
-    const { id, legacy } = done.get(n.id)!;
+    const [id, ...older] = done.get(n.id)!;
+    const legacy = [...new Set(older)].filter((k) => k !== id);
     n.stableIds = [id];
-    n.legacyIds = legacy !== id ? [legacy] : undefined;
+    n.legacyIds = legacy.length ? legacy : undefined;
   }
 }
 

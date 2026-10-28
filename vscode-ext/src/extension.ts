@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { startBackend, type Backend } from "../../electron/backend-client.ts";
 import { nativeLink } from "../../electron/native.ts";
-import { quote, RESUME_ARGV } from "../../electron/shell.ts";
+import { quote } from "../../electron/shell.ts";
 import { usableCwd } from "../../electron/terminal.ts";
 import { watchLater, type Watcher } from "../../electron/watch.ts";
 import type { ActionResult, NodeMeta, SessionRef, SettingsPatch } from "../../shared/types.ts";
@@ -152,17 +152,22 @@ async function openNative(ref: SessionRef): Promise<ActionResult> {
   }
 }
 
-/** Resume in an integrated terminal started in the session's own directory. */
-function resumeInTerminal(ref: SessionRef): ActionResult {
-  const argv = RESUME_ARGV[ref.provider];
-  if (!argv || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
+/**
+ * Resume in an integrated terminal started in the session's own directory,
+ * with what the worker resolved: argv, and the environment that points the
+ * harness at the store Agentree read the session from.
+ */
+async function resumeInTerminal(ref: SessionRef): Promise<ActionResult> {
+  const launch = await backend.resumeLaunch(ref.provider, ref.sessionId);
+  if (!launch) return { ok: false, error: "Unknown session." };
   const term = vscode.window.createTerminal({
     name: `${ref.provider} ${ref.sessionId.slice(0, 8)}`,
     // A session's folder can be gone (repo moved); the CLI still finds the session.
     cwd: usableCwd(ref.cwd),
+    env: launch.env,
   });
   term.show();
-  term.sendText(argv(ref.sessionId).map((a) => quote(a)).join(" "));
+  term.sendText(launch.argv.map((a) => quote(a)).join(" "));
   return { ok: true };
 }
 

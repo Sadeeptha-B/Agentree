@@ -49,6 +49,16 @@ describe("OS terminal launch", () => {
     expect(terminalLaunch(argv, "/home/me", "linux", () => false)).toBeNull();
   });
 
+  it("writes the harness's store into the command, which the window's shell may not inherit", () => {
+    const env = { CLAUDE_CONFIG_DIR: "/srv/claude" };
+    expect(terminalLaunch(argv, "C:\\w", "win32", undefined, { CLAUDE_CONFIG_DIR: "C:\\claude" })!.args[2]).toBe(
+      `start "" /D "C:\\w" powershell.exe -NoExit -Command "$env:CLAUDE_CONFIG_DIR = 'C:\\claude'; claude --resume ${ID}"`,
+    );
+    expect(terminalLaunch(argv, "/home/me", "darwin", undefined, env)!.args[1]).toBe(
+      `tell application "Terminal" to do script "cd /home/me && CLAUDE_CONFIG_DIR='/srv/claude' claude --resume ${ID}"`,
+    );
+  });
+
   it("falls back to home when the session's folder is gone", () => {
     expect(usableCwd("Z:\\definitely\\not\\here")).toBe(os.homedir());
     expect(usableCwd(os.tmpdir())).toBe(os.tmpdir());
