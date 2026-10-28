@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { startBackend, type Backend } from "../../electron/backend-client.ts";
 import { nativeLink } from "../../electron/native.ts";
+import { handOffRefused } from "../../electron/readonly.ts";
 import { quote } from "../../electron/shell.ts";
 import { usableCwd } from "../../electron/terminal.ts";
 import { watchLater, type Watcher } from "../../electron/watch.ts";
@@ -130,6 +131,8 @@ function dispatch(method: string, args: unknown[]): unknown {
  *   view; `uriScheme` keeps this right under Insiders and forks of VS Code.
  */
 async function openNative(ref: SessionRef): Promise<ActionResult> {
+  const refused = handOffRefused();
+  if (refused) return refused;
   const id = ref.sessionId;
   if (!/^[a-zA-Z0-9-]{8,64}$/.test(id)) return { ok: false, error: "Not a session id." };
   try {
@@ -160,6 +163,8 @@ async function openNative(ref: SessionRef): Promise<ActionResult> {
  * harness at the store Agentree read the session from.
  */
 async function resumeInTerminal(ref: SessionRef): Promise<ActionResult> {
+  const refused = handOffRefused();
+  if (refused) return refused;
   const launch = await backend.resumeLaunch(ref.provider, ref.sessionId);
   if (!launch) return { ok: false, error: "Unknown session." };
   const term = vscode.window.createTerminal({

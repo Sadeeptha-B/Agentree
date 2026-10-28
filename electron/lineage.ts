@@ -14,13 +14,35 @@ import type { SessionId } from "../shared/types.ts";
  */
 const FILE = () => path.join(agentreeHome(), "lineage.json");
 
+let cache: { stamp: string; all: Record<SessionId, SessionId> } | null = null;
+
+/** Read on every listing, per family: cached by the file's identity. */
 export function readLineage(): Record<SessionId, SessionId> {
+  let stamp: string;
   try {
-    return JSON.parse(fs.readFileSync(FILE(), "utf8")) as Record<SessionId, SessionId>;
+    const st = fs.statSync(FILE());
+    stamp = `${FILE()}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return {};
+  }
+  if (cache?.stamp === stamp) return cache.all;
+  try {
+    cache = { stamp, all: JSON.parse(fs.readFileSync(FILE(), "utf8")) as Record<SessionId, SessionId> };
+    return cache.all;
   } catch {
     return {};
   }
 }
+
+/**
+ * The entries a family's grouping and parentage are read from: its
+ * members'. Part of the family's revision — a fork of another family
+ * recorded here doesn't change it.
+ */
+export const lineageOf = (ids: SessionId[]): string => {
+  const all = readLineage();
+  return [...ids].sort().map((id) => `${id}>${all[id] ?? ""}`).join(",");
+};
 
 export function recordLineage(child: SessionId, parent: SessionId): void {
   const all = readLineage();

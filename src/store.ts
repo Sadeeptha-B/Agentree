@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
-import { childIndex, forkPointOf, newestLeaf, resolveForkPoint, toNodeMap, type NodeMap } from "../shared/render.ts";
+import { childIndex, locate, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
 import { dayBounds, todayKey, turnKey } from "./day.ts";
 import { chainHolding } from "./tree-layout.ts";
 import type {
   DayActivity,
   NodeId,
+  NodeRef,
   NodeMeta,
   NodeStatus,
   ProviderHealth,
@@ -38,6 +39,8 @@ interface State {
   dayLoading: boolean;
   /** The day view's selected turn (`turnKey`). Kept across a reload while the turn is still there. */
   daySelected: string | null;
+  /** The day view's pan and zoom when it last closed (a tree opened from it), to come back to. */
+  dayViewport: { day: string; tx: number; ty: number; k: number } | null;
   /** Show another day. Its turns load with `loadDay`. */
   setDay: (key: string) => void;
   /** (Re)load the current day's turns. A result for a day the user has left is dropped. */
@@ -89,10 +92,12 @@ interface State {
   /**
    * Open the family holding `id`. With `focus`, select that member session's
    * own tip (`MemberInfo.tipId`) instead of the family's newest leaf, and act
-   * on that member (`State.focus`). With `select`, select that turn instead
-   * (opening the chain that hides it) while the family still has it.
+   * on that member (`State.focus`), and ask for that member's family first:
+   * the family `id` was in may have split since. With `select`, select the
+   * turn as it was drawn elsewhere (`locate`; opening the chain that hides
+   * it) while the family still has it.
    */
-  openSession: (id: string, opts?: { focus?: string; select?: NodeId }) => Promise<void>;
+  openSession: (id: string, opts?: { focus?: string; select?: NodeRef }) => Promise<void>;
   close: () => void;
 
   select: (id: NodeId | null) => void;
@@ -159,23 +164,11 @@ const dayGate = gate();
  */
 let view = 0;
 
-/**
- * Where a selection lives in a reloaded family. First the node that ends
- * where it did: new membership can split a display group under the same
- * head id, and the head alone would quietly shorten the selected prefix.
- * Then the same id (a group that grew, or was folded into a longer one), then
- * the same semantic identity (a re-rooted family draws it under other ids).
- */
+/** Where a selection lives in a reloaded family (`locate`). */
 function carry(id: NodeId | null, from: NodeMap, to: NodeMap): NodeId | null {
-  if (!id) return null;
-  const prev = from.get(id);
-  const same = prev && resolveForkPoint([...to.values()], forkPointOf(prev));
-  if (same) return same.id;
-  if (to.has(id)) return id;
-  const ids = new Set(from.get(id)?.stableIds ?? []);
-  if (!ids.size) return null;
-  for (const n of to.values()) if (n.stableIds?.some((s) => ids.has(s))) return n.id;
-  return null;
+  const prev = id ? from.get(id) : undefined;
+  if (!prev) return id && to.has(id) ? id : null;
+  return locate(to.values(), refOf(prev))?.id ?? null;
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -190,6 +183,7 @@ export const useStore = create<State>((set, get) => ({
   dayActivity: null,
   dayLoading: false,
   daySelected: null,
+  dayViewport: null,
 
   session: null,
   nodes: new Map(),
@@ -291,8 +285,12 @@ export const useStore = create<State>((set, get) => ({
     const mine = ++view;
     set({ loading: true });
     try {
-      const session = await api.getSession(id);
-      if (mine !== view) return;
+      let session: SessionDetail | null = null;
+      for (const ask of new Set([opts?.focus, id].filter((x): x is string => !!x))) {
+        session = await api.getSession(ask);
+        if (mine !== view) return;
+        if (session) break;
+      }
       if (!session) {
         set({ error: "That session's transcript is no longer on disk." });
         return;
@@ -301,7 +299,7 @@ export const useStore = create<State>((set, get) => ({
       const children = childIndex(session.nodes);
       const tip = newestLeaf(session.nodes, children);
       const focus = session.members.find((m) => m.id === opts?.focus) ?? null;
-      const asked = opts?.select && nodes.has(opts.select) ? opts.select : null;
+      const asked = opts?.select ? (locate(session.nodes, opts.select)?.id ?? null) : null;
       const selected = asked ?? (focus?.tipId && nodes.has(focus.tipId) ? focus.tipId : tip);
       // A turn picked from outside the tree is shown, not left inside a collapsed run.
       const chain = asked ? chainHolding(asked, children, get().compress) : null;

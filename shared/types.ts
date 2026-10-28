@@ -185,6 +185,14 @@ export interface SessionMeta {
    * absent means unknown, and the family is always loaded.
    */
   startedAt?: number;
+  /**
+   * Changes whenever anything a load of this family reads changes, other
+   * than annotations: every member file's identity (path, mtime, size), and
+   * the indexes and sidecars a provider takes titles or parentage from.
+   * Opaque. Lets a projection of the family (the day view) be cached; with
+   * none, it can't be.
+   */
+  revision?: string;
   nodeCount: number;
   branchPoints: number;
   /**
@@ -276,6 +284,16 @@ export interface ForkPoint {
   endId: NodeId;
 }
 
+/**
+ * A drawn node, as a later snapshot of its family can find it again: where
+ * it ended (`ForkPoint`), then its semantic identity (`stableIds`). Resolved
+ * by `locate` (shared/render.ts), the rule a reload carries the selection by.
+ */
+export interface NodeRef {
+  point: ForkPoint;
+  stableIds?: string[];
+}
+
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
 // ---------------------------------------------------------------- day view
@@ -308,6 +326,12 @@ export interface DayChat {
  */
 export interface DayTurn {
   id: NodeId;
+  /**
+   * The turn as drawn: where it ended and what it is. Opening it in the tree
+   * goes by this, not by `id` — a node id names a group's head, and the
+   * group can have split or grown by the time the tree loads.
+   */
+  ref: NodeRef;
   parentId: NodeId | null;
   /** Lane: the owning member session. */
   sessionId: SessionId;

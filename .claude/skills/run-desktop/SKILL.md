@@ -45,19 +45,24 @@ it**: a blank or stale frame is a failed check, not a pass.
 
 ### Data: `launch fixtures` (the default) or `launch real`
 
-- **`fixtures`** reads the committed synthetic stores: Claude
+- **`fixtures`** reads a temp **copy** of the synthetic stores: Claude
   `test/fixtures/claude/2.1` and Codex `test/fixtures/codex/0.162/home`.
   Copilot gets an empty store. Every fixture turn is on **2026-10-01**
-  (10:00–18:20 UTC), so use `day 2026-10-01`. Forking is safe here.
-- **`real`** reads the user's own default stores. `AGENTREE_HOME` is still a
-  fresh temp directory, so sidecar migrations and settings never touch theirs.
-  Forks would write into the harness's real store (AGENTS.md: never), so the
-  driver refuses any click on a fork button in this mode. Screenshots then
-  show private chat titles and text. Keep them in scratch, and never commit
-  or quote them.
+  (10:00–18:20 UTC), so use `day 2026-10-01`. A fork lands in the copy,
+  never in the committed fixtures. (A Codex fork still needs a `codex`
+  binary, and the synthetic rollouts aren't complete enough for it.)
+- **`real`** reads the user's own default stores, with
+  `AGENTREE_READ_ONLY_STORES=1`: the app itself refuses every fork, open in
+  the agent's chat panel and terminal resume, whatever button, key or
+  `eval` triggers it (`electron/readonly.ts`; AGENTS.md: never test forks or
+  resumes against original stores). `AGENTREE_HOME` is still a fresh temp
+  directory, so sidecar migrations and settings never touch theirs.
+  Screenshots then show private chat titles and text. Keep them in scratch,
+  and never commit or quote them.
 
-Every launch gets a new temp `AGENTREE_HOME` and Chromium profile, so
-settings and the remembered view always start at their defaults.
+Every launch gets a new temp directory for the copied stores, the
+`AGENTREE_HOME` and the Chromium profile, so settings and the remembered view
+always start at their defaults. `quit` deletes it.
 
 ## Commands
 

@@ -47,7 +47,8 @@ vi.mock("../electron/providers/copilot.ts", async (orig) => ({
   listCopilotSessions: () => [],
 }));
 
-const { listAllSessions, watchTargets } = await import("../electron/registry.ts");
+const { forkAnyAt, listAllSessions, watchTargets } = await import("../electron/registry.ts");
+const { handOffRefused, READ_ONLY_STORES } = await import("../electron/readonly.ts");
 const { writeSettings } = await import("../electron/settings.ts");
 const claude = await import("../electron/transcripts.ts");
 
@@ -77,5 +78,23 @@ describe("watch targets", () => {
     expect(claude.locate).not.toHaveBeenCalled();
     expect(claude.claudeWatchDirs).not.toHaveBeenCalled();
     writeSettings({ providers: { claude: true } });
+  });
+});
+
+describe("read-only agent stores", () => {
+  it("refuses every fork before any provider is asked, and every hand-off", async () => {
+    const P = "11111111-1111-4111-8111-111111111111";
+    process.env.AGENTREE_READ_ONLY_STORES = "1";
+    try {
+      vi.mocked(claude.locate).mockClear();
+      expect(await forkAnyAt(P, { nodeId: "p-a2", sessionId: P, endId: "p-a2" })).toEqual({ ok: false, error: READ_ONLY_STORES });
+      expect(claude.locate).not.toHaveBeenCalled();
+      expect(handOffRefused()).toEqual({ ok: false, error: READ_ONLY_STORES });
+      process.env.AGENTREE_READ_ONLY_STORES = "0";
+      expect(handOffRefused()).toBeNull();
+    } finally {
+      delete process.env.AGENTREE_READ_ONLY_STORES;
+    }
+    expect(handOffRefused()).toBeNull();
   });
 });
