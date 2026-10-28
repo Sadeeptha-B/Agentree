@@ -53,6 +53,7 @@ electron/backend-client.ts     host-side handle on the worker: async proxy, rest
 electron/registry.ts           Provider interface; routes by "who owns this id"; health; annotate; watch targets; a day's turns
 electron/paths.ts              every root, lazily: environment variable > settings > default
 electron/settings.ts           ~/.agentree/settings.json: validated per field, cached by stat
+electron/readonly.ts           AGENTREE_READ_ONLY_STORES: no fork, open or resume, checked by worker and hosts
 electron/shell.ts              resume argv per harness + commands in the host shell's syntax (PowerShell / POSIX)
 electron/launch.ts             a session's resume launch (argv + store environment), resolved in the worker
 electron/native.ts             vscode:// deep links into the Claude Code / Codex extensions
@@ -971,6 +972,8 @@ The tree follows the transcripts on disk.
     change"), shown in the card's tooltip.
   - `startedAt`, the **oldest** timestamp on any record of any member (0
     when unknown). Not shown; only the [day view](#day-view) uses it.
+  - `revision`, an opaque digest of what a load of the family reads (see
+    the day view's cache). Not shown.
 
 ## Day view
 
@@ -997,21 +1000,36 @@ build; nothing about parsing, stitching or identity is specific to it.
   families): cold 70–370 ms per day after a cold list, warm ~18 ms.
 - **Cache.** The day refreshes on every welcome-watch event, which during a
   live session is every reply. Projections are cached per family by
-  `provider:id:touchedAt:activeAt:startedAt:nodeCount:members`, and the
-  whole cache is dropped when the window or the configured data locations
-  change, so only the family being written reloads. **Annotations are not
-  projected** (no label, star or dead-end mark in the day view): a sidecar
-  write doesn't move any key part, so a cached annotation could go stale.
+  `provider:id:revision` and dropped when the window changes, so only the
+  family being written reloads. `SessionMeta.revision` is the provider's
+  digest of everything a load reads, annotations aside: every member file's
+  path, mtime and size (Claude: every copy; Codex: every page; Copilot: each
+  member's `events.jsonl` and `workspace.yaml`), plus the family's own
+  entries in the name index (Codex) and the lineage sidecar (Claude,
+  Copilot) — another thread's rename or fork doesn't change it. A family
+  without a revision is not cached. (The first cut keyed by times and
+  counts, which a rename or a record rewritten under the same uuid and time
+  doesn't move: [day-view review finding 2](archive/2026-10-modernize/review-findings-day-view.md#dv-2).)
+  **Annotations are not projected** (no label, star or dead-end mark in the
+  day view): a sidecar write doesn't change the revision, so a cached
+  annotation could go stale.
 - **Lanes are owners, not holders.** A turn's lane is its
   `sourceSessionId`, the session the tree draws it in; a shared prefix is
   drawn once, as in the tree. Lanes are keyed `provider:sessionId` and turns
   `provider:familyId:nodeId`, since node ids are unique only per family.
   `DayChat` carries the member's parent and its title for "forked from".
-  **Open in tree** goes through `openSession(family, { focus: lane, select:
-  node })`: the turn is selected while the family still has it (else the
-  usual tip), the member is focused for Open/Resume, and the collapsed chain
-  hiding the turn is opened (`chainHolding`). Esc returns to the same day
-  and turn.
+- **Open in tree carries the drawn turn, not its id.** Each `DayTurn` has a
+  `NodeRef` (`refOf`: its `ForkPoint` and `stableIds`), and
+  `openSession(family, { focus: lane, select: ref })` resolves it with
+  `locate` (`shared/render.ts`) — the rule a reload carries the selection
+  by: the node that still ends where it did, then the same id, then the
+  same semantic identity; else the usual tip. It asks for the focused
+  lane's family first, since the family it was listed in may have split
+  since ([finding 3](archive/2026-10-modernize/review-findings-day-view.md#dv-3)).
+  The member is focused for Open/Resume and the collapsed chain hiding the
+  turn is opened (`chainHolding`). The day view's pan and zoom are kept in
+  the store when it closes (`dayViewport`), so Esc returns to the same day,
+  turn and view; a fresh fit brings a kept selection into view.
 - **Layout** (`src/day-layout.ts`, fuzzed like the tree's): families in order
   of their first turn of the day, a root's lane first. Inside a lane, tracks
   as in a git log: a turn continues the track its parent ends, anything else
@@ -1020,7 +1038,10 @@ build; nothing about parsing, stitching or identity is specific to it.
   stamped the same instant parent first — Codex writes a prompt and its reply
   in one second): steps follow the clock (6 px/min, capped at 120 px), never
   closer than 16 px within a track, and a pause of 20 minutes or more becomes
-  a fixed 56 px break labelled with its length. Time labels: the first turn,
+  a fixed 56 px break labelled with its length. A pause is time with nothing
+  running: from the latest `endedAt` (or start) of every earlier turn, in any
+  lane, to the next start — an hour-long reply followed by a prompt a minute
+  later is one idle minute, not a break. Time labels: the first turn,
   each turn after a break, and local hours interpolated between turns.
   Edges into a fork or a prompt edit, or across lanes, are dashed like the
   tree's; a parent outside the day (or the filters) gets a short dotted
@@ -1029,6 +1050,14 @@ build; nothing about parsing, stitching or identity is specific to it.
   (a lane's **own** cwd, so a fork made in another repo shows there) and the
   search (chat title, family title, ids, cwd). Keys: ←/→ within a chat, ↑/↓
   to the adjacent lane's turn nearest in time, Enter opens, Esc deselects.
+  The timeline is focusable, and every control that picks a chat or a turn
+  (lane names, the card's chat list and ←/→) moves focus to it, so Enter
+  opens the turn instead of pressing the button again. A focused button
+  keeps its own Enter.
+- **Height.** The timeline and the side card share the pane's height: side
+  by side, or in a narrow pane (a VS Code side panel) stacked, with the card
+  shrinking and scrolling inside. Below 380 px for the whole view, the pane
+  scrolls instead of clipping either.
 - A turn's preview is its first 400 characters, whitespace folded; the tree
   has the rest.
 
@@ -1048,8 +1077,16 @@ parsers, stitching, fork rules or health thresholds.
   All-archived Codex families can be listed (`archived` on the entry); data locations go
   environment variable > setting > default (`paths.ts`, `configuredPath`).
   `AGENTREE_HOME` is environment-only: the settings live in it.
+- `AGENTREE_READ_ONLY_STORES` (environment-only, `electron/readonly.ts`)
+  makes Agentree refuse everything that writes to an agent's store or hands
+  a session to the agent: forks in the worker (`forkAnyAt`, before any
+  provider is asked), and the chat-panel open and terminal resume in each
+  host. The refusal sits at the action, not at a control, so no button, key
+  or bridge call gets past it; the run-desktop skill's `real` mode sets it.
+  (The skill first refused clicks by their text, which other text and the
+  keyboard bypassed: [day-view review finding 1](archive/2026-10-modernize/review-findings-day-view.md#dv-1).)
 - View settings are applied in the renderer: the sort time, remembered view
-  state (compress, directory and agent filters, saved debounced) and whether
+  state (compress, directory and agent filters, list or day, saved debounced) and whether
   a new fork opens in the chat panel (unset: VS Code yes, desktop no).
   With remembering off **no view is kept**, enforced in three places: turning
   it off cancels a pending 500 ms save; a save that fires rechecks the flag;
@@ -1326,12 +1363,20 @@ dangling parent, one root per path), not session counts.
   turns and owner lanes for a Claude fork family; a half-open window; a
   conversation split at midnight keeps its cross-day parent; families outside
   the window aren't loaded and an unchanged one isn't reloaded; a disabled
-  agent is never asked. `src/day-layout.test.ts`: tracks, breaks, ticks,
+  agent is never asked; a Codex rename and a Claude record rewritten under
+  the same uuid and time change only their families' revisions, and the day
+  re-reads exactly those two. `src/day-layout.test.ts`: tracks, breaks
+  measured from the latest end (a long reply isn't idle), ticks,
   fork/edit/lead edges, same-instant ordering, navigation, and 300 random
   days with no overlapping turns and x in time order. `src/day.test.ts`:
   local day bounds across DST and month ends, and the filters. The store
   and welcome tests cover a turn opened from the day view (chain opened,
-  member focused), stale day results, and the day markup.
+  member focused, the drawn end kept after its group split, the focused
+  chat's family asked first), stale day results, and the day markup.
+  **Registry:** with `AGENTREE_READ_ONLY_STORES` a fork is refused before
+  any provider is asked, and hand-offs are refused. Focus, the kept
+  viewport and the narrow, short layout were checked in the desktop app
+  (run-desktop skill), not by a test.
 - **Launch environment:** the fake app-server reports the `CODEX_HOME` it
   was started with — unset by default, the saved home when only a setting
   names it, the variable when that is set; resume commands and terminal

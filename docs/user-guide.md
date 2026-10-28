@@ -179,18 +179,22 @@ conversation, on one graph.
 - **Colour is the agent** (Claude clay, Codex teal, Copilot blue); a
   **filled dot is your prompt**, a **ring is the agent's turn**.
 - **Time runs left to right on one axis for every lane**: turns drawn one
-  above the other happened at about the same time. Pauses of 20 minutes or
-  more are drawn as a short shaded break labelled with their length, and a
+  above the other happened at about the same time. A pause of 20 minutes or
+  more with nothing running (counted from when the last turn before it
+  ended, so a long agent reply isn't a pause) is drawn as a short shaded
+  break labelled with its length, and a
   burst of turns keeps a minimum spacing, so the axis is to scale only
   between breaks. A short dotted lead-in means the turn continues one from
   an earlier day.
 - **Switch chats:** click a turn or a chat's name (it selects that chat's
   latest turn), or use the keys: **←/→** the previous/next turn in the chat,
-  **↑/↓** the chat above/below, at its turn nearest in time. The card on the
+  **↑/↓** the chat above/below, at its turn nearest in time. Picking a chat
+  or a turn moves the keyboard to the timeline, so **Enter** then opens it. The card on the
   right shows the turn's chat, directory, time and the start of its text.
 - **Open in tree** (or **Enter**, or double-click) opens that conversation's
-  tree focused on that chat, with the turn selected; **Esc** comes back to
-  the same day.
+  tree focused on that chat, with the turn selected as the day drew it (if
+  the tree has changed since, the turn that now ends there); **Esc** comes
+  back to the same day, turn and view.
 - **◀ ▶**, the date box and **today** change the day. An empty day offers a
   jump to the most recent day with activity.
 - The directory rail, the agent chips and the search narrow the day view as
@@ -422,6 +426,7 @@ the settings file.
 | `COPILOT_HOME` | `paths.copilotHome` | `~/.copilot`; reads `session-state/` beneath it |
 | `AGENTREE_HOME` | None | `~/.agentree`; settings, annotations and fork lineage |
 | `AGENTREE_CODEX_BIN` | `paths.codexBin` | Newest matching Codex VS Code extension's bundled binary, then `codex` on `PATH`; used for forks |
+| `AGENTREE_READ_ONLY_STORES` | None | Unset by default. Any nonempty value except `0` makes Agentree refuse to fork, open a session in the agent's chat panel or resume it in a terminal, so nothing it does can write to the agents' history. For audits and automated runs against your real history; Agentree's own home is unaffected |
 | `AGENTREE_NO_UPDATE_CHECK` | Overrides `updateCheck` | Unset by default; any nonempty value disables the desktop check. Use `1` to disable, unset to re-enable (`0` also disables) |
 
 A Claude, Codex or Copilot location you set applies to the agent too, not

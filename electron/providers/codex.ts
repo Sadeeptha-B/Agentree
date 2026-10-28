@@ -29,7 +29,7 @@ import { readSettings } from "../settings.ts";
 import { resumeCommandFor } from "../launch.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
-import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
+import { assignStableIds, digest, foldedTextKey, textKey } from "../identity.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
 /**
@@ -972,18 +972,23 @@ export function listCodexSessions(): SessionMeta[] {
     // unless the settings ask for archived conversations too.
     if (fam.pages.every((p) => p.archived) && !showArchived) continue;
     if (!fam.pages.some((p) => p.turns.length)) continue;
-    const sig =
-      fam.pages
-        .map((p) => {
-          const c = pages.get(p.file);
-          return `${p.file}:${c?.mtimeMs}:${c?.size}`;
-        })
-        .sort()
-        .join("|") + `|index:${index}`;
+    const files = fam.pages
+      .map((p) => {
+        const c = pages.get(p.file);
+        return `${p.file}:${c?.mtimeMs}:${c?.size}`;
+      })
+      .sort()
+      .join("|");
+    const sig = `${files}|index:${index}`;
     live.add(sig);
     let meta = metas.get(sig);
     if (!meta) {
-      meta = describe(fam, buildTree(scan, fam).nodes).meta;
+      // The family's pages and its threads' names — not the whole index,
+      // which a rename of any other thread rewrites.
+      const names = threadNames();
+      const threads = [...new Set(fam.pages.map((p) => p.threadId))].sort();
+      const own = threads.map((t) => `${t}=${names.get(t) ?? ""}`).join(",");
+      meta = { ...describe(fam, buildTree(scan, fam).nodes).meta, revision: digest(`${files}|${own}`) };
       metas.set(sig, meta);
     }
     out.push(meta);

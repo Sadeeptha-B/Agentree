@@ -1,4 +1,4 @@
-import { FORK_POINT_GONE, resolveForkPoint } from "../shared/render.ts";
+import { FORK_POINT_GONE, refOf, resolveForkPoint } from "../shared/render.ts";
 import type {
   DayActivity,
   DayChat,
@@ -30,6 +30,7 @@ import {
   locateCopilot,
 } from "./providers/copilot.ts";
 import { writeAnnotation } from "./meta.ts";
+import { READ_ONLY_STORES, storesReadOnly } from "./readonly.ts";
 import { readSettings } from "./settings.ts";
 import { claudeProjects, codexArchived, codexIndex, codexSessions, copilotState } from "./paths.ts";
 import type { WatchTarget } from "./watch.ts";
@@ -196,6 +197,9 @@ export function loadAnySession(id: SessionId): SessionDetail | null {
 }
 
 export async function forkAnyAt(sessionId: SessionId, point: ForkPoint): Promise<ForkResult> {
+  // Every fork, of every agent, comes through here: the one place a write
+  // into an agent's store can be refused.
+  if (storesReadOnly()) return { ok: false, error: READ_ONLY_STORES };
   const p = owner(sessionId);
   if (!p) return { ok: false, error: "That session is no longer on disk." };
   try {
@@ -264,6 +268,7 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
     if (!(n.timestamp >= start && n.timestamp < end)) continue;
     turns.push({
       id: n.id,
+      ref: refOf(n),
       parentId: n.parentId,
       sessionId: n.sourceSessionId ?? meta.id,
       familyId: meta.id,
@@ -298,16 +303,15 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
 }
 
 /**
- * Each family's day part, by what its listing says about the transcripts. A
- * family nobody wrote to since is not reloaded: a live session rewrites one
- * family, and the day view refreshes on every write. Cleared whenever the
- * window or a data location changes.
+ * Each family's day part, by its `revision`: a family nothing was written to
+ * since is not reloaded — a live session rewrites one family, and the day
+ * view refreshes on every write. The revision covers every file and index a
+ * load reads (their paths too, so a moved store is a new key); a family a
+ * provider gives no revision for is reloaded every time. Cleared when the
+ * window changes.
  */
 const dayParts = new Map<string, DayPart>();
-let dayStamp = "";
-
-const partKey = (p: Provider, m: SessionMeta) =>
-  [p.id, m.id, m.touchedAt, m.activeAt, m.startedAt ?? 0, m.nodeCount, m.members ?? 1].join(":");
+let dayWindow = "";
 
 /**
  * Every turn that started in `[start, end)`, across the enabled agents. A
@@ -315,10 +319,9 @@ const partKey = (p: Provider, m: SessionMeta) =>
  * is newer than `touchedAt`, and none older than `startedAt` (when known).
  */
 export function dayActivity(start: number, end: number): DayActivity {
-  const stamp = `${start}:${end}:${JSON.stringify(readSettings().paths)}`;
-  if (stamp !== dayStamp || dayParts.size > 500) {
+  if (`${start}:${end}` !== dayWindow || dayParts.size > 500) {
     dayParts.clear();
-    dayStamp = stamp;
+    dayWindow = `${start}:${end}`;
   }
   const chats: DayChat[] = [];
   const turns: DayTurn[] = [];
@@ -327,14 +330,14 @@ export function dayActivity(start: number, end: number): DayActivity {
   for (const p of enabled()) {
     for (const m of guarded(p, () => p.list(), [])) {
       if (m.touchedAt < start || (m.startedAt || 0) >= end) continue;
-      const key = partKey(p, m);
-      live.add(key);
-      let part = dayParts.get(key);
+      const key = m.revision ? `${p.id}:${m.id}:${m.revision}` : null;
+      if (key) live.add(key);
+      let part = key ? dayParts.get(key) : undefined;
       if (!part) {
         const detail = guarded(p, () => p.load(m.id), null);
         if (!detail) continue;
         part = dayPart(detail, start, end);
-        dayParts.set(key, part);
+        if (key) dayParts.set(key, part);
       }
       for (const c of part.chats) {
         const k = `${c.provider}:${c.sessionId}`;

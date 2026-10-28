@@ -543,9 +543,10 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 .mode-toggle button:hover { color: var(--fg); }
 .mode-toggle button.on { background: var(--accent); color: #fff; }
 
-/* In day mode the pane stops scrolling: the timeline fills it and pans itself. */
-.session-pane.day-mode { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 14px; }
-.day { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+/* In day mode the timeline fills the pane and pans itself. A pane too short
+   for it (a short VS Code panel) scrolls as a whole instead of clipping. */
+.session-pane.day-mode { display: flex; flex-direction: column; padding-bottom: 14px; }
+.day { flex: 1 0 0; min-height: 380px; display: flex; flex-direction: column; gap: 8px; }
 .day-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .day-head button.ghost { border-color: var(--line); }
 .day-head button:disabled { opacity: 0.4; cursor: default; }
@@ -556,6 +557,8 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 .day-title { font-weight: 600; margin: 0 6px 0 8px; }
 .day-body { flex: 1; min-height: 0; display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .day-canvas { min-height: 0; }
+.day-canvas:focus { outline: none; }
+.day-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .day-tools { left: auto; right: 10px; }
 .empty-day { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 button.ghost.bordered { border-color: var(--line); color: var(--fg); }
@@ -641,8 +644,10 @@ button.ghost.bordered { border-color: var(--line); color: var(--fg); }
 .day-card-actions button:disabled { opacity: 0.4; cursor: default; }
 
 /* Narrow panes (a VS Code side panel): the card goes under the timeline. */
+/* Both share the height: the card shrinks and scrolls inside, never past the
+   body's bottom edge. */
 @media (max-width: 900px) {
   .day-body { flex-direction: column; }
-  .day-canvas { min-height: 260px; }
-  .day-card { width: auto; max-height: 42%; border-left: 0; border-top: 1px solid var(--line); }
+  .day-canvas { flex: 1 1 0; min-height: 160px; }
+  .day-card { flex: 0 1 auto; width: auto; min-height: 0; max-height: 45%; border-left: 0; border-top: 1px solid var(--line); }
 }

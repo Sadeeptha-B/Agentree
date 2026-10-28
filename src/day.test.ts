@@ -64,6 +64,7 @@ describe("filterDay", () => {
   });
   const turn = (c: DayChat, id: string): DayTurn => ({
     id,
+    ref: { point: { nodeId: id, sessionId: c.sessionId, endId: id } },
     parentId: null,
     sessionId: c.sessionId,
     familyId: c.familyId,

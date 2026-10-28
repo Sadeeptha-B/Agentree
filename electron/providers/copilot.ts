@@ -14,10 +14,10 @@ import type {
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { applyAnnotations } from "../meta.ts";
 import { HealthScan } from "../health.ts";
-import { readLineage, recordLineage } from "../lineage.ts";
+import { lineageOf, readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
 import { resumeCommandFor } from "../launch.ts";
-import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
+import { assignStableIds, digest, foldedTextKey, textKey } from "../identity.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
 
@@ -262,6 +262,24 @@ function stitched(fam: Family): TurnNode[] {
 
 const resumeCmd = (id: string, cwd: string) => resumeCommandFor("copilot", id, cwd);
 
+const stamp = (file: string) => {
+  try {
+    const st = fs.statSync(file);
+    return `${file}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return `${file}:none`;
+  }
+};
+
+/** Every member's events and workspace (its name), and the lineage entries that group them. */
+const revisionOf = (fam: Family) =>
+  digest(
+    fam.members
+      .flatMap((m) => [stamp(path.join(m.dir, "events.jsonl")), stamp(path.join(m.dir, "workspace.yaml"))])
+      .sort()
+      .join("|") + `|${lineageOf(fam.members.map((m) => m.ws.id))}`,
+  );
+
 function metaFor(fam: Family): SessionMeta | null {
   const rootMember = fam.members.find((m) => m.ws.id === fam.rootId);
   if (!rootMember) return null;
@@ -297,6 +315,7 @@ function metaFor(fam: Family): SessionMeta | null {
     activeAt,
     touchedAt,
     startedAt: oldest(starts),
+    revision: revisionOf(fam),
     nodeCount: nodes.length,
     branchPoints: countBranchPoints(childIndex(nodes)),
     resumeCommand: resumeCmd(fam.rootId, rootMember.ws.cwd),
