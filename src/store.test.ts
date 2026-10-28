@@ -541,6 +541,30 @@ describe("day view state", () => {
     expect(useStore.getState().daySelected).toBe("claude:F:f-a2");
   });
 
+  it("shows a tree's selected turn in its day: the tree closes and the turn is picked as it was drawn", async () => {
+    api.getSession.mockResolvedValueOnce(linear);
+    await useStore.getState().openSession("P", { select: drawn("u2") });
+    useStore.getState().set({ dayViewport: { day: "2026-10-05", tx: 1, ty: 2, k: 3 }, cwdFilter: "c:/elsewhere" });
+    api.getDay.mockResolvedValueOnce(activity("2026-10-05", ["u1", "u2", "a2"]));
+    await useStore.getState().showInDay("2026-10-05", { provider: "claude", ref: drawn("u2") });
+    const s = useStore.getState();
+    expect(s.session).toBeNull();
+    expect(s).toMatchObject({ listMode: "day", day: "2026-10-05", daySelected: "claude:P:u2", dayViewport: null, dayTarget: null });
+    expect(api.getDay).toHaveBeenLastCalledWith(dayBounds("2026-10-05").start, dayBounds("2026-10-05").end);
+    // Its lane was outside the directory filter: the filters give way to the chat asked for.
+    expect(s.cwdFilter).toBe("");
+  });
+
+  it("drops a day target once the user has moved to another day", async () => {
+    let answer!: (a: DayActivity) => void;
+    api.getDay.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    const shown = useStore.getState().showInDay("2026-10-05", { provider: "claude", sessions: ["P"] });
+    useStore.getState().setDay("2026-10-06");
+    answer(activity("2026-10-05", ["u1"]));
+    await shown;
+    expect(useStore.getState()).toMatchObject({ day: "2026-10-06", daySelected: null, dayTarget: null });
+  });
+
   it("comes back to the same day and turn when the tree is closed", async () => {
     useStore.getState().set({ listMode: "day", day: "2026-10-01", daySelected: "claude:P:u2" });
     api.getSession.mockResolvedValueOnce(linear);

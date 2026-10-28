@@ -1,9 +1,14 @@
 import { useStore } from "../store.ts";
+import { dayKeyOf, dayTitle, shortDay } from "../day.ts";
+import { refOf } from "../../shared/render.ts";
 import logoUrl from "../../assets/logo.png";
 
 export function Toolbar() {
-  const { session, compress, set, close } = useStore();
+  const { session, compress, set, close, selected, nodes, showInDay } = useStore();
   if (!session) return null;
+  // The selected turn's day, with every other chat of that day around it.
+  const node = selected ? nodes.get(selected) : undefined;
+  const day = node && node.timestamp > 0 ? dayKeyOf(node.timestamp) : null;
 
   return (
     <header className="toolbar">
@@ -21,6 +26,15 @@ export function Toolbar() {
       </span>
 
       <span className="spacer" />
+
+      <button
+        className="ghost"
+        disabled={!day}
+        title={day ? `Show the selected turn in the day view of ${dayTitle(day)}, among every chat that day` : "The selected turn has no time"}
+        onClick={() => node && day && void showInDay(day, { provider: session.meta.provider, ref: refOf(node) })}
+      >
+        ◷ {day ? shortDay(day) : "day"}
+      </button>
 
       <label className="ctl" title="Collapse runs of linear turns into a single element">
         <input

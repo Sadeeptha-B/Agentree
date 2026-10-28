@@ -5,7 +5,7 @@ import type { DayActivity, DayChat, DayTurn, SessionMeta } from "../shared/types
 // A zone with daylight saving, so the 23- and 25-hour days are real. Node
 // re-reads TZ on assignment; each test file runs in its own process.
 process.env.TZ = "America/New_York";
-const { dayBounds, dayKeyOf, filterDay, isDayKey, latestActiveDay, shiftDay } = await import("./day.ts");
+const { dayBounds, dayKeyOf, filterDay, isDayKey, latestActiveDay, resolveTarget, shiftDay } = await import("./day.ts");
 
 const HOUR = 3_600_000;
 
@@ -104,5 +104,47 @@ describe("filterDay", () => {
     expect(ids(filterDay(day, { ...none, query: "root chat" }))).toEqual(["r1", "f1"]);
     expect(ids(filterDay(day, { ...none, query: "cccc" }))).toEqual(["c1"]);
     expect(filterDay(day, { ...none, query: "cache" }).chats).toEqual([fork]);
+  });
+});
+
+describe("resolveTarget", () => {
+  const turn = (id: string, sessionId: string, familyId: string, endId: string, at: number, endedAt?: number, provider: DayTurn["provider"] = "claude"): DayTurn => ({
+    id,
+    ref: { point: { nodeId: id, sessionId, endId }, stableIds: [`s:${id}`] },
+    parentId: null,
+    sessionId,
+    familyId,
+    provider,
+    role: "assistant",
+    preview: id,
+    timestamp: at,
+    ...(endedAt ? { endedAt } : {}),
+  });
+  const day: DayActivity = {
+    start: 0,
+    end: 100,
+    chats: [],
+    running: [],
+    turns: [
+      turn("p1", "P", "P", "p1", 10, 40),
+      turn("p2", "P", "P", "p2", 20),
+      turn("f1", "F", "P", "f1", 30),
+      turn("x1", "X", "X", "x1", 50),
+      turn("p1", "P", "P", "p1", 60, undefined, "codex"),
+    ],
+  };
+
+  it("finds a tree's turn by where it was drawn to end, among that agent's turns", () => {
+    // Drawn as one node ending on p2; the day draws p2 on its own.
+    expect(resolveTarget(day, { provider: "claude", ref: { point: { nodeId: "p1", sessionId: "P", endId: "p2" } } })?.id).toBe("p2");
+    expect(resolveTarget(day, { provider: "codex", ref: { point: { nodeId: "p1", sessionId: "P", endId: "p1" } } })?.timestamp).toBe(60);
+    expect(resolveTarget(day, { provider: "claude", ref: { point: { nodeId: "gone", sessionId: "P", endId: "gone" } } })).toBeNull();
+  });
+
+  it("lands a conversation on the latest-ending turn of any of its sessions", () => {
+    // p1 runs to 40, after f1 (30) and p2 (20) started.
+    expect(resolveTarget(day, { provider: "claude", sessions: ["P", "F"] })?.id).toBe("p1");
+    expect(resolveTarget(day, { provider: "claude", sessions: ["F"] })?.id).toBe("f1");
+    expect(resolveTarget(day, { provider: "claude", sessions: ["nobody"] })).toBeNull();
   });
 });
