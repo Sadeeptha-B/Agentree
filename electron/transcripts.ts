@@ -350,9 +350,11 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
     // The run starts when its head did and ends with its latest part: which
     // branch was active last is read from the end (`endOf`).
     const endedAt = Math.max(...parts.map(endOf));
+    const activeUntil = Math.max(...parts.map((p) => p.activeUntil ?? 0));
     out.push({
       ...head,
       endedAt: endedAt > head.timestamp ? endedAt : undefined,
+      activeUntil: activeUntil > endedAt ? activeUntil : undefined,
       // Re-clean the joined text: a wrapper block can open in one record and
       // close in the next, which per-record cleaning cannot match.
       text: cleanText(parts.map((p) => p.text).join("\n\n")).text,
@@ -662,6 +664,55 @@ const isActivity = (rec: RawRecord) =>
   rec.type === "assistant" ||
   (rec.type === "attachment" && rec.attachment?.type === "queued_command") ||
   (rec.type === "system" && rec.subtype === "compact_boundary");
+
+/**
+ * `TurnNode.activeUntil`: each activity record (`isActivity`) counts for
+ * its nearest drawn ancestor — a tool result, a tool-only reply, a subagent's
+ * records for the turn that set them off. A drawn turn's own records count
+ * for itself, so a reply is never kept busy by the prompt after it.
+ */
+function markActivity(
+  nodes: TurnNode[],
+  records: RawRecord[],
+  drawn: Set<string>,
+  parentOf: Map<string, string | null>,
+): void {
+  /** A record's nearest drawn ancestor-or-self, memoised along each walk. */
+  const nearest = new Map<string, string | null>();
+  const drawnFrom = (uuid: string): string | null => {
+    const walked: string[] = [];
+    const seen = new Set<string>();
+    let cur: string | null = uuid;
+    let found: string | null = null;
+    while (cur !== null && !seen.has(cur)) {
+      if (drawn.has(cur)) {
+        found = cur;
+        break;
+      }
+      const memo = nearest.get(cur);
+      if (memo !== undefined) {
+        found = memo;
+        break;
+      }
+      seen.add(cur);
+      walked.push(cur);
+      cur = parentOf.get(cur) ?? null;
+    }
+    for (const w of walked) nearest.set(w, found);
+    return found;
+  };
+  const until = new Map<string, number>();
+  for (const rec of records) {
+    if (!rec.uuid || !rec.timestamp || !isActivity(rec)) continue;
+    const at = drawnFrom(rec.uuid);
+    const t = Date.parse(rec.timestamp);
+    if (at && t > (until.get(at) ?? 0)) until.set(at, t);
+  }
+  for (const n of nodes) {
+    const t = until.get(n.id);
+    if (t && t > endOf(n)) n.activeUntil = t;
+  }
+}
 
 /** Project a transcript file into the node list. Read-only — we never write here. */
 export function parseFile(file: string): Parsed {
@@ -999,6 +1050,7 @@ export function parseRecords(
     }
     if (strong || head.promptId) strongKeys.add(id);
   }
+  markActivity(nodes, all, kept, parentOf);
   // Identity for annotations and selection: the key itself where it's unique
   // (a message id, a prompt id), else qualified by the parent's identity.
   assignStableIds(nodes, (n) => ({

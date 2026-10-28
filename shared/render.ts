@@ -59,6 +59,14 @@ export const oldest = (ts: number[]): number => (ts.length && ts.every((t) => t 
 /** When a node's last part was written: a merged or streamed node ends after it starts. */
 export const endOf = (n: Pick<TurnNode, "timestamp" | "endedAt">): number => Math.max(n.timestamp, n.endedAt ?? 0);
 
+/**
+ * Until when the work a node started was recorded: its end, or activity
+ * under it after that (`activeUntil`). For idle time only — which branch is
+ * latest is still `endOf`.
+ */
+export const activeEndOf = (n: Pick<TurnNode, "timestamp" | "endedAt" | "activeUntil">): number =>
+  Math.max(endOf(n), n.activeUntil ?? 0);
+
 /** The latest-ending of `list`; the first in list order on a tie. */
 const latest = (list: TurnNode[]): NodeId => list.reduce((a, b) => (endOf(a) >= endOf(b) ? a : b)).id;
 
@@ -140,51 +148,63 @@ export const forkPointOf = (n: TurnNode): ForkPoint => ({
   endId: n.lastRawId ?? n.id,
 });
 
-const endsAt = (n: TurnNode, p: ForkPoint) => n.sourceSessionId === p.sessionId && (n.lastRawId ?? n.id) === p.endId;
-
 /**
  * The node of a newer snapshot that ends where `p` did: the same node while
  * it still ends there, else the one node that now does (its group split
  * under the same head). Null when none does — the cut was folded into a
  * longer node, or its record is gone — or more than one does.
  */
-export function resolveForkPoint(nodes: TurnNode[], p: ForkPoint): TurnNode | null {
-  const same = nodes.find((n) => n.id === p.nodeId);
-  if (same && endsAt(same, p)) return same;
-  const hits = nodes.filter((n) => endsAt(n, p));
-  return hits.length === 1 ? hits[0] : null;
-}
+export const resolveForkPoint = (nodes: TurnNode[], p: ForkPoint): TurnNode | null => endingAt(nodes, refOf, p);
 
 /** What a drawn node stands for, to find it again in a newer snapshot (`locate`). */
 export const refOf = (n: TurnNode): NodeRef => ({ point: forkPointOf(n), ...(n.stableIds ? { stableIds: n.stableIds } : {}) });
 
 /**
- * Where a drawn node lives in a newer snapshot. First the node that ends
- * where it did: new membership can split a display group under the same
- * head id, and the head alone would quietly shorten the selected prefix.
- * Then the same id (a group that grew, or was folded into a longer one),
- * then the same semantic identity (a re-rooted family draws it under other
- * ids). Null when none does.
- *
- * Over anything that knows its own `NodeRef`: a family's nodes (`locate`),
- * or the day view's turns, which carry theirs. One rule for every snapshot
- * a selection crosses — a tree reload, a day refresh, a day turn opened in
- * its tree.
+ * The item that ends where `point` did: the same node while it still does,
+ * else the one that now does. A session's record is in one family only, so
+ * this holds across families too — the one rule a partial snapshot (a day's
+ * turns) can apply. Null when none does, or more than one.
  */
-export function locateBy<T>(items: Iterable<T>, refOfItem: (item: T) => NodeRef, ref: NodeRef): T | null {
-  const all = [...items].map((item) => ({ item, r: refOfItem(item) }));
-  const ends = (r: NodeRef) => r.point.sessionId === ref.point.sessionId && r.point.endId === ref.point.endId;
-  const same = all.find(({ r }) => r.point.nodeId === ref.point.nodeId);
-  if (same && ends(same.r)) return same.item;
-  const hits = all.filter(({ r }) => ends(r));
-  if (hits.length === 1) return hits[0].item;
-  if (same) return same.item;
-  const ids = new Set(ref.stableIds ?? []);
-  if (!ids.size) return null;
-  return all.find(({ r }) => r.stableIds?.some((s) => ids.has(s)))?.item ?? null;
+export function endingAt<T>(items: Iterable<T>, refOfItem: (item: T) => NodeRef, point: ForkPoint): T | null {
+  const all = [...items].map((item) => ({ item, p: refOfItem(item).point }));
+  const ends = (p: ForkPoint) => p.sessionId === point.sessionId && p.endId === point.endId;
+  const same = all.find(({ p }) => p.nodeId === point.nodeId);
+  if (same && ends(same.p)) return same.item;
+  const hits = all.filter(({ p }) => ends(p));
+  return hits.length === 1 ? hits[0].item : null;
 }
 
-/** `locateBy` over a family's nodes. */
+/**
+ * Where a drawn node lives in a newer snapshot of ITS FAMILY. First the
+ * node that ends where it did (`endingAt`): new membership can split a
+ * display group under the same head id, and the head alone would quietly
+ * shorten the selected prefix. Then the same id (a group that grew, or was
+ * folded into a longer one), then the same semantic identity (a re-rooted
+ * family draws it under other ids) — the one node holding one of its
+ * identities, or else the one holding its last (where it ended). Null when
+ * none does, or the identity is ambiguous.
+ *
+ * Ids and identities are unique only within a family: text-derived ones
+ * repeat in unrelated chats that opened the same way. So `items` is one
+ * family's nodes (`locate`), never a slice across families — a day's turns
+ * are resolved in the worker (`registry.findWant`).
+ */
+export function locateBy<T>(items: Iterable<T>, refOfItem: (item: T) => NodeRef, ref: NodeRef): T | null {
+  const list = [...items];
+  const end = endingAt(list, refOfItem, ref.point);
+  if (end) return end;
+  const same = list.find((item) => refOfItem(item).point.nodeId === ref.point.nodeId);
+  if (same) return same;
+  const ids = ref.stableIds ?? [];
+  if (!ids.length) return null;
+  const holding = (s: Set<string>) => list.filter((item) => refOfItem(item).stableIds?.some((x) => s.has(x)));
+  const any = holding(new Set(ids));
+  if (any.length <= 1) return any[0] ?? null;
+  const last = holding(new Set([ids[ids.length - 1]]));
+  return last.length === 1 ? last[0] : null;
+}
+
+/** `locateBy` over a family's nodes: the rule a reload, an opened day turn and a day refresh carry a selection by. */
 export const locate = (nodes: Iterable<TurnNode>, ref: NodeRef): TurnNode | null => locateBy(nodes, refOf, ref);
 
 /** Why a fork whose point no longer resolves was refused. */

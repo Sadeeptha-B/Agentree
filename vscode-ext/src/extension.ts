@@ -7,7 +7,7 @@ import { handOffRefused } from "../../electron/readonly.ts";
 import { quote } from "../../electron/shell.ts";
 import { usableCwd } from "../../electron/terminal.ts";
 import { watchLater, type Watcher } from "../../electron/watch.ts";
-import type { ActionResult, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../../shared/types.ts";
+import type { ActionResult, DayWant, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../../shared/types.ts";
 
 /**
  * VS Code host for Agentree. The Electron app's main/renderer split maps
@@ -102,7 +102,7 @@ function dispatch(method: string, args: unknown[]): unknown {
     case "getSession":
       return backend.getSession(args[0] as string);
     case "getDay":
-      return backend.getDay(args[0] as number, args[1] as number);
+      return backend.getDay(args[0] as number, args[1] as number, args[2] as DayWant | null);
     case "patchNode":
       return backend.patchNode(args[0] as string, args[1] as string, args[2] as NodeMeta);
     case "forkAt":

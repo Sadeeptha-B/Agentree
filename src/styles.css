@@ -15,6 +15,9 @@
   --p-copilot: #6c9bd1;
   --radius: 6px;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  /* Scrollbar thumbs: the muted tone, faint until pointed at. */
+  --scroll-thumb: color-mix(in srgb, var(--muted) 30%, transparent);
+  --scroll-thumb-hover: color-mix(in srgb, var(--muted) 55%, transparent);
 }
 
 @media (prefers-color-scheme: light) {
@@ -38,6 +41,17 @@ body {
 }
 
 button, select, input, textarea { font: inherit; color: inherit; }
+
+/* Scrollbars in the app's tones, in every pane (the list, the rail, the side
+   panel, the day view's card): a slim rounded thumb on no track, without the
+   platform's arrow buttons. Both hosts are Chromium; a VS Code webview's own
+   scrollbar rules come before these. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb) padding-box; border: 2px solid transparent; border-radius: 999px; min-height: 32px;
+}
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { background-color: var(--scroll-thumb-hover); }
 button { cursor: pointer; }
 code { font-family: var(--mono); font-size: 0.9em; }
 
@@ -615,6 +629,13 @@ text.day-tick.start, text.day-tick.resume { fill: var(--fg); }
 }
 .day-label:hover, .day-label.selected { color: var(--fg); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
 .day-label-name { flex: 1; min-width: 0; line-height: 16px; overflow-wrap: anywhere; }
+/* The chat's folder, under "All conversations": bottom right, on the line
+   the layout keeps free for it. */
+.day-label-dir {
+  position: absolute; right: 8px; bottom: 2px; max-width: calc(100% - 24px);
+  font: 10px/12px var(--mono); color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .day-label-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .day-label-dot.claude, .lg-p.claude { background: var(--p-claude); }
 .day-label-dot.codex, .lg-p.codex { background: var(--p-codex); }
@@ -642,7 +663,6 @@ text.day-tick.start, text.day-tick.resume { fill: var(--fg); }
 /* The name wraps beside the chip, not under it. */
 .day-chat-name .provider-chip { flex: none; }
 .day-chat-name > span:last-child { min-width: 0; }
-.day-chat-path { max-width: 100%; overflow-wrap: anywhere; }
 .day-back { align-self: flex-start; padding-left: 0; }
 .day-card-chat { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; overflow-wrap: anywhere; }
 .day-card-meta { color: var(--muted); }

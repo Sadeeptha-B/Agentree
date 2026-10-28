@@ -105,18 +105,21 @@ describe("day view", () => {
     expect(day).toContain("edge cross");
   });
 
-  it("puts each chat's repository in the day's chat list, and a way into its day on each list card", () => {
+  it("names each lane's folder under All conversations, and puts a way into its day on each list card", () => {
     useStore.setState({ settingsOpen: false, listMode: "day", day: "2026-10-28", dayActivity: activity, daySelected: null });
-    expect(renderToStaticMarkup(<Welcome />)).toContain('<code class="path day-chat-path">/work</code>');
-    // With a directory picked, every chat shown is in it: no path to repeat.
+    // Each lane names its folder; the chat list doesn't repeat paths.
+    const all = renderToStaticMarkup(<Welcome />);
+    expect(all).toContain('<span class="day-label-dir">work</span>');
+    expect(all).not.toContain("day-chat-path");
+    // With a directory picked, every chat shown is in it: no folder to repeat.
     useStore.setState({ cwdFilter: "/work" });
-    expect(renderToStaticMarkup(<Welcome />)).not.toContain("day-chat-path");
+    expect(renderToStaticMarkup(<Welcome />)).not.toContain("day-label-dir");
     useStore.setState({ cwdFilter: "" });
     const card = { id: P, provider: "claude", cwd: "/work", project: "work", title: "Build", activeAt: start + 3_600_000, touchedAt: start + 3_600_000, nodeCount: 2, branchPoints: 0, resumeCommand: "" } as SessionMeta;
     useStore.setState({ listMode: "list", sessions: [card] });
     const list = renderToStaticMarkup(<Welcome />);
     expect(list).toContain("card-day");
-    expect(list).toContain("Show this conversation in the day view of");
+    expect(list).toContain("Show this conversation&#x27;s latest turn in the day view");
   });
 
   it("shows the selected turn with the way into its tree", () => {
@@ -127,8 +130,8 @@ describe("day view", () => {
     expect(html).toContain("starts the fork");
   });
 
-  it("offers the latest active day when the shown one is empty", () => {
-    const latest = { activeAt: new Date(2026, 9, 20, 15).getTime() } as SessionMeta;
+  it("offers the latest turn when the shown day is empty", () => {
+    const latest = { id: P, provider: "claude", title: "Build", cwd: "/work", activeAt: new Date(2026, 9, 20, 15).getTime() } as SessionMeta;
     useStore.setState({
       settingsOpen: false,
       listMode: "day",
@@ -138,6 +141,7 @@ describe("day view", () => {
     });
     const html = renderToStaticMarkup(<Welcome />);
     expect(html).toContain("No activity on");
-    expect(html).toContain("go to the latest activity");
+    expect(html).toContain("go to the latest turn");
+    expect(html).toContain("“Build”: its latest turn");
   });
 });
