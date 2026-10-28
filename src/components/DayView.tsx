@@ -370,6 +370,7 @@ export function DayView() {
         <DayCard
           layout={layout}
           selected={selected}
+          showPaths={!cwdFilter}
           onPick={pick}
           onOpen={open}
         />
@@ -547,11 +548,17 @@ ${l.turns.length} turns this day — click for the latest`}
 function DayCard({
   layout,
   selected,
+  showPaths,
   onPick,
   onOpen,
 }: {
   layout: DayLayout | null;
   selected: DayDot | null;
+  /**
+   * Each chat's directory. Only under "All conversations": with a directory
+   * picked in the rail every chat shown is in it (as the list's cards).
+   */
+  showPaths: boolean;
   onPick: (key: string | null) => void;
   onOpen: (d: DayDot) => void;
 }) {
@@ -571,6 +578,9 @@ function DayCard({
                     {chatName(l.chat)}
                   </span>
                 </span>
+                {showPaths && (
+                  <code className="path day-chat-path">{l.chat.cwd ? tilde(l.chat.cwd) : "(unknown directory)"}</code>
+                )}
                 <span className="muted small">
                   {l.turns.length} turns · {clock(layout.byKey.get(l.turns[0])!.turn.timestamp)}–
                   {clock(endOf(laneLatest(layout, l)!.turn))}
@@ -602,7 +612,7 @@ function DayCard({
           {chat.parentEvidence === "inferred" ? "probably forked from" : "forked from"} “{chat.parentTitle ?? chat.familyTitle}”
         </div>
       )}
-      <code className="path">{chat.cwd ? tilde(chat.cwd) : "(unknown directory)"}</code>
+      {showPaths && <code className="path">{chat.cwd ? tilde(chat.cwd) : "(unknown directory)"}</code>}
       <div className="day-card-meta small">
         <span className={`role ${t.role}`}>{t.midTurn ? "mid-turn " : ""}{t.role === "user" ? "you" : "agent"}</span>
         {" · "}

@@ -5,6 +5,7 @@ import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
 import { filterSessions, focusFor, ofProvider, railDirs, shownForks, timeOf, type RailDir } from "../list.ts";
 import { Settings } from "./Settings.tsx";
 import { DayView } from "./DayView.tsx";
+import { dayKeyOf, dayTitle, shortDay } from "../day.ts";
 import { ErrorBanner } from "./ErrorBanner.tsx";
 import logoUrl from "../../assets/logo.png";
 
@@ -86,7 +87,7 @@ const RAIL_DIRS = 10;
 export function Welcome() {
   const {
     sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen,
-    saveSettings, error, settingsError, listMode,
+    saveSettings, error, settingsError, listMode, showInDay,
   } = useStore();
   const dayMode = listMode === "day";
   const sortBy = settings?.settings.sortBy ?? "active";
@@ -295,46 +296,61 @@ export function Welcome() {
               const forks = shownForks(s, filter);
               return (
                 <li key={`${s.provider}:${s.id}`} className="tree-card">
-                  <button className="tree-main" onClick={() => void openSession(s.id, { focus: focusFor(s, filter) })}>
-                    <span className="tree-title">
-                      <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
-                      {s.title}
-                      {s.archived && <span className="fork-badge">archived</span>}
-                    </span>
-                    <span className="muted small tree-sub">
-                      {!cwdFilter && (
-                        <>
-                          <code className="cwd" title={s.cwd}>
-                            {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
-                          </code>
-                          {" · "}
-                        </>
-                      )}
-                      {s.nodeCount} turns
-                      {s.branchPoints > 0 && (
-                        <span className="branch-badge" title="branch points">
-                          ⑂ {s.branchPoints}
-                        </span>
-                      )}
-                      {(s.members ?? 1) > 1 && (
-                        <span className="fork-badge" title="sessions stitched into this tree (forks)">
-                          {s.members} sessions
-                        </span>
-                      )}
-                      {" · "}
-                      <span
-                        title={
-                          sortBy === "touched"
-                            ? `Last file change. Last message or tool activity: ${new Date(s.activeAt).toLocaleString()}`
-                            : `Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`
-                        }
-                      >
-                        {when(timeOf(s, sortBy))}
+                  <div className="tree-card-row">
+                    <button className="tree-main" onClick={() => void openSession(s.id, { focus: focusFor(s, filter) })}>
+                      <span className="tree-title">
+                        <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
+                        {s.title}
+                        {s.archived && <span className="fork-badge">archived</span>}
                       </span>
-                      {" · "}
-                      <code className="id-short">{s.id.slice(0, 8)}</code>
-                    </span>
-                  </button>
+                      <span className="muted small tree-sub">
+                        {!cwdFilter && (
+                          <>
+                            <code className="cwd" title={s.cwd}>
+                              {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
+                            </code>
+                            {" · "}
+                          </>
+                        )}
+                        {s.nodeCount} turns
+                        {s.branchPoints > 0 && (
+                          <span className="branch-badge" title="branch points">
+                            ⑂ {s.branchPoints}
+                          </span>
+                        )}
+                        {(s.members ?? 1) > 1 && (
+                          <span className="fork-badge" title="sessions stitched into this tree (forks)">
+                            {s.members} sessions
+                          </span>
+                        )}
+                        {" · "}
+                        <span
+                          title={
+                            sortBy === "touched"
+                              ? `Last file change. Last message or tool activity: ${new Date(s.activeAt).toLocaleString()}`
+                              : `Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`
+                          }
+                        >
+                          {when(timeOf(s, sortBy))}
+                        </span>
+                        {" · "}
+                        <code className="id-short">{s.id.slice(0, 8)}</code>
+                      </span>
+                    </button>
+                    {/* Where this conversation sits in its day, among every other chat. */}
+                    <button
+                      className="ghost card-day"
+                      title={`Show this conversation in the day view of ${dayTitle(dayKeyOf(s.activeAt))}, among every chat that day`}
+                      onClick={() =>
+                        void showInDay(dayKeyOf(s.activeAt), {
+                          provider: s.provider,
+                          sessions: [s.id, ...(s.forks ?? []).map((f) => f.id)],
+                        })
+                      }
+                    >
+                      ◷ {shortDay(dayKeyOf(s.activeAt))}
+                    </button>
+                  </div>
                   {/* The family's other chats by name: a fork's title is often the
                       more descriptive one, and each opens the tree on that fork. */}
                   {forks.shown.length > 0 && (

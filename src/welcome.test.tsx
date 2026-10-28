@@ -105,6 +105,20 @@ describe("day view", () => {
     expect(day).toContain("edge cross");
   });
 
+  it("puts each chat's repository in the day's chat list, and a way into its day on each list card", () => {
+    useStore.setState({ settingsOpen: false, listMode: "day", day: "2026-10-28", dayActivity: activity, daySelected: null });
+    expect(renderToStaticMarkup(<Welcome />)).toContain('<code class="path day-chat-path">/work</code>');
+    // With a directory picked, every chat shown is in it: no path to repeat.
+    useStore.setState({ cwdFilter: "/work" });
+    expect(renderToStaticMarkup(<Welcome />)).not.toContain("day-chat-path");
+    useStore.setState({ cwdFilter: "" });
+    const card = { id: P, provider: "claude", cwd: "/work", project: "work", title: "Build", activeAt: start + 3_600_000, touchedAt: start + 3_600_000, nodeCount: 2, branchPoints: 0, resumeCommand: "" } as SessionMeta;
+    useStore.setState({ listMode: "list", sessions: [card] });
+    const list = renderToStaticMarkup(<Welcome />);
+    expect(list).toContain("card-day");
+    expect(list).toContain("Show this conversation in the day view of");
+  });
+
   it("shows the selected turn with the way into its tree", () => {
     useStore.setState({ settingsOpen: false, listMode: "day", day: "2026-10-28", dayActivity: activity, daySelected: `claude:${P}:f1` });
     const html = renderToStaticMarkup(<Welcome />);

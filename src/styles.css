@@ -122,6 +122,11 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
   border-radius: var(--radius); padding: 10px 13px; margin: 4px 0;
 }
 .tree-card:hover { border-color: var(--accent); }
+/* The card's tree button, with the way into its day beside it. */
+.tree-card-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.tree-card-row .tree-main { flex: 1; }
+.card-day { flex: none; white-space: nowrap; }
+.tree-card:hover .card-day { border-color: var(--line); color: var(--fg); }
 /* The card's main target; the fork names under it are buttons of their own. */
 .tree-main {
   display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0;
@@ -637,6 +642,7 @@ text.day-tick.start, text.day-tick.resume { fill: var(--fg); }
 /* The name wraps beside the chip, not under it. */
 .day-chat-name .provider-chip { flex: none; }
 .day-chat-name > span:last-child { min-width: 0; }
+.day-chat-path { max-width: 100%; overflow-wrap: anywhere; }
 .day-back { align-self: flex-start; padding-left: 0; }
 .day-card-chat { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; overflow-wrap: anywhere; }
 .day-card-meta { color: var(--muted); }
