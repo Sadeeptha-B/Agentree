@@ -9,6 +9,10 @@
   --user: #6c9bd1;
   --assistant: #c96442;
   --danger: #d05a52;
+  /* Agent identities, the same in both themes (see .provider-chip). */
+  --p-claude: #c96442;
+  --p-codex: #10a37f;
+  --p-copilot: #6c9bd1;
   --radius: 6px;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -526,3 +530,116 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
 .settings-path input:disabled { opacity: 0.6; }
 .settings-file code { font-family: var(--mono); word-break: break-all; }
 .sort-toggle { white-space: nowrap; padding: 2px 8px; }
+
+/* ---------------------------------------------------------------- day view */
+
+/* List | Day switch at the head of the welcome pane. */
+.mode-toggle { display: flex; flex: none; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.mode-toggle button { background: var(--panel); border: 0; color: var(--muted); padding: 5px 12px; font-size: 12px; }
+.mode-toggle button + button { border-left: 1px solid var(--line); }
+.mode-toggle button:hover { color: var(--fg); }
+.mode-toggle button.on { background: var(--accent); color: #fff; }
+
+/* In day mode the pane stops scrolling: the timeline fills it and pans itself. */
+.session-pane.day-mode { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 14px; }
+.day { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.day-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.day-head button.ghost { border-color: var(--line); }
+.day-head button:disabled { opacity: 0.4; cursor: default; }
+.day-date {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 3px 8px; font-size: 12px; color-scheme: light dark;
+}
+.day-title { font-weight: 600; margin: 0 6px 0 8px; }
+.day-body { flex: 1; min-height: 0; display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.day-canvas { min-height: 0; }
+.day-tools { left: auto; right: 10px; }
+.empty-day { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+button.ghost.bordered { border-color: var(--line); color: var(--fg); }
+
+.day-lane { fill: transparent; }
+.day-lane.odd { fill: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+.day-lane.hover { fill: color-mix(in srgb, var(--accent) 7%, transparent); }
+.day-lane.selected { fill: color-mix(in srgb, var(--accent) 12%, transparent); }
+.day-lane-bar.claude { fill: var(--p-claude); }
+.day-lane-bar.codex { fill: var(--p-codex); }
+.day-lane-bar.copilot { fill: var(--p-copilot); }
+.day-family-sep { stroke: var(--line); stroke-width: 1; }
+.day-tick line { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+.day-tick text { font-size: 10px; fill: var(--muted); text-anchor: middle; font-family: var(--mono); }
+.day-tick.start text, .day-tick.resume text { fill: var(--fg); }
+.day-break rect { fill: color-mix(in srgb, var(--muted) 10%, transparent); stroke: var(--line); stroke-dasharray: 3 3; }
+.day-break text { font-size: 9.5px; fill: var(--muted); text-anchor: middle; font-family: var(--mono); }
+.edge.lead { stroke-dasharray: 0.1 4; stroke-linecap: round; stroke-width: 2; }
+
+.day-dot { cursor: pointer; }
+.day-dot .mark { stroke-width: 2; }
+.day-dot.user .mark { stroke: var(--bg); }
+.day-dot.assistant .mark { fill: var(--bg); stroke-width: 2.5; }
+.day-dot.user.claude .mark { fill: var(--p-claude); }
+.day-dot.user.codex .mark { fill: var(--p-codex); }
+.day-dot.user.copilot .mark { fill: var(--p-copilot); }
+.day-dot.assistant.claude .mark { stroke: var(--p-claude); }
+.day-dot.assistant.codex .mark { stroke: var(--p-codex); }
+.day-dot.assistant.copilot .mark { stroke: var(--p-copilot); }
+.day-dot.mid .mark { fill: var(--bg); stroke-dasharray: 2 2; }
+.day-dot.mid.claude .mark { stroke: var(--p-claude); }
+.day-dot.mid.codex .mark { stroke: var(--p-codex); }
+.day-dot.mid.copilot .mark { stroke: var(--p-copilot); }
+.day-dot.sidechain { opacity: 0.5; }
+.day-dot:hover .mark { stroke-width: 3; }
+.day-dot.user:hover .mark { stroke: var(--fg); }
+.day-dot .halo { fill: none; stroke: var(--accent); stroke-width: 2; }
+
+/* Chat names, pinned left over the canvas. */
+.day-labels { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; pointer-events: none; z-index: 1; }
+.day-label {
+  position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 5px;
+  padding: 0 8px 0 10px; border: 0; border-right: 1px solid var(--line); text-align: left;
+  background: color-mix(in srgb, var(--panel) 92%, transparent); font-size: 12px;
+  pointer-events: auto; overflow: hidden; white-space: nowrap;
+}
+.day-label:hover, .day-label.selected { color: var(--fg); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.day-label.thin { font-size: 0; }
+.day-label-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.day-label-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.day-label-dot.claude, .lg-p.claude { background: var(--p-claude); }
+.day-label-dot.codex, .lg-p.codex { background: var(--p-codex); }
+.day-label-dot.copilot, .lg-p.copilot { background: var(--p-copilot); }
+.lg-filled { background: var(--muted); }
+.lg-ring { background: none; border: 2px solid var(--muted); }
+.lg-break {
+  width: 14px; height: 10px; display: inline-block; border: 1px dashed var(--line);
+  background: color-mix(in srgb, var(--muted) 10%, transparent);
+}
+
+/* The side card: the selected turn, or the day's chats. */
+.day-card {
+  width: 320px; flex: none; border-left: 1px solid var(--line); background: var(--panel);
+  overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+}
+.day-card h3 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
+.day-chats { list-style: none; margin: 0; padding: 0; }
+.day-chat {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%;
+  background: none; border: 1px solid transparent; border-radius: var(--radius); padding: 5px 6px; text-align: left;
+}
+.day-chat:hover { border-color: var(--line); background: var(--panel-2); }
+.day-chat-name { font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.day-chat-name .provider-chip { vertical-align: 1px; }
+.day-back { align-self: flex-start; padding-left: 0; }
+.day-card-chat { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px; overflow-wrap: anywhere; }
+.day-card-meta { color: var(--muted); }
+.day-card-text {
+  white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.55;
+  background: var(--panel-2); border-radius: var(--radius); padding: 8px 10px;
+}
+.day-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.day-card-actions button:disabled { opacity: 0.4; cursor: default; }
+
+/* Narrow panes (a VS Code side panel): the card goes under the timeline. */
+@media (max-width: 900px) {
+  .day-body { flex-direction: column; }
+  .day-canvas { min-height: 260px; }
+  .day-card { width: auto; max-height: 42%; border-left: 0; border-top: 1px solid var(--line); }
+}

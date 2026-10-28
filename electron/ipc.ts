@@ -5,6 +5,7 @@
 export const CH = {
   listSessions: "sessions:list",
   getSession: "sessions:get",
+  getDay: "sessions:day",
   patchNode: "sessions:patchNode",
   forkAt: "sessions:forkAt",
   providerHealth: "providers:health",

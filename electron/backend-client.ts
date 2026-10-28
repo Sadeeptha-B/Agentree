@@ -16,6 +16,7 @@ export type Backend = {
 const METHOD_NAMES = {
   listSessions: true,
   getSession: true,
+  getDay: true,
   patchNode: true,
   forkAt: true,
   providerHealth: true,

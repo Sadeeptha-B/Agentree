@@ -50,6 +50,12 @@ export function descendToNewestLeaf(id: NodeId, children: Map<string, TurnNode[]
   }
 }
 
+/**
+ * The oldest of several start times (`SessionMeta.startedAt`): 0, unknown,
+ * when any of them is, so the result stays a lower bound for every turn.
+ */
+export const oldest = (ts: number[]): number => (ts.length && ts.every((t) => t > 0) ? Math.min(...ts) : 0);
+
 /** When a node's last part was written: a merged or streamed node ends after it starts. */
 export const endOf = (n: TurnNode): number => Math.max(n.timestamp, n.endedAt ?? 0);
 

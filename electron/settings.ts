@@ -46,6 +46,7 @@ function viewOf(v: unknown): ViewState | undefined {
     compress: bool(v.compress, true),
     cwdFilter: typeof v.cwdFilter === "string" ? v.cwdFilter : "",
     providerFilter: PROVIDERS.includes(v.providerFilter as ProviderId) ? (v.providerFilter as ProviderId) : "",
+    ...(v.mode === "list" || v.mode === "day" ? { mode: v.mode } : {}),
   };
 }
 
