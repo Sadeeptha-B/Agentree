@@ -135,6 +135,9 @@ The sketch below is illustrative; its counts are not a current store audit.
   is highlighted and brought forward under the family card. Clicking a name,
   or opening a card matched only by a fork, opens the tree **on that fork**:
   its newest turn is selected, and the panel's open/resume act on it.
+- **◷ date on a card:** shows that conversation in the [day view](#the-day-view)
+  of its latest activity, with its latest turn selected among every other
+  chat of that day.
 - **Fork names:** cards show up to three names, more when needed to show search
   matches, then `+N`. Names are ordered by activity after search matches.
 - **Sort indicator beside the count:** switches between last activity and last
@@ -197,7 +200,14 @@ conversation, on one graph.
   latest turn, the one that finished last), or use the keys: **←/→** the previous/next turn in the chat,
   **↑/↓** the chat above/below, at its turn nearest in time. Picking a chat
   or a turn moves the keyboard to the timeline, so **Enter** then opens it. The card on the
-  right shows the turn's chat, directory, time and the start of its text.
+  right lists the day's chats with their times, or shows the selected turn's
+  chat, time and the start of its text. Under **All conversations** it also
+  shows each chat's directory; with a directory picked in the rail, every
+  chat shown is in it.
+- **Getting here from a chat:** the **◷ date** button on a list card, or in
+  a tree's toolbar (for the selected turn), opens that chat's day with it
+  selected and in view. If the agent chips, directory or search would hide
+  it, they are cleared.
 - **Open in tree** (or **Enter**, or double-click) opens that conversation's
   tree focused on that chat, with the turn selected as the day drew it (if
   the tree has changed since, the turn that now ends there); **Esc** comes
@@ -217,7 +227,9 @@ conversation, on one graph.
   lights up.
 - **Click a dotted segment** (`⋮ 6`) to unfold the hidden turns. Click it again
   to fold them.
-- **Esc** goes back to the list.
+- **◷ date** in the toolbar shows the selected turn in its day, among every
+  other chat of that day.
+- **Esc** goes back to the list (or the day view, if that's where you came from).
 
 ### The side panel
 
@@ -549,6 +561,7 @@ Open:            Ctrl/Cmd+Shift+P → "Agentree: Open Conversation Trees"
 Find:            agent chip + directory + title/fork-name search
 Sort:            click "by last activity / last file change" beside the count
 Day view:        List | Day switch · ←/→ within a chat · ↑/↓ other chats · Enter = open in tree
+                 ◷ date on a card or in a tree's toolbar = that chat in its day
 Navigate:        drag · scroll-zoom · fit · Esc = back to list
 Unfold turns:    click a dotted ⋮ n segment
 Lines:           solid = same session · long dash = fork / edited branch

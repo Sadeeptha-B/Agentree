@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
 import { childIndex, locate, locateBy, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
-import { dayBounds, todayKey, turnKey } from "./day.ts";
+import { dayBounds, filterDay, resolveTarget, todayKey, turnKey, type DayTarget } from "./day.ts";
 import { chainHolding } from "./tree-layout.ts";
 import type {
   DayActivity,
@@ -45,8 +45,19 @@ interface State {
   daySelected: string | null;
   /** The day view's pan and zoom when it last closed (a tree opened from it), to come back to. */
   dayViewport: { day: string; tx: number; ty: number; k: number } | null;
+  /**
+   * A chat asked for from another view (`showInDay`), selected once its
+   * day's turns arrive; `day` is the day it was asked for on.
+   */
+  dayTarget: (DayTarget & { day: string }) | null;
   /** Show another day. Its turns load with `loadDay`. */
   setDay: (key: string) => void;
+  /**
+   * Switch to the day view on `day` and select `target` there: a list card's
+   * conversation, or the tree's selected turn (the tree closes). Filters that
+   * would hide it are cleared. A fresh fit brings it into view.
+   */
+  showInDay: (day: string, target: DayTarget) => Promise<void>;
   /** (Re)load the current day's turns. A result for a day the user has left is dropped. */
   loadDay: () => Promise<void>;
 
@@ -188,6 +199,7 @@ export const useStore = create<State>((set, get) => ({
   dayLoading: false,
   daySelected: null,
   dayViewport: null,
+  dayTarget: null,
 
   session: null,
   nodes: new Map(),
@@ -261,7 +273,15 @@ export const useStore = create<State>((set, get) => ({
   setDay: (day) => {
     if (day === get().day) return;
     // The old day's turns under the new day's title would be a lie.
-    set({ day, dayActivity: null, daySelected: null });
+    set({ day, dayActivity: null, daySelected: null, dayTarget: null });
+  },
+
+  showInDay: async (day, target) => {
+    if (get().session) get().close();
+    // No kept viewport and no turns of an earlier load: the view fits afresh
+    // once the target is selected, which brings it into view.
+    set({ listMode: "day", day, dayActivity: null, daySelected: null, dayViewport: null, dayTarget: { ...target, day } });
+    await get().loadDay();
   },
 
   loadDay: () =>
@@ -273,6 +293,22 @@ export const useStore = create<State>((set, get) => ({
         const activity = await api.getDay(start, end);
         // The user moved to another day meanwhile; the gate runs again for it.
         if (get().day !== day) return;
+        const target = get().dayTarget;
+        if (target?.day === day) {
+          // A chat asked for from the list or a tree: shown even if the
+          // filters would hide it.
+          const found = resolveTarget(activity, target);
+          const { filter: query, cwdFilter: cwd, providerFilter: provider } = get();
+          const hidden =
+            !!found && !filterDay(activity, { query, cwd, provider }).turns.some((t) => turnKey(t) === turnKey(found));
+          set({
+            dayActivity: activity,
+            daySelected: found ? turnKey(found) : null,
+            dayTarget: null,
+            ...(hidden ? { filter: "", cwdFilter: "", providerFilter: "" as const } : {}),
+          });
+          return;
+        }
         const sel = get().daySelected;
         const was = sel ? get().dayActivity?.turns.find((t) => turnKey(t) === sel) : undefined;
         // Node ids are unique per agent at most: look among that agent's turns.

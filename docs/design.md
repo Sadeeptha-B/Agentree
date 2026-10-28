@@ -1039,6 +1039,17 @@ build; nothing about parsing, stitching or identity is specific to it.
   turn is opened (`chainHolding`). The day view's pan and zoom are kept in
   the store when it closes (`dayViewport`), so Esc returns to the same day,
   turn and view; a fresh fit brings a kept selection into view.
+- **Into the day from a chat.** `showInDay(day, target)` is the way back the
+  other direction: a list card's ◷ (`{ provider, sessions }`: the family and
+  its forks, on the day of `activeAt`) or the tree toolbar's
+  (`{ provider, ref: refOf(selected) }`, on the day the turn started). It
+  closes an open tree, drops the kept viewport and that day's old turns,
+  and leaves the target pending (`dayTarget`) until a load of that day
+  arrives — whichever load does, since the gate may coalesce it with the
+  view's own. `resolveTarget` (`src/day.ts`) picks the turn by `locateBy`,
+  or the sessions' latest-ending turn by `endOf`; a target for a day the
+  user has left meanwhile is dropped. A target the filters would hide clears
+  them: the chat was asked for by name. The fresh fit then reveals it.
 - **Layout** (`src/day-layout.ts`, fuzzed like the tree's): families in order
   of their first turn of the day, a root's lane first. Inside a lane, tracks
   as in a git log: a turn continues the track its parent ends, anything else
@@ -1414,7 +1425,10 @@ dangling parent, one root per path), not session counts.
   and welcome tests cover a turn opened from the day view (chain opened,
   member focused, the drawn end kept after its group split, the focused
   chat's family asked first), a day refresh keeping the drawn range across
-  a split and a re-root, stale day results, and the day markup.
+  a split and a re-root, `showInDay` from a tree (the tree closes, the turn
+  is found as drawn, hiding filters give way, a target for a day left
+  meanwhile is dropped), `resolveTarget`, stale day results, and the day
+  markup (directories only under All conversations, the ◷ card button).
   **Registry:** with `AGENTREE_READ_ONLY_STORES` a fork is refused before
   any provider is asked, and hand-offs are refused. Focus, the kept
   viewport, the narrow, short layout, wheel cancellation and Settings'

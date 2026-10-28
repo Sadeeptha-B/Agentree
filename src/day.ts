@@ -1,5 +1,5 @@
-import { cwdKey } from "../shared/render.ts";
-import type { DayActivity, DayChat, ProviderId, SessionMeta } from "../shared/types.ts";
+import { cwdKey, endOf, locateBy } from "../shared/render.ts";
+import type { DayActivity, DayChat, DayTurn, NodeRef, ProviderId, SessionId, SessionMeta } from "../shared/types.ts";
 
 /**
  * The day view's rules, kept apart from the component so they can be tested
@@ -52,6 +52,10 @@ export const dayTitle = (key: string): string =>
     day: "numeric",
     year: "numeric",
   });
+
+/** "Oct 28", in the user's locale. */
+export const shortDay = (key: string): string =>
+  new Date(dayBounds(key).start).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
 /** "14:05" in the user's locale. */
 export const clock = (t: number): string => new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -121,3 +125,23 @@ export const laneKey = (x: { provider: ProviderId; sessionId: string }): string 
  */
 export const turnKey = (t: { provider: ProviderId; familyId: string; id: string }): string =>
   `${t.provider}:${t.familyId}:${t.id}`;
+
+/**
+ * A chat to find in the day view: a turn as another view drew it (the
+ * tree's selection), or a conversation's sessions (a list card), which
+ * lands on their latest-ending turn of the day.
+ */
+export type DayTarget = { provider: ProviderId } & ({ ref: NodeRef } | { sessions: SessionId[] });
+
+/** The turn of `day` a target stands for, or null when it has none that day. */
+export function resolveTarget(day: DayActivity, target: DayTarget): DayTurn | null {
+  const mine = day.turns.filter((t) => t.provider === target.provider);
+  if ("ref" in target) return locateBy(mine, (t) => t.ref, target.ref);
+  const ids = new Set(target.sessions);
+  let best: DayTurn | null = null;
+  for (const t of mine) {
+    if (!ids.has(t.sessionId) && !ids.has(t.familyId)) continue;
+    if (!best || endOf(t) >= endOf(best)) best = t;
+  }
+  return best;
+}

@@ -134,8 +134,14 @@ const COMMANDS = {
     });
     await send("Runtime.enable");
     await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 860, deviceScaleFactor: 1, mobile: false });
-    // Ready: the welcome screen has scanned (the count replaces "scanning…").
-    await waitFor(`/\\d+ conversations/.test(document.body.innerText)`, "the conversation list", 60_000);
+    // Ready: the scan has listed something, or said why it found nothing.
+    // ("0 conversations" shows before the first scan answers, so the count
+    // alone isn't a signal.)
+    await waitFor(
+      `!!document.querySelector(".tree-card") || /No agent sessions found/.test(document.body.innerText)`,
+      "the conversation list",
+      60_000,
+    );
     return `launched (${mode}); stores and AGENTREE_HOME under ${tmp}`;
   },
 
