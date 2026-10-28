@@ -48,6 +48,8 @@ npm run test:watch       # focused test iteration
 
 For extension development, F5 from the root runs the configured build task and launches an Extension Development Host. Rebuild/reload after changes. Package with `npm run package` inside `vscode-ext/`; VS Code installs the resulting `.vsix`. Regenerate icons with `scripts/make-icon.py` when changing the source logo.
 
+To see a renderer change in the running desktop app (screenshots, clicks, keys), use the [run-desktop skill](.claude/skills/run-desktop/SKILL.md): `npm run build`, then pipe commands to its driver. It runs on the committed fixtures by default; its `real` mode reads your stores with a scratch Agentree home and refuses fork clicks. A desktop screenshot is not a VS Code webview check.
+
 For implementation changes, run relevant tests and typecheck; verify both production builds when shared code, runtime boundaries, entry points or bundling change. For documentation-only work, check moved links/anchors and commands against package scripts. A prose edit does not require an unrelated full test/build run.
 
 When a harness changes format, add a sanitized synthetic fixture before changing the parser. Assert exact ancestry, member endpoints and action targets as well as unique IDs/no dangling parents. Counts and structural validity alone do not prove semantic correctness. Fixture coverage and vendor canaries are described in the [design notes](docs/design.md#tests).
