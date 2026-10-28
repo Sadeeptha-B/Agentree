@@ -18,7 +18,7 @@ import { lineageOf, readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
 import { resumeCommandFor } from "../launch.ts";
 import { assignStableIds, digest, foldedTextKey, textKey } from "../identity.ts";
-import { stitchFamily, type FamilyMember } from "./stitch.ts";
+import { stitchFamily, type ActivityRecord, type FamilyMember } from "./stitch.ts";
 
 
 /**
@@ -91,8 +91,8 @@ interface ParsedSession {
   nodes: TurnNode[];
   /** For each turn, the index of the LAST event line belonging to it. */
   endLine: number[];
-  /** Times of the activity events after each turn, by node id: what stitching tells copied history from a fork's own work. */
-  activity: Map<string, number[]>;
+  /** The activity events after each turn, by node id: what stitching tells copied history from a fork's own work. */
+  activity: Map<string, ActivityRecord[]>;
   touchedAt: number;
   /** Oldest timestamp on any event; 0 if none carried one. */
   startedAt: number;
@@ -107,6 +107,17 @@ interface ParsedSession {
  */
 const ACTIVITY = /^(user|assistant|tool|external_tool|subagent)\./;
 
+/**
+ * What a copy keeps of an activity event (`ActivityRecord.key`): its kind,
+ * time and payload, as a digest. A fork copies the events line for line,
+ * rewriting only the session id in a payload, so that is left out — and so
+ * is the event id, which stitching doesn't rely on either (`stitched`).
+ */
+function activityKey(ev: RawEvent): string {
+  const { sessionId: _, ...data } = ev.data ?? {};
+  return digest(`${ev.type}\u0000${ev.timestamp}\u0000${JSON.stringify(data)}`);
+}
+
 function parseEvents(dir: string): ParsedSession | null {
   const ws = readWorkspace(dir);
   if (!ws) return null;
@@ -119,7 +130,7 @@ function parseEvents(dir: string): ParsedSession | null {
 
   const nodes: TurnNode[] = [];
   const endLine: number[] = [];
-  const after = new Map<string, number[]>();
+  const after = new Map<string, ActivityRecord[]>();
   let touchedAt = 0;
   let startedAt = 0;
   let activeAt = 0;
@@ -147,9 +158,10 @@ function parseEvents(dir: string): ParsedSession | null {
     // isn't: a reply must not stay busy until the user's next prompt.
     const last = nodes[nodes.length - 1];
     if (activity && !drawn && last && ts > 0) {
+      const r = { at: ts, key: activityKey(ev) };
       const list = after.get(last.id);
-      if (list) list.push(ts);
-      else after.set(last.id, [ts]);
+      if (list) list.push(r);
+      else after.set(last.id, [r]);
       if (ts > (last.activeUntil ?? last.timestamp)) last.activeUntil = ts;
     }
 

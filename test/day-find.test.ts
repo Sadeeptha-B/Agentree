@@ -125,6 +125,53 @@ const ROOT = vi.hoisted(() => {
     ev("assistant.turn_end", "q4", "5T10:00:01.000"),
   ]);
 
+  // Copilot: a parent and its fork each running their own tool under the
+  // reply they share, both finishing at 10:00 exactly — the same instant,
+  // different calls and results. And a copy of the parent's whole history
+  // under rewritten ids, which recorded nothing of its own.
+  const fixing = (px: string) => [
+    ev("user.message", `${px}1`, "6T09:00:00.000", { content: "Fix it" }),
+    ev("assistant.message", `${px}2`, "6T09:01:00.000", { content: "Fixing", toolRequests: [{ name: "shell" }] }),
+  ];
+  const run = (px: string, call: string, from: string, result: string) => [
+    ev("tool.execution_start", `${px}3`, `6T${from}`, { toolCallId: call, toolName: "shell" }),
+    ev("tool.execution_complete", `${px}4`, "6T10:00:00.000", { toolCallId: call, success: true, result: { content: result } }),
+    ev("assistant.turn_end", `${px}5`, "6T10:00:00.000", { turnId: "0" }),
+  ];
+  session("c4000000-0000-4000-8000-00000000000a", "name: Fix\n", [...fixing("s"), ...run("s", "call-s", "09:15:00.000", "fixed")]);
+  session("c4000000-0000-4000-8000-00000000000b", `name: Fix (fork)\n${forkOf("c4000000-0000-4000-8000-00000000000a")}`, [
+    ...fixing("t"),
+    ...run("t", "call-t", "09:30:00.000", "still failing"),
+  ]);
+  session("c4000000-0000-4000-8000-00000000000c", `name: Fix (copy)\n${forkOf("c4000000-0000-4000-8000-00000000000a")}`, [
+    ...fixing("u"),
+    ...run("u", "call-s", "09:15:00.000", "fixed"),
+  ]);
+
+  // Claude: the same, a tool call answered at 10:00 in the parent ("3
+  // passed") and, re-run, at 10:00 in a fork taken at the reply that asked
+  // for it (extension format: fresh uuids, the last copied record re-stamped).
+  const sameDir = p.join(tmp, "claude", "projects", "c--work-same");
+  fs.mkdirSync(sameDir, { recursive: true });
+  const [SP, SF] = ["e0000000-0000-4000-8000-00000000000a", "e0000000-0000-4000-8000-00000000000b"];
+  const result = (sid: string, uuid: string, parentUuid: string, text: string, extra = {}) => ({
+    type: "user", uuid, parentUuid, sessionId: sid, timestamp: "2026-10-07T10:00:00.000Z", cwd: "/work/same", promptId: "pr-Run the tests",
+    message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_msg_same1", content: text, ...extra }] },
+  });
+  fs.writeFileSync(p.join(sameDir, `${SP}.jsonl`), jsonl([
+    prompt(SP, "sp-u1", null, "2026-10-07T09:00:00.000Z", "Run the tests"),
+    reply(SP, "sp-a1", "sp-u1", "2026-10-07T09:01:00.000Z", "msg_same1", "Running them."),
+    result(SP, "sp-r1", "sp-a1", "3 passed"),
+    { type: "assistant", uuid: "sp-a2", parentUuid: "sp-r1", sessionId: SP, timestamp: "2026-10-07T10:01:00.000Z", cwd: "/work/same",
+      message: { id: "msg_same2", role: "assistant", content: [{ type: "text", text: "All green." }] } },
+  ]));
+  const sameFrom = { forkedFrom: { sessionId: SP, messageUuid: "sp-a1" } };
+  fs.writeFileSync(p.join(sameDir, `${SF}.jsonl`), jsonl([
+    prompt(SF, "sf-u1", null, "2026-10-07T09:00:00.000Z", "Run the tests", sameFrom),
+    reply(SF, "sf-a1", "sf-u1", "2026-10-07T09:30:00.000Z", "msg_same1", "Running them.", sameFrom),
+    result(SF, "sf-r1", "sf-a1", "1 failed", { is_error: true }),
+  ]));
+
   // A Codex turn whose command runs for 48 minutes after the reply, then the next turn.
   const thread = "01900000-0000-7000-8000-0000000c0001";
   const turnA = "01900000-0000-7000-8000-0000000c00a1";
@@ -306,6 +353,33 @@ describe("idle time from recorded activity", () => {
     expect(drawn.heldBy?.length).toBe(1);
     // Copied history, however late it ends, is no work of the fork's.
     expect(a.running.filter((r) => r.familyId === Q)).toEqual([]);
+  });
+
+  it("keeps a fork's work that ends at the same instant as different work of its parent's", () => {
+    const [S, T, U] = ["a", "b", "c"].map((c) => `c4000000-0000-4000-8000-00000000000${c}`);
+    const OCT6 = OCT1 + 5 * DAY;
+    const a = dayActivity(OCT6, OCT6 + DAY);
+    expect(turn(a, S, "Fixing")).toMatchObject({ heldBy: [T, U], activeUntil: at("2026-10-06T10:00:00.000Z") });
+    // The fork's call ran 09:30–10:00. Its completion shares only a time
+    // with the parent's; the copy under rewritten ids shares its records.
+    expect(a.running.filter((r) => r.familyId === S)).toEqual([
+      { provider: "copilot", familyId: S, sessionId: T, start: at("2026-10-06T09:30:00.000Z"), end: at("2026-10-06T10:00:00.000Z") },
+    ]);
+  });
+
+  it("tells a Claude fork's re-run answer from its parent's at the same instant, and a copied answer from either", async () => {
+    const [SP, SF] = ["a", "b"].map((c) => `e0000000-0000-4000-8000-00000000000${c}`);
+    const OCT7 = OCT1 + 6 * DAY;
+    // Agentree's own fork after the final reply copies the parent's answer
+    // under a fresh uuid: that is copied history, not work.
+    const done = loadAnySession(SP)!.nodes.find((n) => n.text === "All green.")!;
+    const fork = await forkAnyAt(SP, forkPointOf(done));
+    expect(fork.ok).toBe(true);
+    const a = dayActivity(OCT7, OCT7 + DAY);
+    expect(turn(a, SP, "Running them.").heldBy).toEqual(expect.arrayContaining([SF, fork.ok ? fork.id : ""]));
+    expect(a.running.filter((r) => r.familyId === SP)).toEqual([
+      { provider: "claude", familyId: SP, sessionId: SF, start: at("2026-10-07T10:00:00.000Z"), end: at("2026-10-07T10:00:00.000Z") },
+    ]);
   });
 
   it("carries a tool run past midnight into the next day, as running", () => {

@@ -16,7 +16,7 @@ import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
 import { resumeCommandFor } from "./launch.ts";
 import { assignStableIds, digest, foldedDigest } from "./identity.ts";
-import { overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
+import { overlap, stitchFamily, type ActivityRecord, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
   const parts = dirName.split("-").filter(Boolean);
@@ -70,7 +70,8 @@ export interface RawRecord {
    */
   attachment?: {
     type?: string;
-    prompt?: string;
+    /** Text, or (observed) content blocks. */
+    prompt?: string | unknown[];
     /** "prompt" for the user's own /btw messages, "task-notification" for plumbing. */
     commandMode?: string;
     origin?: { kind?: string } | null;
@@ -536,8 +537,8 @@ export interface Parsed {
   nodes: TurnNode[];
   /** Stitch evidence per node id: `m:<message.id>` / `p:<promptId>|<digest>` / `u:|<digest>`. */
   keys: Map<NodeId, string>;
-  /** Times of the activity records under each node (`markActivity`): what stitching tells copied history from a copy's own work. */
-  activity: Map<NodeId, number[]>;
+  /** The activity records under each node (`markActivity`): what stitching tells copied history from a copy's own work. */
+  activity: Map<NodeId, ActivityRecord[]>;
   /**
    * Every assistant API message id in the file. The API mints one per
    * response, and a copy-fork preserves the ones it copies, so two files
@@ -669,6 +670,40 @@ const isActivity = (rec: RawRecord) =>
   (rec.type === "system" && rec.subtype === "compact_boundary");
 
 /**
+ * What a copy keeps of an activity record (`ActivityRecord.key`), bounded as
+ * a digest. A copy gives every record a fresh uuid but keeps its time, the
+ * API message id and the content, so: the time and kind, the message id, and
+ * per content block the call it makes or answers with its length — and an
+ * answer's outcome, since a fork that re-runs a copied call answers the same
+ * call id. A queued message's prompt the same way. Ids and lengths, not the
+ * payload: the key is made for every activity record of every parse. Shapes
+ * are as found, never as typed: a prompt can be text or blocks.
+ */
+function activityKey(rec: RawRecord): string {
+  const parts = [rec.type, rec.subtype, rec.timestamp, rec.message?.id, ...contentKey(rec.message?.content)];
+  if (rec.attachment?.type === "queued_command") parts.push(...contentKey(rec.attachment.prompt));
+  return digest(parts.map((p) => p ?? "").join("\u0000"));
+}
+
+/** Text's length, or each block's `blockKey`. */
+const contentKey = (c: unknown): string[] =>
+  typeof c === "string" ? [String(c.length)] : Array.isArray(c) ? c.map(blockKey) : [];
+
+/** A content block's part of `activityKey`: its kind, the call it makes or answers, its outcome and length. */
+function blockKey(b: unknown): string {
+  if (!b || typeof b !== "object") return "";
+  const x = b as { type?: string; id?: string; tool_use_id?: string; is_error?: boolean; text?: unknown; content?: unknown };
+  const body = typeof x.text === "string" ? x.text : x.content;
+  const size =
+    typeof body === "string"
+      ? String(body.length)
+      : Array.isArray(body)
+        ? body.map((p: { type?: string; text?: unknown }) => (typeof p?.text === "string" ? p.text.length : p?.type ?? "")).join(",")
+        : "";
+  return `${x.type ?? ""}:${x.id ?? x.tool_use_id ?? ""}:${x.is_error ? "!" : ""}:${size}`;
+}
+
+/**
  * The activity under each drawn node (`Parsed.activity`), and from it
  * `TurnNode.activeUntil`: each activity record (`isActivity`) counts for its
  * nearest drawn ancestor — a tool result, a tool-only reply, a subagent's
@@ -683,7 +718,7 @@ function markActivity(
   drawn: Set<string>,
   own: Set<string>,
   parentOf: Map<string, string | null>,
-): Map<NodeId, number[]> {
+): Map<NodeId, ActivityRecord[]> {
   /** A record's nearest drawn ancestor-or-self, memoised along each walk. */
   const nearest = new Map<string, string | null>();
   const drawnFrom = (uuid: string): string | null => {
@@ -708,18 +743,19 @@ function markActivity(
     for (const w of walked) nearest.set(w, found);
     return found;
   };
-  const activity = new Map<NodeId, number[]>();
+  const activity = new Map<NodeId, ActivityRecord[]>();
   for (const rec of records) {
     if (!rec.uuid || !rec.timestamp || own.has(rec.uuid) || !isActivity(rec)) continue;
     const at = drawnFrom(rec.uuid);
     const t = Date.parse(rec.timestamp);
     if (!at || !(t > 0)) continue;
+    const r = { at: t, key: activityKey(rec) };
     const list = activity.get(at);
-    if (list) list.push(t);
-    else activity.set(at, [t]);
+    if (list) list.push(r);
+    else activity.set(at, [r]);
   }
   for (const n of nodes) {
-    const t = Math.max(0, ...(activity.get(n.id) ?? []));
+    const t = Math.max(0, ...(activity.get(n.id) ?? []).map((r) => r.at));
     if (t > endOf(n)) n.activeUntil = t;
   }
   return activity;

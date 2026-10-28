@@ -98,4 +98,21 @@ describe("activity under a turn is not its end", () => {
     expect(nodes.find((n) => n.text === "Thanks")?.activeUntil).toBeUndefined();
     expect(nodes.find((n) => n.text === "Build it")?.activeUntil).toBeUndefined();
   });
+
+  it("reads a queued message whose prompt is content blocks, as current CLIs write it", () => {
+    const queued: RawRecord = {
+      type: "attachment",
+      uuid: "q1",
+      parentUuid: "a1",
+      timestamp: at(5),
+      attachment: {
+        type: "queued_command",
+        prompt: [{ type: "text", text: "also back up first" }, { type: "image", source: { type: "base64", data: "AAAA" } }],
+        commandMode: "prompt",
+        origin: { kind: "human" },
+      },
+    };
+    const nodes = tree([user("u1", null, 0, "Build it"), asst("a1", "u1", 1, "msg_a1", "Building."), queued]);
+    expect(nodes.map((n) => n.text)).toEqual(expect.arrayContaining(["Build it", "Building."]));
+  });
 });
