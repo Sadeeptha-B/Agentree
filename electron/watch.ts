@@ -114,14 +114,13 @@ export function watchTranscripts(targets: WatchTarget[], onChange: () => void): 
   };
 
   const watchers: fs.FSWatcher[] = [];
-  for (const t of targets) {
-    if (t.kind === "file") {
-      poll(() => fileSignature(t.path));
-      continue;
-    }
-    if (t.poll && fs.existsSync(t.path)) poll(() => treeSignature(t.path));
+  const attach = (t: Extract<WatchTarget, { kind: "dir" }>) => {
+    if (t.poll) poll(() => treeSignature(t.path));
     try {
-      const w = fs.watch(t.path, { recursive: true }, (_event, filename) => {
+      // The long, real path: on Windows a recursive watch on an 8.3 short
+      // path (C:\Users\JOHNSM~1\…, as os.tmpdir() can return) gets event
+      // names in long form, and libuv aborts the whole process on them.
+      const w = fs.watch(fs.realpathSync.native(t.path), { recursive: true }, (_event, filename) => {
         // Claude/Codex append .jsonl; Codex rotates pages to .jsonl.zst;
         // Copilot appends events.jsonl inside a session dir, and yaml changes
         // ride along on the same debounce as their neighbouring events write.
@@ -132,7 +131,26 @@ export function watchTranscripts(targets: WatchTarget[], onChange: () => void): 
       w.on("error", () => w.close());
       watchers.push(w);
     } catch {
-      // Missing directory (harness not installed) — the others still watch.
+      // Gone again between the check and the watch; the poll (if any) still runs.
+    }
+  };
+
+  // A root that doesn't exist yet (the harness isn't installed, or a new
+  // home was just configured) is waited for: a stat per second, and once it
+  // appears it gets the normal watch, plus one change to read what's there.
+  for (const t of targets) {
+    if (t.kind === "file") {
+      poll(() => fileSignature(t.path));
+    } else if (fs.existsSync(t.path)) {
+      attach(t);
+    } else {
+      const wait = setInterval(() => {
+        if (!fs.existsSync(t.path)) return;
+        clearInterval(wait);
+        attach(t);
+        fire();
+      }, POLL_MS);
+      polls.push(wait);
     }
   }
 

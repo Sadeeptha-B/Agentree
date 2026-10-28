@@ -46,6 +46,9 @@ const GP = "50000000-0000-4000-8000-00000000000f";
 const GF = "50000000-0000-4000-8000-000000000010";
 const RNS = "50000000-0000-4000-8000-000000000011";
 const DV = "50000000-0000-4000-8000-000000000012";
+const SP4 = "50000000-0000-4000-8000-000000000013";
+const SB4 = "50000000-0000-4000-8000-000000000014";
+const SF4 = "50000000-0000-4000-8000-000000000015";
 const GUARD_OUT = "Change it:\n\n```python\nif ready:\n    send()\ncancel()\n```";
 const GUARD_IN = "Change it:\n\n```python\nif ready:\n    send()\n    cancel()\n```";
 const EP_PROMPT = "Summarise the log\n\n  - errors only";
@@ -466,19 +469,24 @@ describe("Claude fork", () => {
 describe("Claude annotations across identity schemes and membership", () => {
   const sidecar = (id: string) => readMeta(id);
 
-  it("finds labels saved under the previous identity scheme, and carries them forward", () => {
+  it("finds labels saved under earlier identity schemes, and carries them forward", () => {
     // Scheme 2 folded whitespace in a prompt's digest...
     const folded = `u:ep-1|${foldedDigest(EP_PROMPT)}`;
     writeMeta(EP, folded, { label: "folded key" });
     // ...and wrote a prompt without a promptId as a literal chain.
     const literal = `u:|${foldedDigest("Second question")}@m:msg_n1`;
     writeMeta(NP, literal, { label: "literal chain" });
+    // Scheme 3 keyed a prompt id with its exact text, as `u:`.
+    const scheme3 = `u:up-1|${digest("First ask")}`;
+    writeMeta(UP, scheme3, { status: "favorite" });
 
     expect(one(loadSession(EP)!, EP_PROMPT).label).toBe("folded key");
     expect(one(loadSession(NP)!, "Second question").label).toBe("literal chain");
+    expect(one(loadSession(UP)!, "First ask").status).toBe("favorite");
     // Carried forward under the current keys, into every member's sidecar.
-    for (const id of [EP, EF]) expect(sidecar(id)[`u:ep-1|${digest(EP_PROMPT)}`]).toEqual({ label: "folded key" });
+    for (const id of [EP, EF]) expect(sidecar(id)[`p:ep-1|${digest(EP_PROMPT)}`]).toEqual({ label: "folded key" });
     expect(sidecar(NP)[qualify(`u:|${digest("Second question")}`, "m:msg_n1")]).toEqual({ label: "literal chain" });
+    for (const id of [UP, UF]) expect(sidecar(id)[`p:up-1|${digest("First ask")}`]).toEqual({ status: "favorite" });
 
     // Clearing it clears the old entries too: nothing resurfaces.
     annotate(EP, one(loadSession(EP)!, EP_PROMPT).id, { label: null as unknown as undefined });
@@ -549,6 +557,28 @@ describe("Claude metadata across copies of one session", () => {
   });
 });
 
+describe("Claude family split", () => {
+  it("splits when the member bridging two others is deleted, each side keeping its own turns' identities", () => {
+    const dir = projectDir("c--work-split-family");
+    fs.mkdirSync(dir, { recursive: true });
+    for (const id of [SP4, SB4, SF4]) {
+      fs.copyFileSync(path.join(claudeRoot, "split-src", "c--work-split-family", `${id}.jsonl`), path.join(dir, `${id}.jsonl`));
+    }
+    const before = loadSession(SF4)!;
+    expect(before.members.map((m) => m.id).sort()).toEqual([SP4, SB4, SF4].sort());
+    const own = one(before, "Cron at 2am.");
+
+    fs.rmSync(path.join(dir, `${SB4}.jsonl`));
+    // The root still loads — but SF4 is no longer in its family.
+    expect(loadSession(SP4)!.members.map((m) => m.id)).toEqual([SP4]);
+    const after = loadSession(SF4)!;
+    expectTree(after);
+    expect(after.members.map((m) => m.id)).toEqual([SF4]);
+    // So a reload can carry the selection over by semantic identity.
+    expect(one(after, "Cron at 2am.").stableIds).toEqual(own.stableIds);
+  });
+});
+
 describe("Claude parentage evidence", () => {
   it("keeps creation order over a renamed title, and says the direction is inferred", async () => {
     // Created P3 → F3 → G3, a second apart; G3 was renamed, so its title
@@ -573,8 +603,12 @@ describe("Claude parentage evidence", () => {
 });
 
 describe("Fork invariants over every fixture family", () => {
-  /** The displayed text of a path, as one normalised string. */
-  const flat = (texts: string[]) => texts.join("\n\n").replace(/\s+/g, " ").trim();
+  /**
+   * The displayed text of a path, exactly — whitespace is meaning. Joined,
+   * because the family and the fork alone can group the same parts into
+   * different nodes (a quiet fork's endpoint splits a run the fork alone merges).
+   */
+  const flat = (texts: string[]) => texts.join("\n\n");
 
   it("every enabled fork holds exactly what the selected node shows, and adds nothing to the tree", () => {
     let checked = 0;

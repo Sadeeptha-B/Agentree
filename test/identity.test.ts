@@ -14,7 +14,7 @@ const chain = (sid: string, texts: string[]): TurnNode[] =>
     sourceSessionId: sid,
   }));
 const textIds = (nodes: TurnNode[]) => {
-  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, legacyKey: foldedTextKey(n) }));
+  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, earlier: [foldedTextKey(n)] }));
   return nodes;
 };
 /** What scheme 2 wrote for a text-keyed chain: `key@parentIdentity`, literally. */

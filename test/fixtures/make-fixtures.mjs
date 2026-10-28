@@ -547,6 +547,36 @@ write(`claude/2.1/copies-src/c--work-dv-b/${DV}.jsonl`, [
   asst(DV, "dvb-a2", "dvb-u2", 6, "msg_dvb2", [text("Lengthened.")]),
 ]);
 
+// split-src/c--work-split-family: a family held together by one member.
+//   SP4  a prompt and its answer "Use a queue.";
+//   SB4  a native fork of it that regenerated the answer: it holds the copied
+//        "Use a queue." AND, on another branch, "Use a cron job.";
+//   SF4  a fork of SB4's regenerated branch: it shares "Use a cron job." with
+//        SB4, but holds no copy of anything only SP4 has.
+// Deleting SB4 leaves SP4 and SF4 with no shared evidence: two families.
+const SP4 = "50000000-0000-4000-8000-000000000013";
+const SB4 = "50000000-0000-4000-8000-000000000014";
+const SF4 = "50000000-0000-4000-8000-000000000015";
+const SPL = "claude/2.1/split-src/c--work-split-family";
+write(`${SPL}/${SP4}.jsonl`, [
+  user(SP4, "sp4-u1", null, 0, "sp4-1", "Schedule the report"),
+  asst(SP4, "sp4-a1", "sp4-u1", 1, "msg_sp4a", [text("Use a queue.")]),
+  title(SP4, "Report"),
+]);
+write(`${SPL}/${SB4}.jsonl`, [
+  user(SB4, "sb4-u1", null, 0, "sp4-1", "Schedule the report"),
+  asst(SB4, "sb4-a1", "sb4-u1", 1, "msg_sp4a", [text("Use a queue.")]),
+  asst(SB4, "sb4-a1b", "sb4-u1", 5, "msg_sb4r", [text("Use a cron job.")]),
+  title(SB4, "Report (fork)"),
+]);
+write(`${SPL}/${SF4}.jsonl`, [
+  user(SF4, "sf4-u1", null, 0, "sp4-1", "Schedule the report"),
+  asst(SF4, "sf4-a1b", "sf4-u1", 5, "msg_sb4r", [text("Use a cron job.")]),
+  title(SF4, "Report (fork) (fork)"),
+  user(SF4, "sf4-u2", "sf4-a1b", 10, "sf4-2", "Nightly"),
+  asst(SF4, "sf4-a2", "sf4-u2", 11, "msg_sf4", [text("Cron at 2am.")]),
+]);
+
 // ------------------------------------------------------------------ Codex
 //
 // CODEX_HOME holding one family of paginated pages:

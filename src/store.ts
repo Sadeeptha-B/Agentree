@@ -56,8 +56,16 @@ interface State {
    */
   settingsRev: number;
   settingsOpen: boolean;
-  /** Change the settings, then refresh everything that depends on them. */
-  saveSettings: (patch: SettingsPatch) => Promise<void>;
+  /**
+   * Why the last settings change wasn't saved; cleared by the next one that
+   * is. Shown where settings are edited, apart from `error`.
+   */
+  settingsError: string | null;
+  /**
+   * Change the settings, then refresh everything that depends on them.
+   * Resolves to whether the change was saved.
+   */
+  saveSettings: (patch: SettingsPatch) => Promise<boolean>;
 
   boot: () => Promise<void>;
   refreshSessions: () => Promise<void>;
@@ -160,6 +168,7 @@ export const useStore = create<State>((set, get) => ({
   settings: null,
   settingsRev: 0,
   settingsOpen: false,
+  settingsError: null,
 
   set: (partial) => set(partial),
 
@@ -182,15 +191,16 @@ export const useStore = create<State>((set, get) => ({
     if (patch.rememberView === false) cancelViewSave();
     try {
       const settings = await writeSettings(patch);
-      set({ ...(settings ? { settings } : {}), settingsRev: get().settingsRev + 1 });
+      set({ ...(settings ? { settings } : {}), settingsRev: get().settingsRev + 1, settingsError: null });
     } catch (e) {
-      set({ error: String(e) });
-      return;
+      set({ settingsError: e instanceof Error ? e.message : String(e) });
+      return false;
     }
     // A setting can move a root or turn an agent off: the list re-scans, and
     // an open tree reloads from wherever its sessions are now.
     await get().refreshSessions();
     if (get().session) await get().reloadSession();
+    return true;
   },
 
   refreshSessions: () =>
@@ -271,15 +281,24 @@ export const useStore = create<State>((set, get) => ({
       if (!prev) return;
 
       // A family isn't one file: its root can be deleted while a fork
-      // survives, and the provider then re-roots the family on that fork. So
-      // the view asks for its root, then for the focused member and the
-      // selected turn's session, then for any other member it knew — the
-      // first that loads is the family now.
+      // survives (the provider then re-roots the family on that fork), and
+      // deleting a member that bridged two others splits it in two. Any
+      // member's id loads the family it is in NOW, so the view asks first for
+      // the session the user is looking through — the focused member — then
+      // for the sessions holding the selected turn, and only then for the
+      // root and the other members. The old root loading proves only that
+      // the root survived, not that the user's member is still with it.
       const prevNodes = get().nodes;
-      const selectedSource = get().selected ? prevNodes.get(get().selected!)?.sourceSessionId : undefined;
+      const sel = get().selected ? prevNodes.get(get().selected!) : undefined;
       const candidates = [
         ...new Set(
-          [prev.meta.id, get().focus, selectedSource, ...prev.members.map((m) => m.id)].filter(Boolean) as string[],
+          [
+            get().focus,
+            sel?.sourceSessionId,
+            ...(sel?.heldBy ?? []),
+            prev.meta.id,
+            ...prev.members.map((m) => m.id),
+          ].filter(Boolean) as string[],
         ),
       ];
       let session = null;

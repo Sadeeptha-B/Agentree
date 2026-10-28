@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { assignTips, childIndex, copyHolders, countBranchPoints, cwdKey, forkSummaries } from "../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, cwdKey, endOf, forkSummaries } from "../shared/render.ts";
 import type {
   MemberInfo,
   NodeId,
@@ -14,7 +14,7 @@ import { HealthScan, minorVersion } from "./health.ts";
 import { readLineage } from "./lineage.ts";
 import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
-import { RESUME_ARGV, resumeCommand } from "./shell.ts";
+import { resumeCommandFor } from "./launch.ts";
 import { assignStableIds, digest, foldedDigest } from "./identity.ts";
 import { overlap, stitchFamily, type FamilyMember } from "./providers/stitch.ts";
 
@@ -347,8 +347,12 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
     }
 
     const last = parts[parts.length - 1];
+    // The run starts when its head did and ends with its latest part: which
+    // branch was active last is read from the end (`endOf`).
+    const endedAt = Math.max(...parts.map(endOf));
     out.push({
       ...head,
+      endedAt: endedAt > head.timestamp ? endedAt : undefined,
       // Re-clean the joined text: a wrapper block can open in one record and
       // close in the next, which per-record cleaning cannot match.
       text: cleanText(parts.map((p) => p.text).join("\n\n")).text,
@@ -528,7 +532,7 @@ export interface Parsed {
    * which branches mid-run, and its fork, which doesn't).
    */
   nodes: TurnNode[];
-  /** Stitch evidence per node id: `m:<message.id>` / `u:<promptId>|<digest>`. */
+  /** Stitch evidence per node id: `m:<message.id>` / `p:<promptId>|<digest>` / `u:|<digest>`. */
   keys: Map<NodeId, string>;
   /**
    * Every assistant API message id in the file. The API mints one per
@@ -915,8 +919,8 @@ export function parseRecords(
   // Pass 2: project the surviving turns.
   const nodes: TurnNode[] = [];
   const keys = new Map<NodeId, string>();
-  /** The same key under identity scheme 2 (whitespace-folded digest), for old annotations. */
-  const legacyKeys = new Map<NodeId, string>();
+  /** A prompt's key under identity schemes 2 and 3 (identity.ts), for old annotations. */
+  const earlierKeys = new Map<NodeId, [string, string]>();
   const strongKeys = new Set<NodeId>();
   for (const { head, last, text, thinking, tools } of visible) {
     // Every record in a group repeats the same message-level usage, so take one
@@ -958,6 +962,8 @@ export function parseRecords(
             ? BLOCK.preCompact
             : undefined,
       timestamp: head.timestamp ? Date.parse(head.timestamp) : 0,
+      // A reply streamed as several records ends with its last one.
+      endedAt: last !== head && last.timestamp ? Date.parse(last.timestamp) : undefined,
       usage: u
         ? {
             input_tokens: u.input_tokens ?? 0,
@@ -976,9 +982,16 @@ export function parseRecords(
     // matches under an already matched parent, so without a promptId two
     // prompts merge only if they are the same text, whitespace and all, in
     // the same place.
+    // A prompt with a prompt id is keyed `p:` (strong); one without keeps
+    // the `u:` form as the input its parent's identity qualifies.
     const strong = head.type === "assistant" && !!head.message?.id;
-    keys.set(id, strong ? `m:${head.message!.id}` : `u:${head.promptId ?? ""}|${digest(text)}`);
-    if (!strong) legacyKeys.set(id, `u:${head.promptId ?? ""}|${foldedDigest(text)}`);
+    if (strong) {
+      keys.set(id, `m:${head.message!.id}`);
+    } else {
+      const pid = head.promptId ?? "";
+      keys.set(id, `${pid ? "p" : "u"}:${pid}|${digest(text)}`);
+      earlierKeys.set(id, [`u:${pid}|${foldedDigest(text)}`, `u:${pid}|${digest(text)}`]);
+    }
     if (strong || head.promptId) strongKeys.add(id);
   }
   // Identity for annotations and selection: the key itself where it's unique
@@ -986,7 +999,7 @@ export function parseRecords(
   assignStableIds(nodes, (n) => ({
     key: keys.get(n.id)!,
     strong: strongKeys.has(n.id),
-    legacyKey: legacyKeys.get(n.id),
+    earlier: earlierKeys.get(n.id),
   }));
   // Conversation records that produced nothing is what a changed record shape
   // looks like — as opposed to a file of pure bookkeeping, which has none.
@@ -1056,11 +1069,8 @@ export function locate(sessionId: SessionId): Located | null {
   return { source, file: source.file, cwd: source.cwd };
 }
 
-export const claudeResumeArgv = RESUME_ARGV.claude;
-
 /** Sessions are per-directory, so the change of directory is part of the command. */
-const claudeResume = (sessionId: SessionId, cwd: string) =>
-  resumeCommand(cwd, claudeResumeArgv(sessionId));
+const claudeResume = (sessionId: SessionId, cwd: string) => resumeCommandFor("claude", sessionId, cwd);
 
 // ------------------------------------------------------------------ summaries
 

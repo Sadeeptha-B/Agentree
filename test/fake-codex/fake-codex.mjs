@@ -2,6 +2,7 @@
 // A stand-in for `codex app-server`: newline JSON-RPC on stdio, enough of the
 // protocol to drive Agentree's client. FAKE_CODEX_MODE picks the behaviour:
 //   ok     answer initialize and thread/fork (echoing the fork params back)
+//   env    answer thread/fork with the CODEX_HOME it was started with as cwd
 //   error  answer thread/fork with a JSON-RPC error
 //   exit   exit right after initialize, with requests outstanding
 //   hang   never answer thread/fork
@@ -22,6 +23,7 @@ process.stdin.on("data", (d) => {
     } else if (m.method === "thread/fork") {
       if (mode === "error") send({ id: m.id, error: { code: -32600, message: "fork refused" } });
       else if (mode === "ok") send({ id: m.id, result: { thread: { id: "fake-thread", cwd: JSON.stringify(m.params) } } });
+      else if (mode === "env") send({ id: m.id, result: { thread: { id: "fake-thread", cwd: process.env.CODEX_HOME ?? "(unset)" } } });
     }
   }
 });

@@ -50,6 +50,12 @@ export function descendToNewestLeaf(id: NodeId, children: Map<string, TurnNode[]
   }
 }
 
+/** When a node's last part was written: a merged or streamed node ends after it starts. */
+export const endOf = (n: TurnNode): number => Math.max(n.timestamp, n.endedAt ?? 0);
+
+/** The latest-ending of `list`; the first in list order on a tie. */
+const latest = (list: TurnNode[]): NodeId => list.reduce((a, b) => (endOf(a) >= endOf(b) ? a : b)).id;
+
 /**
  * The newest leaf anywhere in the session — where the CLI would resume.
  *
@@ -60,14 +66,12 @@ export function descendToNewestLeaf(id: NodeId, children: Map<string, TurnNode[]
 export function newestLeaf(nodes: TurnNode[], children: Map<string, TurnNode[]>): NodeId | null {
   const leaves = nodes.filter((n) => (children.get(n.id)?.length ?? 0) === 0);
   if (leaves.length === 0) return null;
-  const newest = (list: TurnNode[]) =>
-    list.reduce((a, b) => (a.timestamp >= b.timestamp ? a : b)).id;
   const withText = leaves.filter((n) => n.text.trim().length > 0);
-  return withText.length > 0 ? newest(withText) : newest(leaves);
+  return latest(withText.length > 0 ? withText : leaves);
 }
 
 /**
- * The newest leaf among the nodes `holds` accepts — a leaf of that subset,
+ * The latest-ending leaf among the nodes `holds` accepts — a leaf of that subset,
  * not of the whole tree (a turn whose only children belong to other
  * sessions is still where this one ends). Same text preference as
  * `newestLeaf`.
@@ -78,9 +82,8 @@ export function heldTip(nodes: TurnNode[], holds: (n: TurnNode) => boolean): Nod
   const continued = new Set(held.filter((n) => n.parentId && ids.has(n.parentId)).map((n) => n.parentId!));
   const leaves = held.filter((n) => !continued.has(n.id));
   if (leaves.length === 0) return null;
-  const newest = (list: TurnNode[]) => list.reduce((a, b) => (a.timestamp >= b.timestamp ? a : b)).id;
   const withText = leaves.filter((n) => n.text.trim().length > 0);
-  return withText.length > 0 ? newest(withText) : newest(leaves);
+  return latest(withText.length > 0 ? withText : leaves);
 }
 
 /**
@@ -94,7 +97,7 @@ export function copyHolders(n: TurnNode): string[] {
   return out;
 }
 
-/** Each member's `tipId`: the newest leaf among the nodes that list it in `heldBy`. */
+/** Each member's `tipId`: the latest-ending leaf among the nodes that list it in `heldBy`. */
 export function assignTips(nodes: TurnNode[], members: MemberInfo[]): void {
   for (const m of members) m.tipId = heldTip(nodes, (n) => !!n.heldBy?.includes(m.id)) ?? undefined;
 }

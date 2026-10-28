@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { harnessEnv } from "../paths.ts";
 import { configuredPath } from "../settings.ts";
 
 /**
@@ -156,6 +157,9 @@ async function withAppServer<T>(fn: (c: RpcClient) => Promise<T>): Promise<T> {
   // Through cmd.exe the command line is re-parsed, so a path with spaces
   // (C:\Program Files\…) must arrive quoted; the argument is a constant.
   const proc = spawn(bin.shell ? `"${bin.cmd}"` : bin.cmd, ["app-server"], {
+    // The Codex home Agentree reads, also when only a saved setting names
+    // it: a fork must go to the store the tree came from.
+    env: { ...process.env, ...harnessEnv("codex") },
     stdio: ["pipe", "pipe", "ignore"],
     shell: bin.shell,
     windowsHide: true,

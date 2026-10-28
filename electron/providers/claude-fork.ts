@@ -3,9 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ForkResult, SessionId, TurnNode } from "../../shared/types.ts";
 import { recordLineage } from "../lineage.ts";
-import { resumeCommand } from "../shell.ts";
+import { resumeCommandFor } from "../launch.ts";
 import {
-  claudeResumeArgv,
   INJECTED_PREFIX,
   loadSession,
   locate,
@@ -159,7 +158,7 @@ export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
     ok: true,
     id: newId,
     cwd: loc.cwd,
-    command: resumeCommand(loc.cwd, claudeResumeArgv(newId)),
+    command: resumeCommandFor("claude", newId, loc.cwd),
     open: { provider: "claude", sessionId: newId, cwd: loc.cwd },
     note: crossesInjected(node, family.nodes)
       ? "Heads up: this prefix includes a message delivered mid-turn (hollow node). Claude Code wrote no record for it, so the fork does NOT contain that instruction."

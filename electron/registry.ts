@@ -9,17 +9,15 @@ import type {
 } from "../shared/types.ts";
 import {
   claudeHealth,
-  claudeResumeArgv,
   claudeWatchDirs,
   listSessions as listClaude,
   loadSession as loadClaude,
   locate as locateClaude,
 } from "./transcripts.ts";
 import { forkClaudeAt } from "./providers/claude-fork.ts";
-import { codexHealth, codexResumeArgv, forkCodexAt, listCodexSessions, loadCodexSession, locateCodex } from "./providers/codex.ts";
+import { codexHealth, forkCodexAt, listCodexSessions, loadCodexSession, locateCodex } from "./providers/codex.ts";
 import {
   copilotHealth,
-  copilotResumeArgv,
   forkCopilotAt,
   listCopilotSessions,
   loadCopilotSession,
@@ -49,8 +47,6 @@ export interface Provider {
   fork(familyId: SessionId, nodeId: string): ForkResult | Promise<ForkResult>;
   owns(sessionId: SessionId): boolean;
   health(): ProviderHealth;
-  /** argv that resumes a session in the harness's CLI. */
-  resumeArgv(sessionId: SessionId): string[];
   /**
    * What the live view must watch: the files of `sessionId`'s family, or —
    * with null — everything the welcome list is read from.
@@ -73,7 +69,6 @@ const claude: Provider = {
   fork: forkClaudeAt,
   owns: (id) => locateClaude(id) !== null,
   health: claudeHealth,
-  resumeArgv: claudeResumeArgv,
   // Every project directory a member of the family lives in: a tree grows
   // through any member, or through a fork file that didn't exist when the
   // view opened (written next to its source).
@@ -90,7 +85,6 @@ const codex: Provider = {
   fork: forkCodexAt,
   owns: (id) => locateCodex(id) !== null,
   health: codexHealth,
-  resumeArgv: codexResumeArgv,
   watchTargets: codexTargets,
 };
 
@@ -108,7 +102,6 @@ const copilot: Provider = {
   },
   owns: (id) => locateCopilot(id) !== null || loadCopilotSession(id) !== null,
   health: copilotHealth,
-  resumeArgv: copilotResumeArgv,
   watchTargets: copilotTargets,
 };
 
@@ -217,7 +210,7 @@ export function annotate(familyId: SessionId, nodeId: string, patch: NodeMeta): 
   const node = detail?.nodes.find((n) => n.id === nodeId);
   if (!detail || !node) return;
   const members = detail.members.length ? detail.members.map((m) => m.id) : [detail.meta.id];
-  writeAnnotation(node, [detail.meta.id, ...members], patch);
+  writeAnnotation(node, detail.nodes, [detail.meta.id, ...members], patch);
 }
 
 /**
