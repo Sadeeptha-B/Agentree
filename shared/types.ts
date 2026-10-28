@@ -43,7 +43,14 @@ export interface TurnNode {
   lastUsage?: UsageSnapshot;
   model?: string;
   stopReason?: string | null;
+  /** When the node STARTS: its first record. Shown, and orders siblings. */
   timestamp: number;
+  /**
+   * When its LAST part was written, where that is later than `timestamp`: a
+   * reply streamed as several records, or a merged run. Which branch was
+   * active last is decided by this end (`endOf`), never by the start.
+   */
+  endedAt?: number;
   /** Claude Code marks subagent turns; we dim them. */
   isSidechain?: boolean;
   /**
@@ -76,7 +83,7 @@ export interface TurnNode {
   /**
    * Semantic identity of the message(s) this node draws: the same in every
    * session holding a copy, whatever uuid each copy got (Claude:
-   * `m:<message.id>` / `u:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
+   * `m:<message.id>` / `p:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
    * text-only evidence is qualified by its parent's identity — see
    * electron/identity.ts). The node's own comes first, then any merged-in
    * parts'. Keys annotations, and keeps a selection across a reload that
@@ -394,9 +401,17 @@ export interface AgentreeApi {
   getSettings(): Promise<SettingsState>;
   /** Apply a change and return the result. The caller refreshes what depends on it. */
   setSettings(patch: SettingsPatch): Promise<SettingsState>;
-  /** Open the session in its harness's VS Code extension (VS Code host only). */
+  /**
+   * Open the session in its harness's VS Code extension: in-process in the
+   * extension, through the extension's `vscode://` link from the desktop app.
+   * The extension reads its own configuration, not Agentree's store paths.
+   */
   openNative(ref: SessionRef): Promise<ActionResult>;
-  /** Run the harness's resume command in a new integrated terminal (VS Code host only). */
+  /**
+   * Run the harness's resume command in a new terminal — integrated in VS
+   * Code, an OS window from the desktop app — with the environment that
+   * points the harness at the store Agentree read the session from.
+   */
   resumeInTerminal(ref: SessionRef): Promise<ActionResult>;
 
   /**

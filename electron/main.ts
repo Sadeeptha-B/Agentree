@@ -3,7 +3,6 @@ import path from "node:path";
 
 import { startBackend } from "./backend-client.ts";
 import { nativeLink } from "./native.ts";
-import { RESUME_ARGV } from "./shell.ts";
 import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { watchLater, type Watcher } from "./watch.ts";
@@ -123,10 +122,12 @@ ipcMain.handle(CH.openNative, async (_e, ref: SessionRef): Promise<ActionResult>
   }
 });
 
+// The worker says what to run — argv plus the environment that points the
+// harness at the store Agentree read it from; this process only opens the window.
 ipcMain.handle(CH.resumeInTerminal, async (_e, ref: SessionRef): Promise<ActionResult> => {
-  const argv = RESUME_ARGV[ref.provider];
-  if (!argv || !/^[a-zA-Z0-9-]{8,64}$/.test(ref.sessionId)) return { ok: false, error: "Unknown session." };
-  return openTerminal(argv(ref.sessionId), ref.cwd);
+  const launch = await backend.resumeLaunch(ref.provider, ref.sessionId);
+  if (!launch) return { ok: false, error: "Unknown session." };
+  return openTerminal(launch.argv, ref.cwd, launch.env);
 });
 
 // ---- live transcript watching ----

@@ -16,7 +16,7 @@ import { HealthScan, minorVersion } from "../health.ts";
 import { applyAnnotations } from "../meta.ts";
 import { codexArchived, codexIndex, codexSessions } from "../paths.ts";
 import { readSettings } from "../settings.ts";
-import { RESUME_ARGV, resumeCommand } from "../shell.ts";
+import { resumeCommandFor } from "../launch.ts";
 import { mergeSameRoleRuns } from "../transcripts.ts";
 import { forkThread } from "./codex-appserver.ts";
 import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
@@ -432,8 +432,9 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
       if (!text) continue;
       if (b.cur?.role === "assistant") {
         // Commentary and final answer of one reply are one node, like Claude's
-        // agent-loop merge.
+        // agent-loop merge, ending with its last message.
         b.cur.text += `\n\n${text}`;
+        if (ts > b.cur.timestamp) b.cur.endedAt = ts;
       } else {
         push(b, { ...base, id: nodeId, parentId: null, role: "assistant", text, model });
       }
@@ -537,7 +538,7 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
   // Its node ids are per-file, so identity comes from the text chain, the
   // same in a verbatim copy.
   for (const n of nodes) n.turnId = `${sid}#legacy`;
-  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, legacyKey: foldedTextKey(n) }));
+  assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, earlier: [foldedTextKey(n)] }));
   page.turns = nodes.length ? [{ id: `${sid}#legacy`, firstOrdinal: 0, nodes }] : [];
 }
 
@@ -853,8 +854,7 @@ function buildTree(scan: Scan, fam: Family): Tree {
   return { nodes: mergeSameRoleRuns(out), forkVia, held: new Map(holders.map((h) => [h.id, h.held])) };
 }
 
-export const codexResumeArgv = RESUME_ARGV.codex;
-const resumeCmd = (id: string, cwd: string) => resumeCommand(cwd, codexResumeArgv(id));
+const resumeCmd = (id: string, cwd: string) => resumeCommandFor("codex", id, cwd);
 
 function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; members: MemberInfo[] } {
   const names = threadNames();

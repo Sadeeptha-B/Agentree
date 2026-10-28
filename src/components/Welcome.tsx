@@ -4,6 +4,7 @@ import { when } from "../format.ts";
 import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
 import { filterSessions, focusFor, ofProvider, railDirs, shownForks, timeOf, type RailDir } from "../list.ts";
 import { Settings } from "./Settings.tsx";
+import { ErrorBanner } from "./ErrorBanner.tsx";
 import logoUrl from "../../assets/logo.png";
 
 /** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
@@ -90,7 +91,7 @@ const RAIL_DIRS = 10;
 export function Welcome() {
   const {
     sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen,
-    saveSettings,
+    saveSettings, error, settingsError,
   } = useStore();
   const sortBy = settings?.settings.sortBy ?? "active";
   const [moreOpen, setMoreOpen] = useState(false);
@@ -174,6 +175,15 @@ export function Welcome() {
       </aside>
 
       <main className="session-pane">
+        {/* The list's own failures, and a settings change that wasn't saved
+            (the settings dialog shows that one itself while it is open). */}
+        <ErrorBanner message={error} onDismiss={() => set({ error: null })} />
+        {!settingsOpen && (
+          <ErrorBanner
+            message={settingsError && `Settings not saved: ${settingsError}`}
+            onDismiss={() => set({ settingsError: null })}
+          />
+        )}
         {update && (
           <div className="update-banner">
             <span>

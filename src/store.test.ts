@@ -242,6 +242,54 @@ describe("renderer store lifecycle", () => {
     expect(target().sessionId).toBe("P");
   });
 
+  describe("a family split by deleting the member that bridged it", () => {
+    // P — B — F, where only B shares history with both. B is deleted: P and F
+    // each still load, as separate families.
+    const whole = detail(
+      "P",
+      [
+        node("p-u1", null, "Q", "u:q", "P", ["P", "B", "F"]),
+        node("p-a1", "p-u1", "A", "m:a", "P", ["P", "B"]),
+        node("b-a1", "p-u1", "R", "m:r", "B", ["B", "F"]),
+        node("f-u2", "b-a1", "Nightly", "u:n", "F", ["F"]),
+        node("f-a2", "f-u2", "Cron", "m:c", "F", ["F"]),
+      ],
+      [member("P", null), member("B", "P"), { ...member("F", "B"), tipId: "f-a2" }],
+    );
+    const pAlone = detail("P", [node("p-u1", null, "Q", "u:q", "P"), node("p-a1", "p-u1", "A", "m:a", "P")], [member("P", null)]);
+    const fAlone = detail(
+      "F",
+      [
+        node("f-u1", null, "Q", "u:q", "F"),
+        node("f-a1", "f-u1", "R", "m:r", "F"),
+        node("f-u2", "f-a1", "Nightly", "u:n", "F"),
+        node("f-a2", "f-u2", "Cron", "m:c", "F"),
+      ],
+      [member("F", null)],
+    );
+    const split = async (id: string) => (id === "P" ? pAlone : id === "F" ? fAlone : null);
+
+    it("keeps the user on the focused fork's side", async () => {
+      api.getSession.mockResolvedValueOnce(whole);
+      await useStore.getState().openSession("P", { focus: "F" });
+      useStore.getState().select("f-u2");
+      api.getSession.mockImplementation(split);
+      await useStore.getState().reloadSession();
+      expect(useStore.getState()).toMatchObject({ focus: "F", selected: "f-u2" });
+      expect(useStore.getState().session?.meta.id).toBe("F");
+    });
+
+    it("keeps the user on the selected turn's side when no fork is focused", async () => {
+      api.getSession.mockResolvedValueOnce(whole);
+      await useStore.getState().openSession("P");
+      useStore.getState().select("b-a1");
+      api.getSession.mockImplementation(split);
+      await useStore.getState().reloadSession();
+      expect(useStore.getState().session?.meta.id).toBe("F");
+      expect(useStore.getState().selected).toBe("f-a1");
+    });
+  });
+
   it("sends a cleared annotation field as null, which survives JSON", async () => {
     api.getSession.mockResolvedValueOnce(withRoot);
     await useStore.getState().openSession("P");

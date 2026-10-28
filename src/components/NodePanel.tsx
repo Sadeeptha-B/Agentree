@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
-import type { ActionResult, ForkResult, ProviderId, SessionRef } from "../../shared/types.ts";
+import type { ActionResult, ForkResult, ProviderId, SessionRef, SettingsPaths, SettingsState } from "../../shared/types.ts";
 import { actionTarget, contextAt, costOf, inferWindow, pathToRoot } from "../../shared/render.ts";
 import { Markdown } from "../markdown.tsx";
 import { pct, tokens, when } from "../format.ts";
@@ -76,9 +76,32 @@ function NativeButtons({ ref_, onResult }: { ref_: SessionRef; onResult: (r: Act
   );
 }
 
+/** The path setting that relocates each harness's store (electron/paths.ts, HOME_SETTING). */
+const HOME: Record<ProviderId, { key: keyof SettingsPaths; env: string }> = {
+  claude: { key: "claudeConfigDir", env: "CLAUDE_CONFIG_DIR" },
+  codex: { key: "codexHome", env: "CODEX_HOME" },
+  copilot: { key: "copilotHome", env: "COPILOT_HOME" },
+};
+
+/**
+ * Terminal resume and the copied command carry the store Agentree reads; a
+ * chat-panel hand-off can't — the receiving extension reads its own
+ * configuration. Say so when they may differ: the store comes from a saved
+ * setting, or (desktop) from a variable VS Code may not have.
+ */
+function nativeCaveat(provider: ProviderId, state: SettingsState | null): string | null {
+  const native = NATIVE[provider];
+  if (!native || !state) return null;
+  const { key, env } = HOME[provider];
+  const fromEnv = !!state.env[key];
+  if (!(fromEnv ? api.host !== "vscode" : state.settings.paths[key])) return null;
+  return `Agentree reads ${native} history from a location you set; “open in ${native}” finds this session only if the ${native} extension uses the same one (${env}).`;
+}
+
 /** Open / resume / copy for one session. */
 function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: string }) {
   const [status, setStatus] = useState<ActionResult | null>(null);
+  const caveat = nativeCaveat(ref_.provider, useStore((s) => s.settings));
   return (
     <>
       <div className="copy-row">
@@ -87,6 +110,7 @@ function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: stri
         <Copy value={ref_.sessionId} label="copy id" />
       </div>
       {status && !status.ok && <p className="error-text small hint">{status.error}</p>}
+      {caveat && <p className="muted small hint">{caveat}</p>}
     </>
   );
 }
