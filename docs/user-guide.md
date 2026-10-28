@@ -187,6 +187,12 @@ conversation, on one graph.
   burst of turns keeps a minimum spacing, so the axis is to scale only
   between breaks. A short dotted lead-in means the turn continues one from
   an earlier day.
+- **Zoom stretches time only:** scroll over the timeline to zoom it around
+  the pointer (Shift+scroll moves along the day), drag to move in any
+  direction; **fit** shows the whole day across, **latest** a readable size
+  at the most recent turns. Lanes keep their height, so each chat's full
+  name is shown, wrapped, at any zoom, in the lane and in the chat list;
+  the time labels stay put along the top as you scroll down.
 - **Switch chats:** click a turn or a chat's name (it selects the chat's
   latest turn, the one that finished last), or use the keys: **←/→** the previous/next turn in the chat,
   **↑/↓** the chat above/below, at its turn nearest in time. Picking a chat

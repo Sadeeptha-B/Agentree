@@ -3,37 +3,42 @@ import { useStore } from "../store.ts";
 import { span, tilde } from "../format.ts";
 import { useCanvasWheel } from "../wheel.ts";
 import { endOf } from "../../shared/render.ts";
-import { clock, dayTitle, filterDay, isDayKey, latestActiveDay, shiftDay, todayKey } from "../day.ts";
+import { chatName, clock, dayTitle, filterDay, isDayKey, latestActiveDay, shiftDay, todayKey } from "../day.ts";
 import {
-  AXIS_H, buildDayLayout, DOT_R, laneLatest, PAD, stepInLane, stepLane,
+  buildDayLayout, dotRadius, LABEL_W, laneLatest, PAD, stepInLane, stepLane, visibleTicks,
   type DayDot, type DayEdge, type DayLane, type DayLayout,
 } from "../day-layout.ts";
-import type { DayChat, ProviderId } from "../../shared/types.ts";
+import type { ProviderId } from "../../shared/types.ts";
 
+/**
+ * The viewport. Zoom is time-only: layout x maps to `tx + x * k` on screen,
+ * layout y to `ty + y` — lanes keep their height, so names and time labels
+ * stay readable at any zoom.
+ */
 interface View {
   tx: number;
   ty: number;
   k: number;
 }
 
-/** Screen width of the pinned lane-label column. */
-const LABEL_W = 176;
+/** The layout → screen mapping of a view. */
+const screen = (v: View) => ({ x: (x: number) => v.tx + x * v.k, y: (y: number) => v.ty + y });
+type Screen = ReturnType<typeof screen>;
+
+/** Height of the time-label strip pinned along the top: lanes scroll under it. */
+const AXIS_STRIP = 22;
 
 const PROVIDERS: ProviderId[] = ["claude", "codex", "copilot"];
 
-/** A chat's own name, or "fork <id>" when it only repeats its parent's plus "(fork)". */
-const unforked = (t: string) => t.replace(/(\s*\(fork\))+\s*$/, "").replace(/\s+/g, " ").trim();
-const chatName = (c: DayChat) =>
-  c.parentSessionId && unforked(c.title) === unforked(c.familyTitle) && c.title !== c.familyTitle
-    ? `fork ${c.sessionId.slice(0, 8)}`
-    : c.title;
-
-function edgePath(e: DayEdge): string {
-  if (e.kind === "lead") return `M${e.to.x - 26},${e.to.y} L${e.to.x - DOT_R - 2},${e.to.y}`;
-  const { from: a, to: b } = e;
-  if (a.y === b.y) return `M${a.x},${a.y} L${b.x},${b.y}`;
-  const mx = a.x + Math.max(12, (b.x - a.x) / 2);
-  return `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`;
+function edgePath(e: DayEdge, s: Screen, r: number): string {
+  const bx = s.x(e.to.x);
+  const by = s.y(e.to.y);
+  if (e.kind === "lead") return `M${bx - 26},${by} L${bx - r - 2},${by}`;
+  const ax = s.x(e.from.x);
+  const ay = s.y(e.from.y);
+  if (ay === by) return `M${ax},${ay} L${bx},${by}`;
+  const mx = ax + Math.max(12, (bx - ax) / 2);
+  return `M${ax},${ay} C${mx},${ay} ${mx},${by} ${bx},${by}`;
 }
 
 /**
@@ -82,11 +87,9 @@ export function DayView() {
   fitRef.current = (readable) => {
     const el = svgRef.current;
     if (!el || !layout || layout.dots.length === 0) return;
-    const { width: w, height: h } = el.getBoundingClientRect();
+    const w = el.getBoundingClientRect().width;
     const room = Math.max(80, w - LABEL_W);
-    const k = readable
-      ? Math.min(1, Math.max(0.6, room / layout.width))
-      : Math.min(room / layout.width, h / layout.height, 1.4);
+    const k = readable ? Math.min(1, Math.max(0.6, room / layout.width)) : Math.min(room / layout.width, 1.4);
     const tx = layout.width * k <= room ? LABEL_W : w - layout.width * k;
     setView({ tx, ty: 0, k });
   };
@@ -116,12 +119,12 @@ export function DayView() {
     if (!d || !el) return;
     const { width: w, height: h } = el.getBoundingClientRect();
     setView((v) => {
-      const sx = v.tx + d.x * v.k;
-      const sy = v.ty + d.y * v.k;
+      const sx = screen(v).x(d.x);
+      const sy = screen(v).y(d.y);
       let { tx, ty } = v;
       if (sx < LABEL_W + 30) tx += LABEL_W + 30 - sx;
       else if (sx > w - 30) tx -= sx - (w - 30);
-      if (sy < AXIS_H * v.k + 10) ty += AXIS_H * v.k + 10 - sy;
+      if (sy < AXIS_STRIP + 16) ty += AXIS_STRIP + 16 - sy;
       else if (sy > h - 40) ty -= sy - (h - 40);
       return { ...v, tx, ty };
     });
@@ -178,13 +181,12 @@ export function DayView() {
       setView((v) => ({ ...v, tx: v.tx - dx }));
       return;
     }
-    const r = el.getBoundingClientRect();
-    const px = e.clientX - r.left;
-    const py = e.clientY - r.top;
+    // Zoom the time axis about the pointer; the lanes don't scale.
+    const px = e.clientX - el.getBoundingClientRect().left;
     const factor = Math.exp(-e.deltaY * 0.0015);
     setView((v) => {
       const k = Math.min(4, Math.max(0.03, v.k * factor));
-      return { k, tx: px - ((px - v.tx) * k) / v.k, ty: py - ((py - v.ty) * k) / v.k };
+      return { ...v, k, tx: px - ((px - v.tx) * k) / v.k };
     });
   });
   const onPointerDown = (e: React.PointerEvent) => {
@@ -288,35 +290,42 @@ export function DayView() {
               onPointerUp={endDrag}
               onPointerLeave={endDrag}
             >
-              <g transform={`translate(${view.tx},${view.ty}) scale(${view.k})`}>
-                <DayGrid layout={layout} hoverLane={hoverLane} selectedLane={selected?.lane ?? null} />
-                <g className="edges">
-                  {layout.edges.map((e) => (
-                    <path
-                      key={`${e.kind}:${e.to.key}`}
-                      d={edgePath(e)}
-                      className={`edge ${e.cross ? "cross" : ""} ${e.kind === "lead" ? "lead" : ""} ${
-                        selected && e.to.lane === selected.lane ? "on-path" : ""
-                      }`}
-                    />
-                  ))}
-                </g>
-                <g className="nodes">
-                  {layout.dots.map((d) => (
-                    <Dot
-                      key={d.key}
-                      d={d}
-                      isSelected={d.key === selected?.key}
-                      onSelect={() => select(d.key)}
-                      onOpen={() => open(d)}
-                      onHover={(on) => {
-                        setHover(on ? d : null);
-                        setHoverLane(on ? d.lane : null);
-                      }}
-                    />
-                  ))}
-                </g>
+              <DayGrid
+                layout={layout}
+                s={screen(view)}
+                k={view.k}
+                hoverLane={hoverLane}
+                selectedLane={selected?.lane ?? null}
+              />
+              <g className="edges">
+                {layout.edges.map((e) => (
+                  <path
+                    key={`${e.kind}:${e.to.key}`}
+                    d={edgePath(e, screen(view), dotRadius(view.k))}
+                    className={`edge ${e.cross ? "cross" : ""} ${e.kind === "lead" ? "lead" : ""} ${
+                      selected && e.to.lane === selected.lane ? "on-path" : ""
+                    }`}
+                  />
+                ))}
               </g>
+              <g className="nodes">
+                {layout.dots.map((d) => (
+                  <Dot
+                    key={d.key}
+                    d={d}
+                    at={[screen(view).x(d.x), screen(view).y(d.y)]}
+                    r={dotRadius(view.k)}
+                    isSelected={d.key === selected?.key}
+                    onSelect={() => select(d.key)}
+                    onOpen={() => open(d)}
+                    onHover={(on) => {
+                      setHover(on ? d : null);
+                      setHoverLane(on ? d.lane : null);
+                    }}
+                  />
+                ))}
+              </g>
+              <TimeLabels layout={layout} s={screen(view)} k={view.k} />
             </svg>
 
             <LaneLabels
@@ -369,18 +378,24 @@ export function DayView() {
   );
 }
 
-/** Lane stripes, family separators, time labels and idle breaks: everything behind the turns. */
+/** Lane stripes, family separators, hour lines and idle breaks: everything behind the turns. */
 function DayGrid({
   layout,
+  s,
+  k,
   hoverLane,
   selectedLane,
 }: {
   layout: DayLayout;
+  s: Screen;
+  k: number;
   hoverLane: number | null;
   selectedLane: number | null;
 }) {
-  const { lanes, ticks, breaks, width, height } = layout;
-  const bottom = height - PAD;
+  const { lanes, breaks, height } = layout;
+  const ticks = visibleTicks(layout.ticks, k);
+  const bottom = s.y(height - PAD);
+  const inset = dotRadius(k) + 6;
   return (
     <g className="day-grid">
       {lanes.map((l, i) => (
@@ -390,26 +405,28 @@ function DayGrid({
               i === selectedLane ? "selected" : ""
             }`}
             x={0}
-            y={l.top}
-            width={width}
+            y={s.y(l.top)}
+            width="100%"
             height={l.height}
           />
-          <rect className={`day-lane-bar ${l.chat.provider}`} x={0} y={l.top + 3} width={3} height={l.height - 6} />
-          {l.familyStart && i > 0 && <line className="day-family-sep" x1={0} x2={width} y1={l.top - 5} y2={l.top - 5} />}
+          <rect className={`day-lane-bar ${l.chat.provider}`} x={LABEL_W} y={s.y(l.top) + 3} width={3} height={l.height - 6} />
+          {l.familyStart && i > 0 && (
+            <line className="day-family-sep" x1={0} x2="100%" y1={s.y(l.top) - 5} y2={s.y(l.top) - 5} />
+          )}
         </g>
       ))}
       {ticks.map((t) => (
-        <g key={`${t.kind}:${t.t}`} className={`day-tick ${t.kind}`}>
-          <line x1={t.x} x2={t.x} y1={AXIS_H - 6} y2={bottom} />
-          <text x={t.x} y={AXIS_H - 10}>
-            {clock(t.t)}
-          </text>
-        </g>
+        <line key={`${t.kind}:${t.t}`} className={`day-tick ${t.kind}`} x1={s.x(t.x)} x2={s.x(t.x)} y1={AXIS_STRIP} y2={bottom} />
       ))}
       {breaks.map((b) => (
         <g key={`${b.x0}:${b.x1}`} className="day-break">
-          <rect x={b.x0 + DOT_R + 6} y={AXIS_H - 4} width={Math.max(0, b.x1 - b.x0 - 2 * (DOT_R + 6))} height={bottom - AXIS_H + 4} />
-          <text x={(b.x0 + b.x1) / 2} y={bottom + 14}>
+          <rect
+            x={s.x(b.x0) + inset}
+            y={AXIS_STRIP}
+            width={Math.max(0, (b.x1 - b.x0) * k - 2 * inset)}
+            height={Math.max(0, bottom - AXIS_STRIP)}
+          />
+          <text x={s.x((b.x0 + b.x1) / 2)} y={bottom + 14}>
             {span(b.ms)}
           </text>
         </g>
@@ -418,14 +435,33 @@ function DayGrid({
   );
 }
 
+/** The time labels, pinned along the top over an opaque strip: the lanes scroll under them. */
+function TimeLabels({ layout, s, k }: { layout: DayLayout; s: Screen; k: number }) {
+  return (
+    <g className="day-axis">
+      <rect className="day-axis-strip" x={0} y={0} width="100%" height={AXIS_STRIP} />
+      {visibleTicks(layout.ticks, k).map((t) => (
+        <text key={`${t.kind}:${t.t}`} className={`day-tick ${t.kind}`} x={s.x(t.x)} y={AXIS_STRIP - 7}>
+          {clock(t.t)}
+        </text>
+      ))}
+    </g>
+  );
+}
+
 function Dot({
   d,
+  at,
+  r,
   isSelected,
   onSelect,
   onOpen,
   onHover,
 }: {
   d: DayDot;
+  /** Where it is drawn, on screen. */
+  at: [number, number];
+  r: number;
   isSelected: boolean;
   onSelect: () => void;
   onOpen: () => void;
@@ -442,7 +478,7 @@ function Dot({
         t.midTurn ? "mid" : "",
         isSelected ? "selected" : "",
       ].join(" ")}
-      transform={`translate(${d.x},${d.y})`}
+      transform={`translate(${at[0]},${at[1]})`}
       onClick={(e) => {
         e.stopPropagation();
         onSelect();
@@ -454,13 +490,16 @@ function Dot({
       onMouseEnter={() => onHover(true)}
       onMouseLeave={() => onHover(false)}
     >
-      {isSelected && <circle r={DOT_R + 5} className="halo" />}
-      <circle r={t.role === "user" ? DOT_R : DOT_R - 1} className="mark" />
+      {isSelected && <circle r={r + 5} className="halo" />}
+      <circle r={t.role === "user" ? r : Math.max(1.5, r - 1)} className="mark" />
     </g>
   );
 }
 
-/** Chat names, pinned at the left edge: they follow the vertical pan and zoom only. */
+/**
+ * Chat names, pinned at the left edge, wrapped whole: they follow the
+ * vertical pan only. Each lane is as tall as its name needs (`labelLines`).
+ */
 function LaneLabels({
   lanes,
   view,
@@ -475,16 +514,17 @@ function LaneLabels({
   onHover: (lane: number | null) => void;
 }) {
   return (
-    <div className="day-labels" style={{ width: LABEL_W }}>
+    <div className="day-labels" style={{ width: LABEL_W, top: AXIS_STRIP }}>
       {lanes.map((l, i) => {
-        const h = l.height * view.k;
         const fork = l.chat.parentSessionId !== null;
         return (
           <button
             key={l.key}
-            className={`day-label ${i === selectedLane ? "selected" : ""} ${h < 15 ? "thin" : ""}`}
-            style={{ top: view.ty + l.top * view.k, height: h }}
-            title={`${l.chat.title}${fork ? ` · forked from “${l.chat.parentTitle ?? l.chat.familyTitle}”` : ""}\n${tilde(l.chat.cwd)}\n${l.turns.length} turns this day — click for the latest`}
+            className={`day-label ${i === selectedLane ? "selected" : ""}`}
+            style={{ top: screen(view).y(l.top) - AXIS_STRIP, height: l.height }}
+            title={`${l.chat.title}${fork ? ` · forked from “${l.chat.parentTitle ?? l.chat.familyTitle}”` : ""}
+${tilde(l.chat.cwd)}
+${l.turns.length} turns this day — click for the latest`}
             onClick={() => onPick(l)}
             onMouseEnter={() => onHover(i)}
             onMouseLeave={() => onHover(null)}
@@ -526,8 +566,10 @@ function DayCard({
               <button className="day-chat" onClick={() => onPick(laneLatest(layout, l)?.key ?? null)}>
                 <span className="day-chat-name">
                   <span className={`provider-chip ${l.chat.provider}`}>{l.chat.provider}</span>
-                  {l.chat.parentSessionId && <span className="fork-glyph">⑂</span>}
-                  {chatName(l.chat)}
+                  <span>
+                    {l.chat.parentSessionId && <span className="fork-glyph">⑂</span>}
+                    {chatName(l.chat)}
+                  </span>
                 </span>
                 <span className="muted small">
                   {l.turns.length} turns · {clock(layout.byKey.get(l.turns[0])!.turn.timestamp)}–

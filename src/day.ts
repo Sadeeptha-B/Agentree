@@ -99,6 +99,19 @@ export function filterDay(day: DayActivity, f: DayFilter): DayActivity {
   };
 }
 
+/** A title without the " (fork)" suffixes the Claude extension stamps on each fork. */
+const unforked = (t: string) => t.replace(/(\s*\(fork\))+\s*$/, "").replace(/\s+/g, " ").trim();
+
+/**
+ * A chat's name as the day view shows it: its title, or "fork <id8>" when
+ * the title only repeats its conversation's plus "(fork)" (the tree's fork
+ * tags do the same).
+ */
+export const chatName = (c: DayChat): string =>
+  c.parentSessionId && unforked(c.title) === unforked(c.familyTitle) && c.title !== c.familyTitle
+    ? `fork ${c.sessionId.slice(0, 8)}`
+    : c.title;
+
 /** A lane's identity: session ids are unique per agent, not across agents. */
 export const laneKey = (x: { provider: ProviderId; sessionId: string }): string => `${x.provider}:${x.sessionId}`;
 

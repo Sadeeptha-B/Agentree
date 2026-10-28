@@ -1,6 +1,6 @@
 import { endOf } from "../shared/render.ts";
 import type { DayChat, DayRun, DayTurn } from "../shared/types.ts";
-import { laneKey, turnKey } from "./day.ts";
+import { chatName, laneKey, turnKey } from "./day.ts";
 
 /**
  * Geometry of the day view: one lane per chat session, time running left to
@@ -13,6 +13,10 @@ import { laneKey, turnKey } from "./day.ts";
  * — nothing running: measured from the latest END of every earlier turn, so
  * an agent working through a long reply is not idle — collapses into a
  * fixed-width break that says how long it was.
+ *
+ * Zoom is time-only: x is scaled by the view, y never is. A lane is as tall
+ * as its tracks or its chat's wrapped name, whichever needs more, in screen
+ * pixels — so the name is readable whole at any zoom.
  */
 
 export const PAD = 40;
@@ -25,6 +29,49 @@ export const LANE_PAD = 8;
 export const FAMILY_GAP = 10;
 /** Radius of a drawn turn, unselected. */
 export const DOT_R = 6;
+
+/** Screen width of the pinned column of chat names. */
+export const LABEL_W = 200;
+/** Line height of a wrapped chat name. */
+export const LABEL_LINE_H = 16;
+/** Room for a name's text in the column: less the agent dot, the turn count and padding (and ⑂ for a fork). */
+const LABEL_TEXT_W = LABEL_W - 64;
+const FORK_GLYPH_W = 14;
+/** Width of one character of a 12px name, generously: under-measuring would let it overflow its lane. */
+const LABEL_CHAR_W = 7;
+
+/**
+ * How many lines a chat's name wraps to in the label column, estimated as
+ * the tree estimates its boxes (nothing can be measured before it is
+ * drawn): words wrap whole, a word longer than a line breaks anywhere.
+ */
+export function labelLines(chat: DayChat): number {
+  const width = LABEL_TEXT_W - (chat.parentSessionId ? FORK_GLYPH_W : 0);
+  const per = Math.max(1, Math.floor(width / LABEL_CHAR_W));
+  let lines = 1;
+  let used = 0;
+  for (const word of chatName(chat).split(/\s+/).filter(Boolean)) {
+    let w = word.length;
+    if (used > 0 && used + 1 + w <= per) {
+      used += 1 + w;
+      continue;
+    }
+    if (used > 0) lines++;
+    while (w > per) {
+      lines++;
+      w -= per;
+    }
+    used = w;
+  }
+  return lines;
+}
+
+/**
+ * Drawn radius of a turn at zoom `k`. Zoom spreads turns apart only in x, so
+ * a dot shrinks as they close up: two turns of one track, `MIN_GAP * k`
+ * apart, stay clear of each other down to the 2px floor (k ≈ 0.375).
+ */
+export const dotRadius = (k: number): number => Math.max(2, Math.min(DOT_R, (MIN_GAP * k - 2) / 2));
 /** Closest two turns of one track may be, centre to centre. */
 export const MIN_GAP = 16;
 export const PX_PER_MIN = 6;
@@ -33,8 +80,8 @@ export const MAX_STEP = 120;
 /** A pause with nothing running at least this long is drawn as a break, not to scale. */
 export const IDLE_BREAK = 20 * 60_000;
 export const BREAK_W = 56;
-/** Closest two time labels may be. */
-const TICK_SPACE = 44;
+/** Closest two time labels may be, in screen pixels: "12:27 PM" at 10px is about 50 wide. */
+const TICK_SPACE = 64;
 const HOUR = 3_600_000;
 
 export interface DayLane {
@@ -181,7 +228,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
     const familyStart = i === 0 || ordered[i - 1].familyId !== chat.familyId || ordered[i - 1].provider !== chat.provider;
     if (familyStart && i > 0) y += FAMILY_GAP;
     const tracks = Math.max(1, tails[i].length);
-    const height = LANE_PAD * 2 + tracks * TRACK_H;
+    const height = LANE_PAD * 2 + Math.max(tracks * TRACK_H, labelLines(chat) * LABEL_LINE_H);
     lanes.push({ key: laneKey(chat), chat, familyStart, top: y, height, tracks, turns: [] });
     y += height;
   });
@@ -224,7 +271,8 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
       lane,
       track,
       x,
-      y: lanes[lane].top + LANE_PAD + TRACK_H * (track + 0.5),
+      // Tracks centred in a lane its name made taller.
+      y: lanes[lane].top + (lanes[lane].height - lanes[lane].tracks * TRACK_H) / 2 + TRACK_H * (track + 0.5),
     };
     dots.push(dot);
     byKey.set(key, dot);
@@ -248,8 +296,8 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
 /**
  * Time labels: the first turn, the first turn after each break, and each
  * hour, placed by interpolating between the two turns it falls between (never
- * inside a break, which is labelled with its length instead). A label too
- * close to the one before it is dropped; hours yield to the other two.
+ * inside a break, which is labelled with its length instead). All of them:
+ * which fit depends on the zoom (`visibleTicks`).
  */
 function ticksFor(dots: DayDot[], resumed: Set<string>): DayTick[] {
   const raw: DayTick[] = [];
@@ -269,10 +317,19 @@ function ticksFor(dots: DayDot[], resumed: Set<string>): DayTick[] {
       raw.push({ x: a.x + ((b.x - a.x) * (h - a.turn.timestamp)) / dt, t: h, kind: "hour" });
     }
   }
+  return raw;
+}
+
+/**
+ * The time labels that fit at zoom `k`: they are drawn at a fixed size, so
+ * one closer than `TICK_SPACE` screen pixels to the one before it is
+ * dropped; an hour yields to a first turn or a resume.
+ */
+export function visibleTicks(ticks: DayTick[], k: number): DayTick[] {
   const out: DayTick[] = [];
-  for (const t of raw) {
+  for (const t of ticks) {
     const last = out[out.length - 1];
-    if (last && t.x - last.x < TICK_SPACE) {
+    if (last && (t.x - last.x) * k < TICK_SPACE) {
       if (t.kind !== "hour" && last.kind === "hour") out[out.length - 1] = t;
       continue;
     }
