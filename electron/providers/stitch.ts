@@ -41,6 +41,23 @@ export interface FamilyMember {
   nodes: TurnNode[];
   /** Match key for one of this member's nodes. Defaults to role + full-text digest. */
   keyOf?: (n: TurnNode) => string;
+  /**
+   * Times of the activity records under each of its nodes, by node id. A
+   * copy's activity that its parent's copy doesn't have is the member's own
+   * work (`TurnNode.occurrences`); without it, a copy records none.
+   */
+  activity?: Map<NodeId, number[]>;
+}
+
+/**
+ * The work a member recorded under its copy of a turn: the activity its
+ * source (the parent's copy) doesn't have. Copies keep each record's time,
+ * so what is shared is copied history, however late it ends.
+ */
+function ownWork(mine: number[], source: number[]): { activeFrom: number; activeUntil: number } | null {
+  const copied = new Set(source);
+  const own = mine.filter((t) => !copied.has(t));
+  return own.length ? { activeFrom: Math.min(...own), activeUntil: Math.max(...own) } : null;
 }
 
 /** Parents before children, siblings in file order. */
@@ -107,6 +124,8 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
    * view, so it can only merge with turns its parent actually contains.
    */
   const views = new Map<string, Map<string, Map<string, NodeId>>>();
+  /** Per processed member: tree node id → the activity under its copy. */
+  const activityOf = new Map<string, Map<NodeId, number[]>>();
 
   const add = (m: FamilyMember, parentView: Map<string, Map<string, NodeId>> | null) => {
     const keyOf = m.keyOf ?? textKey;
@@ -115,6 +134,8 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
     /** member node ids that merged into an existing tree node. */
     const matched = new Set<NodeId>();
     const view = new Map<string, Map<string, NodeId>>();
+    const activity = new Map<NodeId, number[]>();
+    activityOf.set(m.sessionId, activity);
 
     for (const n of topo(m.nodes)) {
       const treeParent = n.parentId ? alias.get(n.parentId) ?? null : null;
@@ -129,14 +150,13 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
         matched.add(n.id);
         // The copy is dropped from the drawing but not from the model: where
         // else the turn lives, under which id, and the work its session
-        // recorded under it after copying it, are kept per session. A copy's
-        // own records — the re-stamped last one too — are its start and end,
-        // never activity, so copied history adds none.
+        // recorded under it after copying it, are kept per session.
         const kept = outById.get(treeId);
+        const work = ownWork(m.activity?.get(n.id) ?? [], activityOf.get(m.parentSessionId ?? "")?.get(treeId) ?? []);
         if (kept) {
           kept.occurrences = [
             ...(kept.occurrences ?? []),
-            { sessionId: m.sessionId, id: n.id, ...(n.activeUntil ? { activeUntil: n.activeUntil } : {}) },
+            { sessionId: m.sessionId, id: n.id, ...(work ?? {}) },
             ...(n.occurrences ?? []),
           ];
         }
@@ -161,6 +181,7 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
         outById.set(treeId, copy);
       }
       alias.set(n.id, treeId);
+      activity.set(treeId, m.activity?.get(n.id) ?? []);
       const slot = treeParent ?? ROOT_KEY;
       if (!view.has(slot)) view.set(slot, new Map());
       if (!view.get(slot)!.has(key)) view.get(slot)!.set(key, treeId);

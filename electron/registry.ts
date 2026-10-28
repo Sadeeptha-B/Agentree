@@ -274,17 +274,18 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
   const running: DayRun[] = [];
   for (const n of detail.nodes) {
     const lane = n.sourceSessionId ?? meta.id;
-    const work = (sessionId: SessionId, until: number) => {
-      if (n.timestamp > 0 && n.timestamp < end && until >= start) {
-        running.push({ provider: meta.provider, familyId: meta.id, sessionId, start: n.timestamp, end: until });
+    const work = (sessionId: SessionId, from: number, until: number) => {
+      if (from > 0 && from < end && until >= start) {
+        running.push({ provider: meta.provider, familyId: meta.id, sessionId, start: from, end: until });
       }
     };
     // Its own lane's, when it started earlier (a turn of the day is drawn,
-    // and carries its own); and each copy's, in the lane of the member that
-    // recorded it — the turn is drawn once, in its owner's.
-    if (n.timestamp < start) work(lane, activeEndOf(n));
+    // and carries its own); and each copy's own work, from its first record,
+    // in the lane of the member that recorded it — the turn is drawn once,
+    // in its owner's.
+    if (n.timestamp < start) work(lane, n.timestamp, activeEndOf(n));
     for (const o of n.occurrences ?? []) {
-      if (o.sessionId !== lane && o.activeUntil && o.activeUntil > endOf(n)) work(o.sessionId, o.activeUntil);
+      if (o.sessionId !== lane && o.activeUntil) work(o.sessionId, o.activeFrom ?? o.activeUntil, o.activeUntil);
     }
     if (!(n.timestamp >= start && n.timestamp < end)) continue;
     const holders = (n.heldBy ?? []).filter((s) => s !== lane);

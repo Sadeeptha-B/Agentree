@@ -53,12 +53,13 @@ interface State {
   dayViewport: { day: string; tx: number; ty: number; k: number } | null;
   /**
    * A chat asked for from another view (`showInDay`), selected once its
-   * day's turns arrive; `day` is the day it is expected on. Each request is
+   * day's turns arrive; `day` is the day it is expected on, and `moved` that
+   * the request already moved there once to the day its turn started. Each request is
    * a new object: a load adopts its answer only while it is still the one
    * pending, so a newer request for the same day isn't consumed by an older
    * answer.
    */
-  dayTarget: (DayWant & { day: string }) | null;
+  dayTarget: (DayWant & { day: string; moved?: boolean }) | null;
   /** Show another day. Its turns load with `loadDay`. */
   setDay: (key: string) => void;
   /**
@@ -297,8 +298,6 @@ export const useStore = create<State>((set, get) => ({
 
   loadDay: () =>
     dayGate(async () => {
-      // A chat asked for that starts on another day moves there once.
-      let hopped = false;
       for (;;) {
         const day = get().day;
         const { start, end } = dayBounds(day);
@@ -326,15 +325,22 @@ export const useStore = create<State>((set, get) => ({
           const key = want ? foundKey(activity, want.provider, activity.found) : null;
           if (target) {
             const found = activity.found;
-            if (found && !key && !hopped) {
+            // A chat asked for that starts on another day moves there, once
+            // per request: the moved target says so, a newer request doesn't.
+            if (found && !key && !target.moved) {
               const there = dayKeyOf(found.timestamp);
               if (there !== day) {
-                hopped = true;
                 set({
                   day: there,
                   dayActivity: null,
                   daySelected: null,
-                  dayTarget: { ...target, sessions: [...new Set([found.familyId, ...target.sessions])], ref: found.ref, day: there },
+                  dayTarget: {
+                    ...target,
+                    sessions: [...new Set([found.familyId, ...target.sessions])],
+                    ref: found.ref,
+                    day: there,
+                    moved: true,
+                  },
                 });
                 continue;
               }

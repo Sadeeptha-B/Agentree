@@ -84,6 +84,47 @@ const ROOT = vi.hoisted(() => {
     ev("assistant.turn_end", "j4", "4T00:40:01.000"),
   ]);
 
+  // Claude: a parent answered on Oct 1, and a fork of it made on Oct 3 at
+  // noon (the copied reply re-stamped then, as forks do), whose own tool
+  // result follows at 12:02. Another chat pauses that morning.
+  const claudeDir = p.join(tmp, "claude", "projects", "c--work-late");
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const [CP, CF, CO] = ["d0000000-0000-4000-8000-00000000000a", "d0000000-0000-4000-8000-00000000000b", "d0000000-0000-4000-8000-00000000000c"];
+  const prompt = (sid: string, uuid: string, parentUuid: string | null, ts: string, text: string, extra = {}) => ({
+    type: "user", uuid, parentUuid, sessionId: sid, timestamp: ts, cwd: "/work/late", promptId: `pr-${text}`,
+    message: { role: "user", content: text }, ...extra,
+  });
+  const reply = (sid: string, uuid: string, parentUuid: string, ts: string, id: string, text: string, extra = {}) => ({
+    type: "assistant", uuid, parentUuid, sessionId: sid, timestamp: ts, cwd: "/work/late",
+    message: { id, role: "assistant", content: [{ type: "text", text }, { type: "tool_use", id: `tu_${id}`, name: "Bash", input: {} }] }, ...extra,
+  });
+  const jsonl = (recs: object[]) => recs.map((r) => JSON.stringify(r)).join("\n") + "\n";
+  fs.writeFileSync(p.join(claudeDir, `${CP}.jsonl`), jsonl([
+    prompt(CP, "cp-u1", null, "2026-10-01T09:00:00.000Z", "Check the build"),
+    reply(CP, "cp-a1", "cp-u1", "2026-10-01T09:01:00.000Z", "msg_late1", "Checking."),
+  ]));
+  const forkedFrom = { forkedFrom: { sessionId: CP, messageUuid: "cp-a1" } };
+  fs.writeFileSync(p.join(claudeDir, `${CF}.jsonl`), jsonl([
+    prompt(CF, "cf-u1", null, "2026-10-01T09:00:00.000Z", "Check the build", forkedFrom),
+    reply(CF, "cf-a1", "cf-u1", "2026-10-03T12:00:00.000Z", "msg_late1", "Checking.", forkedFrom),
+    { type: "user", uuid: "cf-r1", parentUuid: "cf-a1", sessionId: CF, timestamp: "2026-10-03T12:02:00.000Z", cwd: "/work/late",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_msg_late1", content: "ok" }] } },
+  ]));
+  fs.writeFileSync(p.join(claudeDir, `${CO}.jsonl`), jsonl([
+    prompt(CO, "co-u1", null, "2026-10-03T09:00:00.000Z", "Morning"),
+    reply(CO, "co-a1", "co-u1", "2026-10-03T09:01:00.000Z", "msg_morning", "Morning."),
+    prompt(CO, "co-u2", "co-a1", "2026-10-03T10:00:00.000Z", "Back"),
+  ]));
+
+  // Copilot: a reply whose tool run and turn end are recorded after it, to
+  // fork with Agentree's own writer (the copy keeps those closing events).
+  session("c3000000-0000-4000-8000-00000000000a", "name: To fork\n", [
+    ev("user.message", "q1", "5T09:00:00.000", { content: "Run it" }),
+    ev("assistant.message", "q2", "5T09:01:00.000", { content: "Running", toolRequests: [{ name: "shell" }] }),
+    ev("tool.execution_complete", "q3", "5T10:00:00.000"),
+    ev("assistant.turn_end", "q4", "5T10:00:01.000"),
+  ]);
+
   // A Codex turn whose command runs for 48 minutes after the reply, then the next turn.
   const thread = "01900000-0000-7000-8000-0000000c0001";
   const turnA = "01900000-0000-7000-8000-0000000c00a1";
@@ -119,7 +160,8 @@ const ROOT = vi.hoisted(() => {
   return tmp;
 });
 
-const { dayActivity } = await import("../electron/registry.ts");
+const { dayActivity, forkAnyAt, loadAnySession } = await import("../electron/registry.ts");
+const { forkPointOf } = await import("../shared/render.ts");
 
 const at = (iso: string) => Date.parse(iso);
 const OCT1 = at("2026-10-01T00:00:00.000Z");
@@ -219,20 +261,51 @@ describe("idle time from recorded activity", () => {
     expect(working).toMatchObject({ heldBy: [H] });
     expect(working.activeUntil).toBeUndefined();
     // The fork's work under it survives, as the fork's: its lane is listed, so the filters apply to it.
+    // From its first record of it: the fork's work, not the shared reply, started then.
     expect(a.running.filter((r) => r.familyId === G)).toEqual([
-      { provider: "copilot", familyId: G, sessionId: H, start: at("2026-10-03T09:01:00.000Z"), end: at("2026-10-03T10:00:01.000Z") },
+      { provider: "copilot", familyId: G, sessionId: H, start: at("2026-10-03T10:00:00.000Z"), end: at("2026-10-03T10:00:01.000Z") },
     ]);
     expect(a.chats.some((c) => c.sessionId === H)).toBe(true);
   });
 
-  it("keeps a fork's work under a shared reply running into the next day", () => {
+  it("counts a fork's work after midnight on that day, not from the shared reply the evening before", () => {
     const [K, J] = ["c", "d"].map((c) => `c2000000-0000-4000-8000-00000000000${c}`);
+    const OCT3 = OCT1 + 2 * DAY;
     const OCT4 = OCT1 + 3 * DAY;
     const next = dayActivity(OCT4, OCT4 + DAY);
     expect(next.running.filter((r) => r.familyId === K)).toEqual([
-      { provider: "copilot", familyId: K, sessionId: J, start: at("2026-10-03T23:51:00.000Z"), end: at("2026-10-04T00:40:01.000Z") },
+      { provider: "copilot", familyId: K, sessionId: J, start: at("2026-10-04T00:40:00.000Z"), end: at("2026-10-04T00:40:01.000Z") },
     ]);
     expect(next.turns.filter((t) => t.familyId === K).map((t) => t.id)).toEqual(["k3"]);
+    expect(dayActivity(OCT3, OCT3 + DAY).running.filter((r) => r.familyId === K)).toEqual([]);
+  });
+
+  it("starts a later copy's work when it did, so it can't cover an earlier pause", () => {
+    const [CP, CF] = ["a", "b"].map((c) => `d0000000-0000-4000-8000-00000000000${c}`);
+    const OCT3 = OCT1 + 2 * DAY;
+    // The copied reply is drawn on Oct 1, in the parent's lane, held by the fork.
+    const first = dayActivity(OCT1, OCT1 + DAY);
+    expect(turn(first, CP, "Checking.")).toMatchObject({ familyId: CP, heldBy: [CF] });
+    // Neither Oct 1 nor the morning of Oct 3 is the fork's work: it is from 12:02, its own tool result.
+    expect(first.running.filter((r) => r.sessionId === CF)).toEqual([]);
+    expect(dayActivity(OCT3, OCT3 + DAY).running.filter((r) => r.sessionId === CF)).toEqual([
+      { provider: "claude", familyId: CP, sessionId: CF, start: at("2026-10-03T12:02:00.000Z"), end: at("2026-10-03T12:02:00.000Z") },
+    ]);
+  });
+
+  it("finds no work in a fresh fork whose copy ends with the parent's closing events", async () => {
+    const Q = "c3000000-0000-4000-8000-00000000000a";
+    const OCT5 = OCT1 + 4 * DAY;
+    const reply = loadAnySession(Q)!.nodes.find((n) => n.text === "Running")!;
+    expect(reply.activeUntil).toBe(at("2026-10-05T10:00:01.000Z"));
+    // Agentree's own Copilot fork writer, into this disposable store: it copies through the turn end.
+    const fork = await forkAnyAt(Q, forkPointOf(reply));
+    expect(fork.ok).toBe(true);
+    const a = dayActivity(OCT5, OCT5 + DAY);
+    const drawn = turn(a, Q, "Running");
+    expect(drawn.heldBy?.length).toBe(1);
+    // Copied history, however late it ends, is no work of the fork's.
+    expect(a.running.filter((r) => r.familyId === Q)).toEqual([]);
   });
 
   it("carries a tool run past midnight into the next day, as running", () => {
