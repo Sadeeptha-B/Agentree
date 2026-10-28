@@ -536,6 +536,8 @@ export interface Parsed {
   nodes: TurnNode[];
   /** Stitch evidence per node id: `m:<message.id>` / `p:<promptId>|<digest>` / `u:|<digest>`. */
   keys: Map<NodeId, string>;
+  /** Times of the activity records under each node (`markActivity`): what stitching tells copied history from a copy's own work. */
+  activity: Map<NodeId, number[]>;
   /**
    * Every assistant API message id in the file. The API mints one per
    * response, and a copy-fork preserves the ones it copies, so two files
@@ -572,6 +574,7 @@ const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
   sessionId,
   nodes: [],
   keys: new Map(),
+  activity: new Map(),
   messageIds: [],
   problem,
   title: "",
@@ -666,17 +669,21 @@ const isActivity = (rec: RawRecord) =>
   (rec.type === "system" && rec.subtype === "compact_boundary");
 
 /**
- * `TurnNode.activeUntil`: each activity record (`isActivity`) counts for
- * its nearest drawn ancestor — a tool result, a tool-only reply, a subagent's
- * records for the turn that set them off. A drawn turn's own records count
- * for itself, so a reply is never kept busy by the prompt after it.
+ * The activity under each drawn node (`Parsed.activity`), and from it
+ * `TurnNode.activeUntil`: each activity record (`isActivity`) counts for its
+ * nearest drawn ancestor — a tool result, a tool-only reply, a subagent's
+ * records for the turn that set them off. A drawn turn's own records
+ * (`own`: its message group) are its start and end, not activity under it,
+ * so a reply is never kept busy by the prompt after it, and a copy's
+ * re-stamped record is no work.
  */
 function markActivity(
   nodes: TurnNode[],
   records: RawRecord[],
   drawn: Set<string>,
+  own: Set<string>,
   parentOf: Map<string, string | null>,
-): void {
+): Map<NodeId, number[]> {
   /** A record's nearest drawn ancestor-or-self, memoised along each walk. */
   const nearest = new Map<string, string | null>();
   const drawnFrom = (uuid: string): string | null => {
@@ -701,17 +708,21 @@ function markActivity(
     for (const w of walked) nearest.set(w, found);
     return found;
   };
-  const until = new Map<string, number>();
+  const activity = new Map<NodeId, number[]>();
   for (const rec of records) {
-    if (!rec.uuid || !rec.timestamp || !isActivity(rec)) continue;
+    if (!rec.uuid || !rec.timestamp || own.has(rec.uuid) || !isActivity(rec)) continue;
     const at = drawnFrom(rec.uuid);
     const t = Date.parse(rec.timestamp);
-    if (at && t > (until.get(at) ?? 0)) until.set(at, t);
+    if (!at || !(t > 0)) continue;
+    const list = activity.get(at);
+    if (list) list.push(t);
+    else activity.set(at, [t]);
   }
   for (const n of nodes) {
-    const t = until.get(n.id);
-    if (t && t > endOf(n)) n.activeUntil = t;
+    const t = Math.max(0, ...(activity.get(n.id) ?? []));
+    if (t > endOf(n)) n.activeUntil = t;
   }
+  return activity;
 }
 
 /** Project a transcript file into the node list. Read-only — we never write here. */
@@ -1050,7 +1061,8 @@ export function parseRecords(
     }
     if (strong || head.promptId) strongKeys.add(id);
   }
-  markActivity(nodes, all, kept, parentOf);
+  const own = new Set(groups.filter((g) => kept.has(g[0].uuid!)).flatMap((g) => g.map((r) => r.uuid!)));
+  const activity = markActivity(nodes, all, kept, own, parentOf);
   // Identity for annotations and selection: the key itself where it's unique
   // (a message id, a prompt id), else qualified by the parent's identity.
   assignStableIds(nodes, (n) => ({
@@ -1073,6 +1085,7 @@ export function parseRecords(
     sessionId,
     nodes,
     keys,
+    activity,
     messageIds,
     problem,
     // A name the user chose with `/rename` beats the CLI's generated title,
@@ -1479,6 +1492,7 @@ const asMember = (id: string, p: Parsed, parentSessionId: string | null = null):
   parentSessionId,
   nodes: p.nodes,
   keyOf: (n) => p.keys.get(n.id) ?? n.id,
+  activity: p.activity,
 });
 
 /**

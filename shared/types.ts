@@ -107,12 +107,13 @@ export interface TurnNode {
    * The other sessions of the family that hold a copy of this turn, with the
    * id it has there. Stitching draws one node per turn; this keeps where else
    * it lives (`sourceSessionId` is the one drawn). Physical copies only; who
-   * holds the turn is `heldBy`. `activeUntil` is that copy's own: work its
-   * session recorded under the turn after copying it (a fork that went on
-   * with a tool run). Drawing the turn once must not erase that work, and it
-   * was that session's, not the owner's.
+   * holds the turn is `heldBy`. `activeFrom`–`activeUntil` is that copy's own
+   * work: activity its session recorded under the turn that the copy it was
+   * made from doesn't have (a fork that went on with a tool run). Copied
+   * history, however late it ends, is none. Drawing the turn once must not
+   * erase that work, and it was that session's, not the owner's.
    */
-  occurrences?: { sessionId: SessionId; id: NodeId; activeUntil?: number }[];
+  occurrences?: { sessionId: SessionId; id: NodeId; activeFrom?: number; activeUntil?: number }[];
   /**
    * Every member session whose history holds ALL of this node: the sessions
    * that open or resume onto it. Claude and Copilot: its owner and every
@@ -378,7 +379,7 @@ export interface DayRun {
   provider: ProviderId;
   familyId: SessionId;
   sessionId: SessionId;
-  /** When the turn it was recorded under started. */
+  /** When it started: the turn's start, in its own lane; a copy's first record of its own work. */
   start: number;
   /** Its last activity (`activeEndOf`, or the copy's `activeUntil`): at or after the window's start. */
   end: number;
