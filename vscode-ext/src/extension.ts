@@ -6,7 +6,7 @@ import { nativeLink } from "../../electron/native.ts";
 import { quote } from "../../electron/shell.ts";
 import { usableCwd } from "../../electron/terminal.ts";
 import { watchLater, type Watcher } from "../../electron/watch.ts";
-import type { ActionResult, NodeMeta, SessionRef, SettingsPatch } from "../../shared/types.ts";
+import type { ActionResult, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../../shared/types.ts";
 
 /**
  * VS Code host for Agentree. The Electron app's main/renderer split maps
@@ -103,7 +103,7 @@ function dispatch(method: string, args: unknown[]): unknown {
     case "patchNode":
       return backend.patchNode(args[0] as string, args[1] as string, args[2] as NodeMeta);
     case "forkAt":
-      return backend.forkAt(args[0] as string, args[1] as string);
+      return backend.forkAt(args[0] as string, args[1] as ForkPoint);
     case "providerHealth":
       return backend.providerHealth();
     case "getSettings":

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
 import type { ActionResult, ForkResult, ProviderId, SessionRef, SettingsPaths, SettingsState } from "../../shared/types.ts";
-import { actionTarget, contextAt, costOf, inferWindow, pathToRoot } from "../../shared/render.ts";
+import { actionTarget, contextAt, costOf, forkPointOf, inferWindow, pathToRoot } from "../../shared/render.ts";
 import { Markdown } from "../markdown.tsx";
 import { pct, tokens, when } from "../format.ts";
 
@@ -116,7 +116,7 @@ function SessionActions({ ref_, resumeCmd }: { ref_: SessionRef; resumeCmd: stri
 }
 
 export function NodePanel() {
-  const { session, nodes, selected, focus, patch, setStatus, settings, set } = useStore();
+  const { session, nodes, selected, focus, patch, setStatus, annotationError, settings, set } = useStore();
   // A fresh fork opens in the harness's chat panel: by default only in VS
   // Code, where that panel is right there; the desktop app shows the buttons.
   const openForks = settings?.settings.openForkInChat ?? api.host === "vscode";
@@ -160,7 +160,8 @@ export function NodePanel() {
     setForkFor(node.id);
     setOpened(null);
     try {
-      const res = await api.forkAt(meta.id, node.id);
+      // Where the node ends as drawn, so a regrouped node is not read as another range.
+      const res = await api.forkAt(meta.id, forkPointOf(node));
       setFork(res);
       if (res.ok && res.open && openForks && NATIVE[res.open.provider]) {
         setOpened(await api.openNative(res.open));
@@ -295,6 +296,7 @@ export function NodePanel() {
                 label
               </button>
             </div>
+            {annotationError && <p className="error-text small hint">{annotationError}</p>}
 
             <div className="panel-actions">
               <button

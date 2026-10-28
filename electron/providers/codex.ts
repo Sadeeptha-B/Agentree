@@ -1,8 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { assignTips, childIndex, copyHolders, countBranchPoints, forkSummaries } from "../../shared/render.ts";
+import {
+  assignTips,
+  childIndex,
+  copyHolders,
+  countBranchPoints,
+  FORK_POINT_GONE,
+  forkSummaries,
+  resolveForkPoint,
+} from "../../shared/render.ts";
 import type {
+  ForkPoint,
   ForkResult,
   MemberInfo,
   ProviderHealth,
@@ -48,7 +57,8 @@ import { stitchFamily, type FamilyMember } from "./stitch.ts";
  * Two things vary independently and are read independently:
  *
  *  - VOCABULARY: `item_completed` items carrying turn ids, or the legacy
- *    `user_message` / `agent_message` events, which carry none;
+ *    `user_message` / `agent_message` events, which carry none — chosen per
+ *    page by which of them carries its prose (`readsAsLegacy`);
  *  - HISTORY ENCODING: by reference (`history_base`), or a COPIED prefix
  *    (`forked_from_id` and no `history_base`). Codex 0.153–0.162 wrote forks
  *    of paginated threads both ways (7 copied-prefix forks on the target
@@ -311,7 +321,7 @@ function parsePage(file: string, archived: boolean): Page | null {
       /* torn tail of a live session */
     }
   }
-  if (page.legacy && !records.some((r) => r.payload?.type === "item_completed")) {
+  if (page.legacy && readsAsLegacy(records)) {
     parseLegacy(page, records);
   } else {
     page.legacy = false;
@@ -319,6 +329,33 @@ function parsePage(file: string, archived: boolean): Page | null {
   }
   page.firstUserText = page.turns.flatMap((t) => t.nodes).find((n) => n.role === "user")?.text ?? "";
   return page;
+}
+
+/**
+ * Which vocabulary a page that isn't `history_mode: "paginated"` speaks,
+ * decided by its PROSE. Item records alone prove nothing: a VS Code
+ * rollout of 0.164 (observed) is legacy prose plus one completed
+ * `Extension` item. A page reads as items when items carry its prose — or
+ * when it has items and no legacy prose at all, so an item vocabulary
+ * nobody taught the parser still counts as a failure, not as empty. One
+ * vocabulary per page: where item prose exists it wins (it carries turn
+ * ids), and legacy prose events beside it are not read.
+ */
+function readsAsLegacy(records: RawRecord[]): boolean {
+  let items = false;
+  let legacyProse = false;
+  for (const r of records) {
+    if (r.type !== "event_msg") continue;
+    const t = r.payload?.type;
+    if (t === "item_completed") {
+      const it = r.payload?.item?.type;
+      if (it === "UserMessage" || it === "AgentMessage") return false;
+      items = true;
+    } else if (t === "user_message" || t === "agent_message") {
+      legacyProse = true;
+    }
+  }
+  return legacyProse || !items;
 }
 
 function parsePaginated(page: Page, records: RawRecord[]): void {
@@ -992,12 +1029,12 @@ export function loadCodexSession(sessionId: SessionId): SessionDetail | null {
  * tree was built (`forkBlocked`, `forkVia`): Codex cuts only at whole turns,
  * and only in history some thread still holds.
  */
-export async function forkCodexAt(familyId: SessionId, nodeId: string): Promise<ForkResult> {
+export async function forkCodexAt(familyId: SessionId, point: ForkPoint): Promise<ForkResult> {
   const scan = scanPages();
   const fam = familyOf(scan, familyId);
   const tree = fam ? buildTree(scan, fam) : undefined;
-  const node = tree?.nodes.find((n) => n.id === nodeId);
-  if (!fam || !tree || !node) return { ok: false, error: "That turn is not in this conversation any more." };
+  const node = tree && resolveForkPoint(tree.nodes, point);
+  if (!fam || !tree || !node) return { ok: false, error: FORK_POINT_GONE };
   if (node.forkBlocked) return { ok: false, error: node.forkBlocked };
   const turnId = node.lastRawId!;
   const via = tree.forkVia.get(turnId);

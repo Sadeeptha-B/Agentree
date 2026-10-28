@@ -1,4 +1,6 @@
+import { FORK_POINT_GONE, resolveForkPoint } from "../shared/render.ts";
 import type {
+  ForkPoint,
   ForkResult,
   NodeMeta,
   ProviderHealth,
@@ -44,7 +46,8 @@ export interface Provider {
   list(): SessionMeta[];
   /** The family containing `sessionId`, stitched into one tree. */
   load(sessionId: SessionId): SessionDetail | null;
-  fork(familyId: SessionId, nodeId: string): ForkResult | Promise<ForkResult>;
+  /** Fork after the node that still ends where `point` did (`resolveForkPoint`). */
+  fork(familyId: SessionId, point: ForkPoint): ForkResult | Promise<ForkResult>;
   owns(sessionId: SessionId): boolean;
   health(): ProviderHealth;
   /**
@@ -92,12 +95,12 @@ const copilot: Provider = {
   id: "copilot",
   list: listCopilotSessions,
   load: loadCopilotSession,
-  fork: (familyId, nodeId) => {
+  fork: (familyId, point) => {
     // Copilot trees are stitched from linear sessions, and a merged turn spans
     // several raw events — the fork anchors on the LAST one (lastRawId).
     const detail = loadCopilotSession(familyId);
-    const node = detail?.nodes.find((n) => n.id === nodeId);
-    if (!detail || !node) return { ok: false, error: "That turn is not in this session." };
+    const node = detail && resolveForkPoint(detail.nodes, point);
+    if (!detail || !node) return { ok: false, error: FORK_POINT_GONE };
     return forkCopilotAt(detail.meta.id, node.lastRawId ?? node.id);
   },
   owns: (id) => locateCopilot(id) !== null || loadCopilotSession(id) !== null,
@@ -188,11 +191,11 @@ export function loadAnySession(id: SessionId): SessionDetail | null {
   return p ? guarded(p, () => p.load(id), null) : null;
 }
 
-export async function forkAnyAt(sessionId: SessionId, nodeId: string): Promise<ForkResult> {
+export async function forkAnyAt(sessionId: SessionId, point: ForkPoint): Promise<ForkResult> {
   const p = owner(sessionId);
   if (!p) return { ok: false, error: "That session is no longer on disk." };
   try {
-    return await p.fork(sessionId, nodeId);
+    return await p.fork(sessionId, point);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -202,13 +205,15 @@ export async function forkAnyAt(sessionId: SessionId, nodeId: string): Promise<F
  * Annotate one turn of a family. Loads the family so the annotation can be
  * written under every id the turn has, into every member's sidecar — see
  * `writeAnnotation`. Costs one family load per click, which is the point:
- * identity is only known once the family is stitched.
+ * identity is only known once the family is stitched. Throws when nothing
+ * was written, or a sidecar write failed, so the view never shows an
+ * annotation as saved that isn't.
  */
 export function annotate(familyId: SessionId, nodeId: string, patch: NodeMeta): void {
   const p = owner(familyId);
   const detail = p ? guarded(p, () => p.load(familyId), null) : null;
   const node = detail?.nodes.find((n) => n.id === nodeId);
-  if (!detail || !node) return;
+  if (!detail || !node) throw new Error("That turn is no longer in this conversation.");
   const members = detail.members.length ? detail.members.map((m) => m.id) : [detail.meta.id];
   writeAnnotation(node, detail.nodes, [detail.meta.id, ...members], patch);
 }

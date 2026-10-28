@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { actionTarget, childIndex, cwdKey, pathToRoot, toNodeMap } from "../shared/render.ts";
+import { actionTarget, childIndex, cwdKey, FORK_POINT_GONE, forkPointOf, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
 import { claudeHealth, claudeWatchDirs, listSessions, loadSession, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
@@ -246,7 +246,7 @@ describe("Claude sessions stored in several project folders", () => {
 
   it("forks a moved session from the copy that holds the turn, next to it", () => {
     const d = loadSession(MO)!;
-    const res = forkClaudeAt(MO, one(d, "Imports updated.").id);
+    const res = forkClaudeAt(MO, forkPointOf(one(d, "Imports updated.")));
     expect(res).toMatchObject({ ok: true, cwd: "C:\\work\\articulation" });
     if (!res.ok) return;
     expect(fs.existsSync(path.join(projectDir("c--work-moved-b-new"), `${res.id}.jsonl`))).toBe(true);
@@ -266,7 +266,7 @@ describe("Claude display merge and fork endpoints", () => {
     const merged = d.nodes.find((n) => n.role === "user")!;
     expect(merged.text).toBe("Run the migration\n\nalso back up first");
     expect(merged.forkBlocked).toMatch(/mid-turn/);
-    expect(forkClaudeAt(AT, merged.id)).toMatchObject({ ok: false });
+    expect(forkClaudeAt(AT, forkPointOf(merged))).toMatchObject({ ok: false });
     // The turn after it is the fork point, and it keeps the message.
     const reply = one(d, "Backed up, then migrated.");
     expect(reply.forkBlocked).toBeUndefined();
@@ -316,12 +316,47 @@ describe("Claude quiet fork endpoints", () => {
     expect(d.members.find((m) => m.id === EP)!.tipId).toBe(later.id);
     // A fork at the quiet fork's endpoint cannot take in what it never had.
     expect(first.forkBlocked).toBeUndefined();
-    const res = forkClaudeAt(EP, first.id);
+    const res = forkClaudeAt(EP, forkPointOf(first));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const file = path.join(projectDir("c--work-endpoint"), `${res.id}.jsonl`);
     expect(mergeSameRoleRuns(parseFile(file).nodes).map((n) => n.text)).toEqual([EP_PROMPT, "First prose."]);
     fs.rmSync(file);
+  });
+
+  /** Run `fn` while EF, the quiet fork, is not on disk. */
+  const withoutEF = <T,>(fn: () => T): T => {
+    const file = path.join(projectDir("c--work-endpoint"), `${EF}.jsonl`);
+    const away = path.join(claudeRoot, `${EF}.away`);
+    fs.renameSync(file, away);
+    try {
+      return fn();
+    } finally {
+      fs.renameSync(away, file);
+    }
+  };
+
+  it("forks the range drawn when selected, though a quiet fork appearing before the click split it", () => {
+    // Before EF exists, EP's agent loop is one node ending on "Later prose."...
+    const point = withoutEF(() => forkPointOf(one(loadSession(EP)!, "First prose.\n\nLater prose.")));
+    // ...then EF appears, and the same head id now draws only "First prose.".
+    const now = loadSession(EP)!;
+    expect(one(now, "First prose.").id).toBe(point.nodeId);
+    const res = forkClaudeAt(EP, point);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const file = path.join(projectDir("c--work-endpoint"), `${res.id}.jsonl`);
+    expect(mergeSameRoleRuns(parseFile(file).nodes).map((n) => n.text)).toEqual([EP_PROMPT, "First prose.\n\nLater prose."]);
+    fs.rmSync(file);
+  });
+
+  it("refuses, rather than fork a longer range, when the selected node was folded into a longer one", () => {
+    const point = forkPointOf(one(loadSession(EP)!, "First prose."));
+    const before = fs.readdirSync(projectDir("c--work-endpoint")).length;
+    // EF is deleted before the click: "First prose." merges with "Later prose." under the same head.
+    const res = withoutEF(() => forkClaudeAt(EP, point));
+    expect(res).toEqual({ ok: false, error: FORK_POINT_GONE });
+    expect(fs.readdirSync(projectDir("c--work-endpoint")).length).toBe(before);
   });
 
   it("ends a quiet fork at the first of two user records", () => {
@@ -362,7 +397,7 @@ describe("Claude fork", () => {
   it("writes a new transcript in the extension's fork format and stitches it back", () => {
     const before = loadSession(P)!;
     const shipped = one(before, "Added vitest.");
-    const res = forkClaudeAt(P, shipped.id);
+    const res = forkClaudeAt(P, forkPointOf(shipped));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.open).toEqual({ provider: "claude", sessionId: res.id, cwd: "C:\\work\\demo" });
@@ -393,7 +428,7 @@ describe("Claude fork", () => {
 
   it("forks at a node inside a fork's own suffix from that fork's transcript", () => {
     const d = loadSession(P)!;
-    const res = forkClaudeAt(P, one(d, "Switched to rollup.").id);
+    const res = forkClaudeAt(P, forkPointOf(one(d, "Switched to rollup.")));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const recs = readJsonl(path.join(projectDir(), `${res.id}.jsonl`));
@@ -409,7 +444,7 @@ describe("Claude fork", () => {
 
   it("copies the logical chain across /compact, keeping the boundary a physical root", () => {
     const before = loadSession(KP)!;
-    const res = forkClaudeAt(KP, one(before, "Issue two fixed.").id);
+    const res = forkClaudeAt(KP, forkPointOf(one(before, "Issue two fixed.")));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const recs = readJsonl(path.join(projectDir("c--work-compact"), `${res.id}.jsonl`)).slice(0, -1);
@@ -427,13 +462,13 @@ describe("Claude fork", () => {
 
   it("refuses a pre-compact turn with the reason the panel showed", () => {
     const d = loadSession(KP)!;
-    const res = forkClaudeAt(KP, one(d, "Found four issues.").id);
+    const res = forkClaudeAt(KP, forkPointOf(one(d, "Found four issues.")));
     expect(res).toEqual({ ok: false, error: one(d, "Found four issues.").forkBlocked });
   });
 
   it("a fork ending on a prompt without promptId re-joins its source", () => {
     const before = loadSession(NP)!;
-    const res = forkClaudeAt(NP, one(before, "Second question").id);
+    const res = forkClaudeAt(NP, forkPointOf(one(before, "Second question")));
     expect(res.ok).toBe(true);
     const after = loadSession(NP)!;
     expectTree(after);
@@ -617,7 +652,7 @@ describe("Fork invariants over every fixture family", () => {
       const map = toNodeMap(before.nodes);
       for (const n of before.nodes) {
         if (n.forkBlocked) continue;
-        const res = forkClaudeAt(s.id, n.id);
+        const res = forkClaudeAt(s.id, forkPointOf(n));
         expect(res.ok, `${s.id}: ${n.text}`).toBe(true);
         if (!res.ok) continue;
         checked++;
@@ -640,7 +675,7 @@ describe("Fork invariants over every fixture family", () => {
     // KN is the extension's fork of compacted KP: its boundary's logical
     // parent points into KP. Forking KN's own reply must still copy it all.
     const d = loadSession(KN)!;
-    const res = forkClaudeAt(KN, one(d, "Issue three fixed.").id);
+    const res = forkClaudeAt(KN, forkPointOf(one(d, "Issue three fixed.")));
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const recs = readJsonl(path.join(projectDir("c--work-compact"), `${res.id}.jsonl`));
