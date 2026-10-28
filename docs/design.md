@@ -273,16 +273,26 @@ Copilot: non-message activity events after it (tool runs, `assistant.turn_end`).
 A drawn turn's own records never count for the turn before it, so a reply
 isn't kept busy until the next prompt. A merged node takes the latest of its
 parts'. Activity is a fact about a physical copy, not about the drawn node.
-Each parse keeps the times of the activity records under each node, leaving
-out the node's own records, so a copy's re-stamped record is no activity
-(Claude `Parsed.activity`, Copilot `ParsedSession.activity`). When stitching
+Each parse keeps the activity records under each node, leaving out the
+node's own records, so a copy's re-stamped record is no activity (Claude
+`Parsed.activity`, Copilot `ParsedSession.activity`). A record is its time
+and a key (`ActivityRecord`): the evidence a copy of it keeps. Claude: the
+time, kind, API message id and, per content block, the tool call it makes or
+answers with its length, and an answer's outcome (a fork that re-runs a
+copied call answers the same call id), because a copy gets fresh uuids.
+Copilot: the time, kind and payload digest without the session id the fork
+writer rewrites; never the event id. When stitching
 draws a shared turn once, the other copy keeps, on its occurrence, the work
-its session recorded under the turn: the activity times its source (the
-parent's copy) doesn't have, as `occurrences[].activeFrom`–`activeUntil`.
-Copiers keep each record's time, so copied history, however late it ends
+its session recorded under the turn: the activity records its source (the
+parent's copy) doesn't have, by key, as `occurrences[].activeFrom`–`activeUntil`.
+Copiers keep each record, time included, so copied history, however late it ends
 (Copilot's fork copies through the turn's closing events), is shared and adds
 none, and the work starts at its own first record, not at the turn's start
-(a fork copied days later can't cover the days between). Codex needs no such
+(a fork copied days later can't cover the days between). A time alone is not
+that evidence: a fork's own work and its parent's can end at the same instant
+([round 6](archive/day-view/review-findings-day-view-round-6.md#dv6-1)). Keys
+are a worker-side comparison, not a persisted identity, and since a key
+holds its record's time, keys can only find more own work than times did. Codex needs no such
 rule: its forks share turns by reference, and work after a shared turn is a
 turn of its own. Only the day view's idle time reads any of this
 (`activeEndOf`, and the occurrences as runs); display, "latest" and fork
@@ -1503,8 +1513,14 @@ dangling parent, one root per path), not session counts.
   run: a Claude fork's re-stamped copy, and a fresh fork made by
   Agentree's own Copilot writer, whose copy ends with the parent's closing
   events. A Claude fork copied two days after the reply runs from its own
-  tool result, not from the reply's day. `test/endpoints.test.ts`: Claude tool results and
-  tool-only replies count for the reply, the next prompt doesn't.
+  tool result, not from the reply's day. Round 6: a Copilot fork whose own
+  tool run ends at the same instant as different work of its parent's keeps
+  its run to that instant, while a copy under rewritten event ids adds none;
+  a Claude fork's re-run answer to a copied call at its parent's instant is
+  its own work, and Agentree's own fork writer's copy of that answer is not.
+  `test/endpoints.test.ts`: Claude tool results and
+  tool-only replies count for the reply, the next prompt doesn't, and a
+  queued message whose prompt is content blocks is read.
   `src/day-layout.test.ts`: tracks, breaks measured from the latest
   activity (a long reply, a tool run, one running in from the day before,
   or a fork's run from when it started, isn't idle), a chat landing on its

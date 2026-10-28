@@ -42,21 +42,34 @@ export interface FamilyMember {
   /** Match key for one of this member's nodes. Defaults to role + full-text digest. */
   keyOf?: (n: TurnNode) => string;
   /**
-   * Times of the activity records under each of its nodes, by node id. A
-   * copy's activity that its parent's copy doesn't have is the member's own
-   * work (`TurnNode.occurrences`); without it, a copy records none.
+   * The activity records under each of its nodes, by node id. A copy's
+   * activity that its parent's copy doesn't have is the member's own work
+   * (`TurnNode.occurrences`); without it, a copy records none.
    */
-  activity?: Map<NodeId, number[]>;
+  activity?: Map<NodeId, ActivityRecord[]>;
+}
+
+/**
+ * One activity record under a node: when it was written, and `key`, the
+ * evidence a copy of it keeps — its time and kind, plus what the provider's
+ * copier preserves of its calls and payload (never a raw id the copier
+ * rewrites). Two records are the same event only when their keys are equal:
+ * a time alone is shared by different events written at the same instant.
+ * Not a persisted identity; it never leaves the worker.
+ */
+export interface ActivityRecord {
+  at: number;
+  key: string;
 }
 
 /**
  * The work a member recorded under its copy of a turn: the activity its
- * source (the parent's copy) doesn't have. Copies keep each record's time,
- * so what is shared is copied history, however late it ends.
+ * source (the parent's copy) doesn't have. Copies keep each record, time
+ * included, so what is shared is copied history, however late it ends.
  */
-function ownWork(mine: number[], source: number[]): { activeFrom: number; activeUntil: number } | null {
-  const copied = new Set(source);
-  const own = mine.filter((t) => !copied.has(t));
+function ownWork(mine: ActivityRecord[], source: ActivityRecord[]): { activeFrom: number; activeUntil: number } | null {
+  const copied = new Set(source.map((r) => r.key));
+  const own = mine.filter((r) => !copied.has(r.key)).map((r) => r.at);
   return own.length ? { activeFrom: Math.min(...own), activeUntil: Math.max(...own) } : null;
 }
 
@@ -125,7 +138,7 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
    */
   const views = new Map<string, Map<string, Map<string, NodeId>>>();
   /** Per processed member: tree node id → the activity under its copy. */
-  const activityOf = new Map<string, Map<NodeId, number[]>>();
+  const activityOf = new Map<string, Map<NodeId, ActivityRecord[]>>();
 
   const add = (m: FamilyMember, parentView: Map<string, Map<string, NodeId>> | null) => {
     const keyOf = m.keyOf ?? textKey;
@@ -134,7 +147,7 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
     /** member node ids that merged into an existing tree node. */
     const matched = new Set<NodeId>();
     const view = new Map<string, Map<string, NodeId>>();
-    const activity = new Map<NodeId, number[]>();
+    const activity = new Map<NodeId, ActivityRecord[]>();
     activityOf.set(m.sessionId, activity);
 
     for (const n of topo(m.nodes)) {
