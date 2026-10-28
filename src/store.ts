@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
-import { childIndex, newestLeaf, toNodeMap, type NodeMap } from "../shared/render.ts";
+import { childIndex, forkPointOf, newestLeaf, resolveForkPoint, toNodeMap, type NodeMap } from "../shared/render.ts";
 import type {
   NodeId,
   NodeMeta,
@@ -85,8 +85,14 @@ interface State {
   /** True while the selection sits on the conversation tip, so it can follow. */
   following: boolean;
 
-  patch: (id: NodeId, patch: Partial<TurnNode>) => Promise<void>;
-  setStatus: (id: NodeId, status: NodeStatus | undefined) => Promise<void>;
+  /** Annotate a node, shown at once. Resolves to whether it was saved. */
+  patch: (id: NodeId, patch: Partial<TurnNode>) => Promise<boolean>;
+  setStatus: (id: NodeId, status: NodeStatus | undefined) => Promise<boolean>;
+  /**
+   * Why the last annotation wasn't saved; the tree was redrawn from disk.
+   * Cleared by the next one that is, or by opening another conversation.
+   */
+  annotationError: string | null;
 
   set: (partial: Partial<State>) => void;
 }
@@ -134,9 +140,18 @@ const sessionGate = gate();
  */
 let view = 0;
 
-/** Where a node lives under a re-rooted family: same id, else same semantic identity. */
+/**
+ * Where a selection lives in a reloaded family. First the node that ends
+ * where it did: new membership can split a display group under the same
+ * head id, and the head alone would quietly shorten the selected prefix.
+ * Then the same id (a group that grew, or was folded into a longer one), then
+ * the same semantic identity (a re-rooted family draws it under other ids).
+ */
 function carry(id: NodeId | null, from: NodeMap, to: NodeMap): NodeId | null {
   if (!id) return null;
+  const prev = from.get(id);
+  const same = prev && resolveForkPoint([...to.values()], forkPointOf(prev));
+  if (same) return same.id;
   if (to.has(id)) return id;
   const ids = new Set(from.get(id)?.stableIds ?? []);
   if (!ids.size) return null;
@@ -162,6 +177,7 @@ export const useStore = create<State>((set, get) => ({
   following: true,
 
   error: null,
+  annotationError: null,
   loading: false,
   update: null,
 
@@ -243,6 +259,7 @@ export const useStore = create<State>((set, get) => ({
         // isn't the tip is a place the user asked to read.
         following: selected === tip,
         error: null,
+        annotationError: null,
       });
     } catch (e) {
       if (mine === view) set({ error: String(e) });
@@ -261,6 +278,7 @@ export const useStore = create<State>((set, get) => ({
       focus: null,
       expanded: new Set(),
       error: null,
+      annotationError: null,
     });
     // The list may have changed while the tree was open (a fork made, a
     // member deleted); the welcome watch only fires on the NEXT write.
@@ -288,24 +306,35 @@ export const useStore = create<State>((set, get) => ({
       // for the sessions holding the selected turn, and only then for the
       // root and the other members. The old root loading proves only that
       // the root survived, not that the user's member is still with it.
+      //
+      // The user can pick another member while the stores are read. A result
+      // looked up for the earlier choice that doesn't hold the newer one is
+      // not adopted: the lookup runs again from the latest choice, so a
+      // member choice stands until the user changes it or it is really gone.
       const prevNodes = get().nodes;
-      const sel = get().selected ? prevNodes.get(get().selected!) : undefined;
-      const candidates = [
-        ...new Set(
-          [
-            get().focus,
-            sel?.sourceSessionId,
-            ...(sel?.heldBy ?? []),
-            prev.meta.id,
-            ...prev.members.map((m) => m.id),
-          ].filter(Boolean) as string[],
-        ),
-      ];
-      let session = null;
-      for (const id of candidates) {
-        session = await api.getSession(id);
-        if (mine !== view) return;
-        if (session) break;
+      let session: SessionDetail | null = null;
+      for (;;) {
+        const asked = get().focus;
+        const sel = get().selected ? prevNodes.get(get().selected!) : undefined;
+        const candidates = [
+          ...new Set(
+            [
+              asked,
+              sel?.sourceSessionId,
+              ...(sel?.heldBy ?? []),
+              prev.meta.id,
+              ...prev.members.map((m) => m.id),
+            ].filter(Boolean) as string[],
+          ),
+        ];
+        session = null;
+        for (const id of candidates) {
+          session = await api.getSession(id);
+          if (mine !== view) return;
+          if (session) break;
+        }
+        const now = get().focus;
+        if (now === asked || !now || session?.members.some((m) => m.id === now)) break;
       }
       if (!session) {
         set({ error: "This conversation's transcripts are no longer on disk." });
@@ -342,7 +371,7 @@ export const useStore = create<State>((set, get) => ({
 
   patch: async (id, patch) => {
     const { session } = get();
-    if (!session) return;
+    if (!session) return false;
     const nodes = session.nodes.map((n) => (n.id === id ? { ...n, ...patch } : n));
     set({
       session: { ...session, nodes },
@@ -352,12 +381,24 @@ export const useStore = create<State>((set, get) => ({
     // A cleared field travels as null: `undefined` doesn't survive JSON (the
     // VS Code webview bridge), and a dropped key would mean "leave as is".
     const wire = Object.fromEntries(Object.entries(patch).map(([k, v]) => [k, v ?? null])) as NodeMeta;
-    await api.patchNode(session.meta.id, id, wire);
+    try {
+      await api.patchNode(session.meta.id, id, wire);
+    } catch (e) {
+      // The edit above was only a guess at the result. Say it wasn't saved,
+      // and redraw from disk: one member's sidecar may have been written
+      // before another's failed, so undoing the guess wouldn't be the truth
+      // either.
+      set({ annotationError: `Not saved: ${e instanceof Error ? e.message : String(e)}` });
+      await get().reloadSession().catch(() => {
+        /* the redraw comes with the next watch event */
+      });
+      return false;
+    }
+    set({ annotationError: null });
+    return true;
   },
 
-  setStatus: async (id, status) => {
-    await get().patch(id, { status });
-  },
+  setStatus: (id, status) => get().patch(id, { status }),
 }));
 
 /**

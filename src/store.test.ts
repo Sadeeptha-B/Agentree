@@ -109,7 +109,15 @@ const settingsState = (rememberView: boolean, view?: SettingsState["settings"]["
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useStore.setState({ session: null, nodes: new Map(), children: new Map(), selected: null, focus: null, error: null });
+  useStore.setState({
+    session: null,
+    nodes: new Map(),
+    children: new Map(),
+    selected: null,
+    focus: null,
+    error: null,
+    annotationError: null,
+  });
 });
 
 describe("renderer store lifecycle", () => {
@@ -288,6 +296,80 @@ describe("renderer store lifecycle", () => {
       expect(useStore.getState().session?.meta.id).toBe("F");
       expect(useStore.getState().selected).toBe("f-a1");
     });
+  });
+
+  it("keeps a selection's end when new membership splits its node under the same head", async () => {
+    // P's reply drawn as one node, "A" then "B", ending on p-a2; a later turn makes it history.
+    const grouped = detail(
+      "P",
+      [
+        node("p-u1", null, "Q", "u:q", "P"),
+        { ...node("p-a1", "p-u1", "A\n\nB", "m:a", "P"), lastRawId: "p-a2", stableIds: ["m:a", "m:b"] },
+        node("p-u2", "p-a1", "Q2", "u:q2", "P"),
+      ],
+      [member("P", null)],
+    );
+    // A quiet fork holding only "A" appears: same head id, now ending on A.
+    const split = detail(
+      "P",
+      [
+        node("p-u1", null, "Q", "u:q", "P", ["P", "F"]),
+        node("p-a1", "p-u1", "A", "m:a", "P", ["P", "F"]),
+        node("p-a2", "p-a1", "B", "m:b", "P"),
+        node("p-u2", "p-a2", "Q2", "u:q2", "P"),
+      ],
+      [member("P", null), member("F", "P")],
+    );
+    api.getSession.mockResolvedValueOnce(grouped);
+    await useStore.getState().openSession("P");
+    useStore.getState().select("p-a1");
+    api.getSession.mockResolvedValueOnce(split);
+    await useStore.getState().reloadSession();
+    // Still the prefix through B, not the shorter one through A.
+    expect(useStore.getState().selected).toBe("p-a2");
+  });
+
+  it("a member chosen while a reload is reading the stores outranks the one the reload asked for", async () => {
+    // F and G share the opening turn; their root went away, so they now load apart.
+    const whole = detail(
+      "F",
+      [node("f-u1", null, "Q", "u:q", "F", ["F", "G"]), node("f-a1", "f-u1", "A", "m:a", "F"), node("g-a1", "f-u1", "B", "m:b", "G")],
+      [member("F", null), member("G", "F")],
+    );
+    const fAlone = detail("F", [node("f-u1", null, "Q", "u:q", "F"), node("f-a1", "f-u1", "A", "m:a", "F")], [member("F", null)]);
+    const gAlone = detail("G", [node("g-u1", null, "Q", "u:q", "G"), node("g-a1", "g-u1", "B", "m:b", "G")], [member("G", null)]);
+    api.getSession.mockResolvedValueOnce(whole);
+    await useStore.getState().openSession("F", { focus: "F" });
+    useStore.getState().select("f-u1");
+
+    let answerF!: (d: SessionDetail) => void;
+    api.getSession.mockImplementation((id: string) =>
+      id === "F" ? new Promise((r) => (answerF = r)) : Promise.resolve(id === "G" ? gAlone : null),
+    );
+    const reload = useStore.getState().reloadSession();
+    // The user picks G in the member selector before F's lookup answers.
+    useStore.getState().set({ focus: "G" });
+    answerF(fAlone);
+    await reload;
+    const s = useStore.getState();
+    expect(api.getSession).toHaveBeenCalledWith("G");
+    expect(s.session?.meta.id).toBe("G");
+    expect(s).toMatchObject({ focus: "G", selected: "g-u1" });
+    api.getSession.mockReset();
+  });
+
+  it("says an annotation wasn't saved, and redraws what is on disk", async () => {
+    api.getSession.mockResolvedValue(withRoot);
+    await useStore.getState().openSession("P");
+    api.patchNode.mockRejectedValueOnce(new Error("EACCES: permission denied"));
+    await expect(useStore.getState().setStatus("p-a1", "favorite")).resolves.toBe(false);
+    const s = useStore.getState();
+    expect(s.annotationError).toMatch(/Not saved: EACCES/);
+    expect(s.nodes.get("p-a1")?.status).toBeUndefined();
+    // The next annotation that is saved clears the message.
+    await expect(useStore.getState().setStatus("p-a1", "favorite")).resolves.toBe(true);
+    expect(useStore.getState().annotationError).toBeNull();
+    api.getSession.mockReset();
   });
 
   it("sends a cleared annotation field as null, which survives JSON", async () => {

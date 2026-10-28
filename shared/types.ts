@@ -256,6 +256,20 @@ export interface SessionRef {
   cwd: string;
 }
 
+/**
+ * The cut "fork after this turn" makes, as the user saw it: the drawn node,
+ * and the record its LAST part ends on (`lastRawId`) in the session it is
+ * drawn from. A node id names a display group's head, not where the group
+ * ends — new membership can split or extend a group under the same head —
+ * so the backend forks at the node that still ends there (`resolveForkPoint`)
+ * or refuses; it never reads an old head id as a different range.
+ */
+export interface ForkPoint {
+  nodeId: NodeId;
+  sessionId?: SessionId;
+  endId: NodeId;
+}
+
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
 /**
@@ -386,13 +400,14 @@ export interface AgentreeApi {
    */
   patchNode(sessionId: string, nodeId: string, patch: NodeMeta): Promise<void>;
   /**
-   * Fork the session just after `nodeId`: a NEW session holding the prefix up
-   * to and including that node, created in the harness's own fork format
-   * (Claude) or through its API (Codex). Refused when the node carries
-   * `forkBlocked`. Originals are never modified; the family tree picks the
-   * fork up.
+   * Fork the session just after the selected node: a NEW session holding the
+   * prefix up to and including where that node ended when it was drawn
+   * (`ForkPoint`), created in the harness's own fork format (Claude) or
+   * through its API (Codex). Refused when the node carries `forkBlocked`, or
+   * no longer ends there. Originals are never modified; the family tree picks
+   * the fork up.
    */
-  forkAt(sessionId: string, nodeId: string): Promise<ForkResult>;
+  forkAt(sessionId: string, point: ForkPoint): Promise<ForkResult>;
 
   /** Which shell the renderer runs in; decides which actions are offered. */
   readonly host: "electron" | "vscode";
