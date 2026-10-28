@@ -91,7 +91,12 @@ export function filterDay(day: DayActivity, f: DayFilter): DayActivity {
   if (!q && !f.cwd && !f.provider) return day;
   const chats = day.chats.filter((c) => laneMatches(c, f, q));
   const keep = new Set(chats.map((c) => laneKey(c)));
-  return { ...day, chats, turns: day.turns.filter((t) => keep.has(laneKey(t))) };
+  return {
+    ...day,
+    chats,
+    turns: day.turns.filter((t) => keep.has(laneKey(t))),
+    running: day.running.filter((r) => keep.has(laneKey(r))),
+  };
 }
 
 /** A lane's identity: session ids are unique per agent, not across agents. */

@@ -181,13 +181,14 @@ conversation, on one graph.
 - **Time runs left to right on one axis for every lane**: turns drawn one
   above the other happened at about the same time. A pause of 20 minutes or
   more with nothing running (counted from when the last turn before it
-  ended, so a long agent reply isn't a pause) is drawn as a short shaded
+  ended, so a long agent reply isn't a pause, nor one still running from
+  the night before) is drawn as a short shaded
   break labelled with its length, and a
   burst of turns keeps a minimum spacing, so the axis is to scale only
   between breaks. A short dotted lead-in means the turn continues one from
   an earlier day.
-- **Switch chats:** click a turn or a chat's name (it selects that chat's
-  latest turn), or use the keys: **←/→** the previous/next turn in the chat,
+- **Switch chats:** click a turn or a chat's name (it selects the chat's
+  latest turn, the one that finished last), or use the keys: **←/→** the previous/next turn in the chat,
   **↑/↓** the chat above/below, at its turn nearest in time. Picking a chat
   or a turn moves the keyboard to the timeline, so **Enter** then opens it. The card on the
   right shows the turn's chat, directory, time and the start of its text.

@@ -419,6 +419,7 @@ describe("day view state", () => {
   const activity = (day: string, ids: string[]): DayActivity => ({
     ...dayBounds(day),
     chats: [],
+    running: [],
     turns: ids.map((id) => ({
       id,
       ref: { point: { nodeId: id, sessionId: "P", endId: id } },
@@ -510,6 +511,34 @@ describe("day view state", () => {
     api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a"]));
     await useStore.getState().loadDay();
     expect(useStore.getState().daySelected).toBeNull();
+  });
+
+  it("keeps the day selection on the range it was drawn with when a refresh splits or re-roots it", async () => {
+    const base = dayBounds("2026-10-28").start;
+    const turn = (id: string, family: string, endId: string, stableIds: string[]) => ({
+      id,
+      ref: { point: { nodeId: id, sessionId: family, endId }, stableIds },
+      parentId: null,
+      sessionId: family,
+      familyId: family,
+      provider: "claude" as const,
+      role: "assistant" as const,
+      preview: id,
+      timestamp: base + 1,
+    });
+    const day = (turns: ReturnType<typeof turn>[]): DayActivity => ({ ...dayBounds("2026-10-28"), chats: [], running: [], turns });
+    // Drawn as one node, "A" then "B", ending on ep-a2.
+    api.getDay.mockResolvedValueOnce(day([turn("ep-a1", "P", "ep-a2", ["m:a", "m:b"])]));
+    await useStore.getState().loadDay();
+    useStore.getState().set({ daySelected: "claude:P:ep-a1" });
+    // A quiet fork split it: the head now ends on A, and B is a node of its own.
+    api.getDay.mockResolvedValueOnce(day([turn("ep-a1", "P", "ep-a1", ["m:a"]), turn("ep-a2", "P", "ep-a2", ["m:b"])]));
+    await useStore.getState().loadDay();
+    expect(useStore.getState().daySelected).toBe("claude:P:ep-a2");
+    // P deleted: F, re-rooted, draws the same turn under its own ids.
+    api.getDay.mockResolvedValueOnce(day([turn("f-a1", "F", "f-a1", ["m:a"]), turn("f-a2", "F", "f-a2", ["m:b"])]));
+    await useStore.getState().loadDay();
+    expect(useStore.getState().daySelected).toBe("claude:F:f-a2");
   });
 
   it("comes back to the same day and turn when the tree is closed", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
 import { ErrorBanner } from "./ErrorBanner.tsx";
@@ -75,20 +75,66 @@ function PathField({ k, value, env }: { k: keyof SettingsPaths; value: string; e
  * The settings panel. Every setting changes what you see or where data
  * lives; none changes how a transcript is read. Saved as you change them.
  */
+/** What Tab moves between inside the dialog. */
+const FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex='-1'])";
+
 export function Settings() {
   const { settings: state, saveSettings, set, settingsError } = useStore();
+  const dialog = useRef<HTMLDivElement>(null);
+  const close = () => set({ settingsOpen: false });
+
+  // A modal: focus moves in when it opens and back where it was when it
+  // closes, and Tab cycles inside it. Its keys stop at the dialog (below),
+  // so no shortcut of the page behind it — the day view's arrows and Enter
+  // — acts while it is open.
+  const hasState = !!state;
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && set({ settingsOpen: false });
+    if (!hasState) return;
+    const before = document.activeElement as HTMLElement | null;
+    dialog.current?.focus();
+    // Focus that escaped anyway (its element removed): Esc still closes.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !dialog.current?.contains(e.target as Node)) set({ settingsOpen: false });
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [set]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (before?.isConnected) before.focus();
+    };
+  }, [hasState, set]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    if (e.key === "Escape") return close();
+    if (e.key !== "Tab" || !dialog.current) return;
+    const items = [...dialog.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
+    if (items.length === 0) return;
+    const [first, last] = [items[0], items[items.length - 1]];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!state) return null;
   const s = state.settings;
   const openForks = s.openForkInChat ?? api.host === "vscode";
 
   return (
-    <div className="settings-backdrop" onClick={() => set({ settingsOpen: false })}>
-      <div className="settings" role="dialog" aria-label="Settings" onClick={(e) => e.stopPropagation()}>
+    <div className="settings-backdrop" onClick={close}>
+      <div
+        className="settings"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        tabIndex={-1}
+        ref={dialog}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
+      >
         <div className="settings-head">
           <h2>Settings</h2>
           <button className="ghost" onClick={() => set({ settingsOpen: false })} aria-label="Close settings">

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store.ts";
 import { span, tilde } from "../format.ts";
+import { useCanvasWheel } from "../wheel.ts";
+import { endOf } from "../../shared/render.ts";
 import { clock, dayTitle, filterDay, isDayKey, latestActiveDay, shiftDay, todayKey } from "../day.ts";
 import {
   AXIS_H, buildDayLayout, DOT_R, laneLatest, PAD, stepInLane, stepLane,
@@ -53,13 +55,13 @@ export function DayView() {
     () => (dayActivity ? filterDay(dayActivity, { query: filter, cwd: cwdFilter, provider: providerFilter }) : null),
     [dayActivity, filter, cwdFilter, providerFilter],
   );
-  const layout = useMemo(() => (shown ? buildDayLayout(shown.turns, shown.chats) : null), [shown]);
+  const layout = useMemo(() => (shown ? buildDayLayout(shown.turns, shown.chats, shown.running) : null), [shown]);
   const selected = (daySelected && layout?.byKey.get(daySelected)) || null;
   const select = (key: string | null) => set({ daySelected: key });
   const open = (d: DayDot) =>
     void openSession(d.turn.familyId, { focus: d.turn.sessionId, select: d.turn.ref });
 
-  const svgRef = useRef<SVGSVGElement>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   // The timeline is the keyboard's target: picking a chat or a turn from a
   // button moves focus here, so Enter opens the turn instead of pressing the
   // button again.
@@ -138,6 +140,9 @@ export function DayView() {
   keyRef.current = (e) => {
     const t = e.target as HTMLElement | null;
     if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && e.key !== "Escape") return;
+    // Nothing behind an open dialog reacts to its keys. (Settings also keeps
+    // its keys and its focus to itself; this holds whatever has focus.)
+    if (useStore.getState().settingsOpen) return;
     if (!layout || layout.dots.length === 0) return;
     let next: string | null = null;
     const cur = selected?.key;
@@ -167,15 +172,12 @@ export function DayView() {
   }, []);
 
   // ---- pan & zoom (as in the tree); a sideways scroll pans along the day.
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
+  const wheelRef = useCanvasWheel<SVGSVGElement>((e, el) => {
     if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
       setView((v) => ({ ...v, tx: v.tx - dx }));
       return;
     }
-    const el = svgRef.current;
-    if (!el) return;
     const r = el.getBoundingClientRect();
     const px = e.clientX - r.left;
     const py = e.clientY - r.top;
@@ -184,7 +186,7 @@ export function DayView() {
       const k = Math.min(4, Math.max(0.03, v.k * factor));
       return { k, tx: px - ((px - v.tx) * k) / v.k, ty: py - ((py - v.ty) * k) / v.k };
     });
-  };
+  });
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
@@ -226,7 +228,7 @@ export function DayView() {
         <span className="day-title">{dayTitle(day)}</span>
         <span className="muted small">
           {shown
-            ? `${shown.turns.length} turns · ${shown.chats.length} chat${shown.chats.length === 1 ? "" : "s"}`
+            ? `${shown.turns.length} turns · ${layout?.lanes.length ?? 0} chat${layout?.lanes.length === 1 ? "" : "s"}`
             : "loading day…"}
           {dayLoading && shown ? " · refreshing…" : ""}
         </span>
@@ -276,9 +278,11 @@ export function DayView() {
             </div>
 
             <svg
-              ref={svgRef}
+              ref={(el) => {
+                svgRef.current = el;
+                wheelRef(el);
+              }}
               className="tree-svg"
-              onWheel={onWheel}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={endDrag}
@@ -319,7 +323,7 @@ export function DayView() {
               lanes={layout.lanes}
               view={view}
               selectedLane={selected?.lane ?? null}
-              onPick={(lane) => pick(laneLatest(lane))}
+              onPick={(lane) => pick(laneLatest(layout, lane)?.key ?? null)}
               onHover={setHoverLane}
             />
 
@@ -519,7 +523,7 @@ function DayCard({
         <ul className="day-chats">
           {layout.lanes.map((l) => (
             <li key={l.key}>
-              <button className="day-chat" onClick={() => onPick(laneLatest(l))}>
+              <button className="day-chat" onClick={() => onPick(laneLatest(layout, l)?.key ?? null)}>
                 <span className="day-chat-name">
                   <span className={`provider-chip ${l.chat.provider}`}>{l.chat.provider}</span>
                   {l.chat.parentSessionId && <span className="fork-glyph">⑂</span>}
@@ -527,7 +531,7 @@ function DayCard({
                 </span>
                 <span className="muted small">
                   {l.turns.length} turns · {clock(layout.byKey.get(l.turns[0])!.turn.timestamp)}–
-                  {clock(layout.byKey.get(l.turns[l.turns.length - 1])!.turn.timestamp)}
+                  {clock(endOf(laneLatest(layout, l)!.turn))}
                 </span>
               </button>
             </li>

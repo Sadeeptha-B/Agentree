@@ -76,6 +76,7 @@ always start at their defaults. `quit` deletes it.
 | `click <css>` | DOM click on the first match (SVG elements get a dispatched click) |
 | `click-text <text>` | click the first button or link containing the text |
 | `key <Key>` | press `ArrowLeft/Right/Up/Down`, `Enter`, `Escape`, `Tab`, … |
+| `wheel <css> <deltaY> [shift]` | a browser-native wheel over the element's centre: zoom, or with `shift` pan. The selector can't contain spaces |
 | `type <text>` | type into the focused element |
 | `fill <css> <value>` | set a React-controlled input, e.g. `fill .search cache` |
 | `wait <css>` | wait up to 20 s for a selector |
@@ -120,6 +121,10 @@ quit
   Close that window.
 - **React inputs ignore a plain `.value =`.** Use `fill`, which goes through
   the native setter and fires `input`.
+- **Wheel scrolling is smooth.** After a `wheel` that should scroll the
+  page, wait before reading `scrollTop`, e.g.
+  `eval new Promise(r => setTimeout(() => r(document.querySelector(".session-pane").scrollTop), 600))`.
+  A zoom on a canvas applies at once.
 - **SVG nodes have no `.click()`.** `click` dispatches a bubbling event
   instead. To select a day-view turn, clicking a `.day-label` and stepping
   with the arrow keys is more predictable than picking a `.day-dot` by index.

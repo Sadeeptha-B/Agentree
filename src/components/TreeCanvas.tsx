@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store.ts";
+import { useCanvasWheel } from "../wheel.ts";
 import { newestLeaf, pathToRoot, shortLabel } from "../../shared/render.ts";
 import {
   BOX_H, buildLayout, CHAIN_ROWS, edgePath, forkTags, nodeLabel, nodeWidth,
@@ -19,7 +20,7 @@ export function TreeCanvas() {
     select, toggleChain,
   } = useStore();
 
-  const svgRef = useRef<SVGSVGElement>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
   const [view, setView] = useState<View>({ tx: 0, ty: 0, k: 1 });
   const [hover, setHover] = useState<VNode | null>(null);
   const drag = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
@@ -88,10 +89,7 @@ export function TreeCanvas() {
 
   // ---- pan & zoom -------------------------------------------------------
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const el = svgRef.current;
-    if (!el) return;
+  const wheelRef = useCanvasWheel<SVGSVGElement>((e, el) => {
     const r = el.getBoundingClientRect();
     const px = e.clientX - r.left;
     const py = e.clientY - r.top;
@@ -101,7 +99,7 @@ export function TreeCanvas() {
       // Keep the point under the cursor fixed while scaling.
       return { k, tx: px - ((px - v.tx) * k) / v.k, ty: py - ((py - v.ty) * k) / v.k };
     });
-  };
+  });
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -141,9 +139,11 @@ export function TreeCanvas() {
       </div>
 
       <svg
-        ref={svgRef}
+        ref={(el) => {
+          svgRef.current = el;
+          wheelRef(el);
+        }}
         className="tree-svg"
-        onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}

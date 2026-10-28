@@ -1,6 +1,6 @@
 # Day view review — 2026-10-28
 
-> **Historical review of the `day-view` branch, `7d3a66c..45e2f26` (the day view and the run-desktop skill); resolved.** The original report follows the resolution below unchanged, except for the anchors added to each finding; its line references are to `45e2f26`. It was received truncated at its end. Current contracts are in the [design notes](../../design.md#day-view).
+> **Historical review of the `day-view` branch, `7d3a66c..45e2f26` (the day view and the run-desktop skill); resolved.** The original report follows the resolution below unchanged, except for the anchors added to each finding; its line references are to `45e2f26`. It was received truncated at its end. Current contracts are in the [design notes](../../design.md#day-view); the [second round](review-findings-day-view-round-2.md) followed.
 
 <a id="resolution"></a>
 
