@@ -53,6 +53,13 @@ describe("settings store", () => {
     expect(s.paths.codexHome).toBeUndefined();
   });
 
+  it("remembers the list-or-day view, and drops a mode it doesn't know", () => {
+    const view = { compress: true, cwdFilter: "", providerFilter: "" as const };
+    expect(writeSettings({ rememberView: true, view: { ...view, mode: "day" } }).view).toEqual({ ...view, mode: "day" });
+    fs.writeFileSync(settingsFile(), JSON.stringify({ rememberView: true, view: { ...view, mode: "week" } }));
+    expect(readSettings().view).toEqual(view);
+  });
+
   it("uses a path setting only when its environment variable isn't set", () => {
     const dir = path.join(tmp, "elsewhere");
     writeSettings({ paths: { claudeConfigDir: dir, codexHome: dir } });

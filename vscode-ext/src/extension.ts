@@ -100,6 +100,8 @@ function dispatch(method: string, args: unknown[]): unknown {
       return backend.listSessions();
     case "getSession":
       return backend.getSession(args[0] as string);
+    case "getDay":
+      return backend.getDay(args[0] as number, args[1] as number);
     case "patchNode":
       return backend.patchNode(args[0] as string, args[1] as string, args[2] as NodeMeta);
     case "forkAt":

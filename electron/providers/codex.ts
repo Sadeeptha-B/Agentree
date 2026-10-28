@@ -8,6 +8,7 @@ import {
   countBranchPoints,
   FORK_POINT_GONE,
   forkSummaries,
+  oldest,
   resolveForkPoint,
 } from "../../shared/render.ts";
 import type {
@@ -247,6 +248,8 @@ interface Page {
   turns: Turn[];
   lastOrdinal: number;
   touchedAt: number;
+  /** Oldest timestamp on any record of the page, its head included; 0 if none carried one. */
+  startedAt: number;
   /**
    * Newest conversational record: an item starting or completing, of ANY
    * item type (a tool call too, so a long agent loop stays live). Not the
@@ -306,6 +309,7 @@ function parsePage(file: string, archived: boolean): Page | null {
     turns: [],
     lastOrdinal: 0,
     touchedAt: 0,
+    startedAt: head.timestamp ? Date.parse(head.timestamp) || 0 : 0,
     activeAt: 0,
     createdAt: head.timestamp ? Date.parse(head.timestamp) || 0 : 0,
     firstUserText: "",
@@ -402,6 +406,7 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
   for (const r of records) {
     const ts = r.timestamp ? Date.parse(r.timestamp) : 0;
     if (ts > page.touchedAt) page.touchedAt = ts;
+    if (ts > 0 && (!page.startedAt || ts < page.startedAt)) page.startedAt = ts;
     const ord = r.ordinal ?? 0;
     if (ord > page.lastOrdinal) page.lastOrdinal = ord;
     if (r.type && !KNOWN_RECORDS.has(r.type)) bump(r.type);
@@ -540,6 +545,7 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
   for (const rec of records) {
     const ts = rec.timestamp ? Date.parse(rec.timestamp) : 0;
     if (ts > page.touchedAt) page.touchedAt = ts;
+    if (ts > 0 && (!page.startedAt || ts < page.startedAt)) page.startedAt = ts;
     const p = rec.payload;
     if (!p) continue;
     // The legacy vocabulary's conversation: prose events and tool calls.
@@ -928,6 +934,8 @@ function describe(fam: Family, nodes: TurnNode[] | null): { meta: SessionMeta; m
       // is not a conversation — and its reloads must not float the family up.
       activeAt: Math.max(...fam.pages.map((p) => p.activeAt)) || Math.max(...members.map((m) => m.activeAt)),
       touchedAt: Math.max(...members.map((m) => m.touchedAt)),
+      // Every drawn turn comes from one of these pages, so none is older.
+      startedAt: oldest(fam.pages.map((p) => p.startedAt)),
       nodeCount: all.length,
       branchPoints: countBranchPoints(childIndex(all)),
       resumeCommand: root.resumeCommand,

@@ -381,3 +381,14 @@ export function edgePath(from: VNode, to: VNode): string {
   const my = (y1 + y2) / 2;
   return `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
 }
+
+/**
+ * The collapsed chain that hides `id`, if any: what to open so a selection
+ * made from outside the tree (the day view) lands on a drawn node. Chains
+ * depend only on the tree's shape and `compress`, never on the selection.
+ */
+export function chainHolding(id: NodeId, children: Map<string, TurnNode[]>, compress: boolean): string | null {
+  if (!compress) return null;
+  const { vnodes } = buildLayout({ children, pathIds: new Set(), expanded: new Set(), compress });
+  return vnodes.find((v) => v.kind === "chain" && v.nodes.some((n) => n.id === id))?.id ?? null;
+}

@@ -26,3 +26,18 @@ export function when(ts: number): string {
   if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
   return new Date(ts).toLocaleDateString();
 }
+
+/** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
+export function tilde(p: string): string {
+  const m = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(p) ?? /^[A-Za-z]:\\Users\\[^\\]+(\\.*)?$/i.exec(p);
+  return m ? "~" + (m[1] ?? "") : p;
+}
+
+/** "1h 40m", "25m", "45s": a stretch of time, coarsely. */
+export function span(ms: number): string {
+  const m = Math.round(ms / 60_000);
+  if (m < 1) return `${Math.max(0, Math.round(ms / 1000))}s`;
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+}

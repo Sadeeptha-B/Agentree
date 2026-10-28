@@ -1,5 +1,8 @@
 import { FORK_POINT_GONE, resolveForkPoint } from "../shared/render.ts";
 import type {
+  DayActivity,
+  DayChat,
+  DayTurn,
   ForkPoint,
   ForkResult,
   NodeMeta,
@@ -8,6 +11,7 @@ import type {
   SessionDetail,
   SessionId,
   SessionMeta,
+  TurnNode,
 } from "../shared/types.ts";
 import {
   claudeHealth,
@@ -229,4 +233,120 @@ export function annotate(familyId: SessionId, nodeId: string, patch: NodeMeta): 
 export function watchTargets(sessionId: SessionId | null): WatchTarget[] {
   if (sessionId === null) return enabled().flatMap((p) => guarded(p, () => p.watchTargets(null), []));
   return owner(sessionId)?.watchTargets(sessionId) ?? [];
+}
+
+// ------------------------------------------------------------------ day view
+
+/** Longest preview a day turn carries; the tree has the full text. */
+const PREVIEW_MAX = 400;
+
+function previewOf(n: TurnNode): string {
+  const t = n.text.replace(/\s+/g, " ").trim();
+  if (t) return t.length > PREVIEW_MAX ? t.slice(0, PREVIEW_MAX - 1) + "…" : t;
+  if (n.toolUses?.length) return `⚒ ${n.toolUses.join(", ")}`;
+  return n.role === "assistant" ? "(thinking only)" : "(empty)";
+}
+
+/** A family's part of one day: its lanes and turns. */
+interface DayPart {
+  chats: DayChat[];
+  turns: DayTurn[];
+}
+
+/**
+ * The turns of `detail` that started in `[start, end)`, each in the lane of
+ * the session that owns it — drawn once, as in the tree.
+ */
+export function dayPart(detail: SessionDetail, start: number, end: number): DayPart {
+  const { meta, members } = detail;
+  const turns: DayTurn[] = [];
+  for (const n of detail.nodes) {
+    if (!(n.timestamp >= start && n.timestamp < end)) continue;
+    turns.push({
+      id: n.id,
+      parentId: n.parentId,
+      sessionId: n.sourceSessionId ?? meta.id,
+      familyId: meta.id,
+      provider: meta.provider,
+      role: n.role,
+      preview: previewOf(n),
+      timestamp: n.timestamp,
+      ...(n.endedAt && n.endedAt > n.timestamp ? { endedAt: n.endedAt } : {}),
+      ...(n.branchKind ? { branchKind: n.branchKind } : {}),
+      ...(n.isSidechain ? { isSidechain: true } : {}),
+      ...(n.midTurn || n.injected ? { midTurn: true } : {}),
+    });
+  }
+  const lanes = [...new Set(turns.map((t) => t.sessionId))];
+  const chats = lanes.map((id): DayChat => {
+    const m = members.find((x) => x.id === id);
+    const parent = m?.parentId ? members.find((x) => x.id === m.parentId) : undefined;
+    return {
+      provider: meta.provider,
+      familyId: meta.id,
+      sessionId: id,
+      title: m?.title ?? meta.title,
+      familyTitle: meta.title,
+      cwd: m?.cwd ?? meta.cwd,
+      parentSessionId: m?.parentId ?? null,
+      ...(parent ? { parentTitle: parent.title } : {}),
+      ...(m?.parentEvidence ? { parentEvidence: m.parentEvidence } : {}),
+      ...((m ? m.archived : meta.archived) ? { archived: true } : {}),
+    };
+  });
+  return { chats, turns };
+}
+
+/**
+ * Each family's day part, by what its listing says about the transcripts. A
+ * family nobody wrote to since is not reloaded: a live session rewrites one
+ * family, and the day view refreshes on every write. Cleared whenever the
+ * window or a data location changes.
+ */
+const dayParts = new Map<string, DayPart>();
+let dayStamp = "";
+
+const partKey = (p: Provider, m: SessionMeta) =>
+  [p.id, m.id, m.touchedAt, m.activeAt, m.startedAt ?? 0, m.nodeCount, m.members ?? 1].join(":");
+
+/**
+ * Every turn that started in `[start, end)`, across the enabled agents. A
+ * family is loaded only when its records can reach the window: none of them
+ * is newer than `touchedAt`, and none older than `startedAt` (when known).
+ */
+export function dayActivity(start: number, end: number): DayActivity {
+  const stamp = `${start}:${end}:${JSON.stringify(readSettings().paths)}`;
+  if (stamp !== dayStamp || dayParts.size > 500) {
+    dayParts.clear();
+    dayStamp = stamp;
+  }
+  const chats: DayChat[] = [];
+  const turns: DayTurn[] = [];
+  const seen = new Set<string>();
+  const live = new Set<string>();
+  for (const p of enabled()) {
+    for (const m of guarded(p, () => p.list(), [])) {
+      if (m.touchedAt < start || (m.startedAt || 0) >= end) continue;
+      const key = partKey(p, m);
+      live.add(key);
+      let part = dayParts.get(key);
+      if (!part) {
+        const detail = guarded(p, () => p.load(m.id), null);
+        if (!detail) continue;
+        part = dayPart(detail, start, end);
+        dayParts.set(key, part);
+      }
+      for (const c of part.chats) {
+        const k = `${c.provider}:${c.sessionId}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          chats.push(c);
+        }
+      }
+      turns.push(...part.turns);
+    }
+  }
+  for (const key of dayParts.keys()) if (!live.has(key)) dayParts.delete(key);
+  turns.sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { start, end, chats, turns };
 }

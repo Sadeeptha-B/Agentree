@@ -179,6 +179,12 @@ export interface SessionMeta {
   activeAt: number;
   /** Newest timestamp on ANY record of any member ("last file change"). */
   touchedAt: number;
+  /**
+   * Oldest timestamp on any record of any member: no turn of the family
+   * starts before it. Only narrows which families the day view loads; 0 or
+   * absent means unknown, and the family is always loaded.
+   */
+  startedAt?: number;
   nodeCount: number;
   branchPoints: number;
   /**
@@ -272,6 +278,61 @@ export interface ForkPoint {
 
 export type ActionResult = { ok: true } | { ok: false; error: string };
 
+// ---------------------------------------------------------------- day view
+
+/** One chat session with turns in a day: a lane of the day view. */
+export interface DayChat {
+  provider: ProviderId;
+  /** The family's id: what opens its tree. */
+  familyId: SessionId;
+  /** The member session the lane draws. */
+  sessionId: SessionId;
+  title: string;
+  /** The family root's title, for a fork's "fork of …". */
+  familyTitle: string;
+  cwd: string;
+  /** The session it was forked from; null for a family root. */
+  parentSessionId: SessionId | null;
+  /** That session's title. */
+  parentTitle?: string;
+  parentEvidence?: MemberInfo["parentEvidence"];
+  archived?: boolean;
+}
+
+/**
+ * One turn that started in the day, as the day view draws it: the tree's own
+ * node, projected. Shared turns are drawn once, in the lane of the session
+ * that owns them (`sourceSessionId`), as in the tree. Annotations are left
+ * out: the view caches projections by transcript state, which a sidecar
+ * write doesn't change.
+ */
+export interface DayTurn {
+  id: NodeId;
+  parentId: NodeId | null;
+  /** Lane: the owning member session. */
+  sessionId: SessionId;
+  familyId: SessionId;
+  provider: ProviderId;
+  role: NodeRole;
+  /** The start of the turn's text (or its tool calls), whitespace folded. */
+  preview: string;
+  timestamp: number;
+  endedAt?: number;
+  branchKind?: TurnNode["branchKind"];
+  isSidechain?: boolean;
+  /** A mid-turn message (`TurnNode.midTurn` or `injected`). */
+  midTurn?: boolean;
+}
+
+/** Every turn that started in `[start, end)`, across the enabled agents. */
+export interface DayActivity {
+  start: number;
+  end: number;
+  chats: DayChat[];
+  /** Oldest first. */
+  turns: DayTurn[];
+}
+
 /**
  * What a provider saw on its last scan — the "fail loudly" surface. A harness
  * that changes its format shows up here as files seen but not parsed, or as
@@ -335,6 +396,8 @@ export interface ViewState {
   compress: boolean;
   cwdFilter: string;
   providerFilter: ProviderId | "";
+  /** The welcome screen's list, or the day view. Absent: the list. */
+  mode?: "list" | "day";
 }
 
 export interface SettingsPaths {
@@ -393,6 +456,11 @@ export type NodeMeta = Pick<TurnNode, "label" | "status" | "note">;
 export interface AgentreeApi {
   listSessions(): Promise<SessionMeta[]>;
   getSession(id: string): Promise<SessionDetail | null>;
+  /**
+   * The turns that started in `[start, end)` (epoch ms; the renderer's local
+   * day), across every family of every enabled agent.
+   */
+  getDay(start: number, end: number): Promise<DayActivity>;
   /**
    * Annotate a turn of the family `sessionId` belongs to. Written to every
    * member's sidecar under every id the turn has there, so the annotation

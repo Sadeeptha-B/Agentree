@@ -56,6 +56,7 @@ their default locations; [configuration](docs/user-guide.md#settings-and-data-lo
 covers custom roots.
 
 1. Search a title or fork name; combine the agent chips and project-directory rail.
+   Switch **List | Day** to see one day's turns across every chat on a single timeline.
 2. Open a family, drag to pan, scroll to zoom, and click dotted chains to expand.
 3. Select a turn to read its path. Check the panel's **Session** before Open/Resume:
    those actions continue that session's current path. To continue an older
