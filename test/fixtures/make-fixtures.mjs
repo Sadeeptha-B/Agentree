@@ -812,4 +812,21 @@ write(`${CODEX}/sessions/2026/07/01/rollout-2026-07-01T11-00-00-${L2}.jsonl`, [
   ev("agent_message", "Fork reply.", 6),
 ]);
 
+// Observed shape (VS Code, 0.164 alpha): a legacy-mode rollout whose prose is
+// legacy events, plus ONE completed item — an Extension call. The item must
+// not switch the page to the item vocabulary and lose every message.
+const LX = "01800000-0000-7000-8000-000000000003";
+write(`${CODEX}/sessions/2026/07/02/rollout-2026-07-02T10-00-00-${LX}.jsonl`, [
+  legacyMeta(LX, { cli_version: "0.164.0-alpha.11.1", source: "vscode", originator: "codex_vscode", history_mode: "legacy" }),
+  ev("user_message", "Mixed question", 1),
+  {
+    timestamp: ts(2),
+    type: "event_msg",
+    payload: { type: "item_completed", turn_id: turn(30), item: { type: "Extension", id: "ext-1", kind: "open_file" } },
+  },
+  ev("agent_message", "Mixed answer.", 3),
+  ev("user_message", "Mixed follow-up", 4),
+  ev("agent_message", "Mixed second answer.", 5),
+]);
+
 console.log("fixtures written under", ROOT);

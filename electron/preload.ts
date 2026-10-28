@@ -12,7 +12,7 @@ const api: AgentreeApi = {
   getSession: (id) => ipcRenderer.invoke(CH.getSession, id),
   patchNode: (sessionId, nodeId, patch: NodeMeta) =>
     ipcRenderer.invoke(CH.patchNode, sessionId, nodeId, patch),
-  forkAt: (sessionId, nodeId) => ipcRenderer.invoke(CH.forkAt, sessionId, nodeId),
+  forkAt: (sessionId, point) => ipcRenderer.invoke(CH.forkAt, sessionId, point),
   providerHealth: () => ipcRenderer.invoke(CH.providerHealth),
   getSettings: () => ipcRenderer.invoke(CH.getSettings),
   setSettings: (patch: SettingsPatch) => ipcRenderer.invoke(CH.setSettings, patch),
