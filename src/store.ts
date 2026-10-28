@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
-import { childIndex, locate, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
+import { childIndex, locate, locateBy, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
 import { dayBounds, todayKey, turnKey } from "./day.ts";
 import { chainHolding } from "./tree-layout.ts";
 import type {
@@ -37,7 +37,11 @@ interface State {
   /** That day's turns, once loaded; null while another day's would be wrong. */
   dayActivity: DayActivity | null;
   dayLoading: boolean;
-  /** The day view's selected turn (`turnKey`). Kept across a reload while the turn is still there. */
+  /**
+   * The day view's selected turn (`turnKey`). A refresh carries it by the
+   * turn as drawn (`DayTurn.ref`, `locateBy`), as a tree reload does: a split
+   * group, a new owner or a re-rooted family doesn't move it to another range.
+   */
   daySelected: string | null;
   /** The day view's pan and zoom when it last closed (a tree opened from it), to come back to. */
   dayViewport: { day: string; tx: number; ty: number; k: number } | null;
@@ -270,10 +274,12 @@ export const useStore = create<State>((set, get) => ({
         // The user moved to another day meanwhile; the gate runs again for it.
         if (get().day !== day) return;
         const sel = get().daySelected;
-        set({
-          dayActivity: activity,
-          daySelected: sel && activity.turns.some((t) => turnKey(t) === sel) ? sel : null,
-        });
+        const was = sel ? get().dayActivity?.turns.find((t) => turnKey(t) === sel) : undefined;
+        // Node ids are unique per agent at most: look among that agent's turns.
+        const now = was
+          ? locateBy(activity.turns.filter((t) => t.provider === was.provider), (t) => t.ref, was.ref)
+          : null;
+        set({ dayActivity: activity, daySelected: now ? turnKey(now) : null });
       } catch (e) {
         if (get().day === day) set({ error: String(e) });
       } finally {

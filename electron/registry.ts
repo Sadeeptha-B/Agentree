@@ -1,7 +1,8 @@
-import { FORK_POINT_GONE, refOf, resolveForkPoint } from "../shared/render.ts";
+import { endOf, FORK_POINT_GONE, refOf, resolveForkPoint } from "../shared/render.ts";
 import type {
   DayActivity,
   DayChat,
+  DayRun,
   DayTurn,
   ForkPoint,
   ForkResult,
@@ -251,20 +252,26 @@ function previewOf(n: TurnNode): string {
   return n.role === "assistant" ? "(thinking only)" : "(empty)";
 }
 
-/** A family's part of one day: its lanes and turns. */
+/** A family's part of one day: its lanes, turns and the turns still running into it. */
 interface DayPart {
   chats: DayChat[];
   turns: DayTurn[];
+  running: DayRun[];
 }
 
 /**
  * The turns of `detail` that started in `[start, end)`, each in the lane of
- * the session that owns it — drawn once, as in the tree.
+ * the session that owns it — drawn once, as in the tree — and the ones that
+ * started earlier and were still running at `start`.
  */
 export function dayPart(detail: SessionDetail, start: number, end: number): DayPart {
   const { meta, members } = detail;
   const turns: DayTurn[] = [];
+  const running: DayRun[] = [];
   for (const n of detail.nodes) {
+    if (n.timestamp > 0 && n.timestamp < start && endOf(n) >= start) {
+      running.push({ provider: meta.provider, familyId: meta.id, sessionId: n.sourceSessionId ?? meta.id, start: n.timestamp, end: endOf(n) });
+    }
     if (!(n.timestamp >= start && n.timestamp < end)) continue;
     turns.push({
       id: n.id,
@@ -282,7 +289,7 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
       ...(n.midTurn || n.injected ? { midTurn: true } : {}),
     });
   }
-  const lanes = [...new Set(turns.map((t) => t.sessionId))];
+  const lanes = [...new Set([...turns, ...running].map((t) => t.sessionId))];
   const chats = lanes.map((id): DayChat => {
     const m = members.find((x) => x.id === id);
     const parent = m?.parentId ? members.find((x) => x.id === m.parentId) : undefined;
@@ -299,7 +306,7 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
       ...((m ? m.archived : meta.archived) ? { archived: true } : {}),
     };
   });
-  return { chats, turns };
+  return { chats, turns, running };
 }
 
 /**
@@ -325,6 +332,7 @@ export function dayActivity(start: number, end: number): DayActivity {
   }
   const chats: DayChat[] = [];
   const turns: DayTurn[] = [];
+  const running: DayRun[] = [];
   const seen = new Set<string>();
   const live = new Set<string>();
   for (const p of enabled()) {
@@ -347,9 +355,10 @@ export function dayActivity(start: number, end: number): DayActivity {
         }
       }
       turns.push(...part.turns);
+      running.push(...part.running);
     }
   }
   for (const key of dayParts.keys()) if (!live.has(key)) dayParts.delete(key);
   turns.sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { start, end, chats, turns };
+  return { start, end, chats, turns, running };
 }

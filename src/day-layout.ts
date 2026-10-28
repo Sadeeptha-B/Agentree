@@ -1,4 +1,5 @@
-import type { DayChat, DayTurn } from "../shared/types.ts";
+import { endOf } from "../shared/render.ts";
+import type { DayChat, DayRun, DayTurn } from "../shared/types.ts";
 import { laneKey, turnKey } from "./day.ts";
 
 /**
@@ -141,7 +142,11 @@ function timeOrder(turns: DayTurn[]): DayTurn[] {
   return out;
 }
 
-export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
+/**
+ * `running`: turns from before the window still running in it (`DayRun`).
+ * They get no mark, but nothing is idle until they end.
+ */
+export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayRun[] = []): DayLayout {
   const sorted = timeOrder(turns);
   const first = new Map<string, number>();
   for (const t of sorted) if (!first.has(laneKey(t))) first.set(laneKey(t), t.timestamp);
@@ -190,7 +195,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[]): DayLayout {
   const resumed = new Set<string>();
   let prev: DayDot | null = null;
   /** The latest end of every turn so far, in any lane: until then, something was running. */
-  let busyUntil = 0;
+  let busyUntil = Math.max(0, ...running.map((r) => r.end));
   for (const t of drawn) {
     const key = turnKey(t);
     const lane = laneOf.get(laneKey(t))!;
@@ -310,5 +315,16 @@ export function stepLane(layout: DayLayout, key: string, dir: 1 | -1): string | 
   return best?.key ?? null;
 }
 
-/** A chat's latest turn of the day: where clicking its lane lands. */
-export const laneLatest = (lane: DayLane): string | null => lane.turns[lane.turns.length - 1] ?? null;
+/**
+ * A chat's latest turn of the day by when it ENDED (`endOf`, as the tree
+ * ranks its tip; the later-starting on a tie): where clicking its lane
+ * lands. ←/→ still step in start order.
+ */
+export function laneLatest(layout: DayLayout, lane: DayLane): DayDot | null {
+  let best: DayDot | null = null;
+  for (const k of lane.turns) {
+    const d = layout.byKey.get(k)!;
+    if (!best || endOf(d.turn) >= endOf(best.turn)) best = d;
+  }
+  return best;
+}

@@ -989,6 +989,10 @@ build; nothing about parsing, stitching or identity is specific to it.
   records can reach the window, and keeps the nodes whose **start**
   (`timestamp`) falls in it — a node belongs to the day it started, like the
   list's dates. A disabled provider is never listed or loaded (tested).
+  Nodes that started earlier and end at or after `start` come along as
+  `running` (`DayRun`: lane, start, end): no mark, but the day isn't idle
+  while they run (see Layout). Their chat is listed so the filters apply to
+  them; a lane is drawn only for a chat with turns.
 - **Which families load.** No record of a family is newer than `touchedAt`
   or older than `startedAt`, so only families with `touchedAt >= start` and
   `startedAt < end` are loaded. `startedAt` is a *narrowing bound only*: each
@@ -1009,7 +1013,7 @@ build; nothing about parsing, stitching or identity is specific to it.
   Copilot) — another thread's rename or fork doesn't change it. A family
   without a revision is not cached. (The first cut keyed by times and
   counts, which a rename or a record rewritten under the same uuid and time
-  doesn't move: [day-view review finding 2](archive/2026-10-modernize/review-findings-day-view.md#dv-2).)
+  doesn't move: [day-view review finding 2](archive/day-view/review-findings-day-view.md#dv-2).)
   **Annotations are not projected** (no label, star or dead-end mark in the
   day view): a sidecar write doesn't change the revision, so a cached
   annotation could go stale.
@@ -1018,14 +1022,19 @@ build; nothing about parsing, stitching or identity is specific to it.
   drawn once, as in the tree. Lanes are keyed `provider:sessionId` and turns
   `provider:familyId:nodeId`, since node ids are unique only per family.
   `DayChat` carries the member's parent and its title for "forked from".
-- **Open in tree carries the drawn turn, not its id.** Each `DayTurn` has a
-  `NodeRef` (`refOf`: its `ForkPoint` and `stableIds`), and
-  `openSession(family, { focus: lane, select: ref })` resolves it with
-  `locate` (`shared/render.ts`) — the rule a reload carries the selection
-  by: the node that still ends where it did, then the same id, then the
-  same semantic identity; else the usual tip. It asks for the focused
-  lane's family first, since the family it was listed in may have split
-  since ([finding 3](archive/2026-10-modernize/review-findings-day-view.md#dv-3)).
+- **A selection is the drawn turn, not its id.** Each `DayTurn` has a
+  `NodeRef` (`refOf`: its `ForkPoint` and `stableIds`). Every snapshot a
+  selection crosses resolves it with one rule, `locateBy` in
+  `shared/render.ts` (`locate` is the same over a family's nodes): the node
+  that still ends where it did, then the same id, then the same semantic
+  identity. A tree reload uses it; a day refresh re-keys `daySelected` by
+  it, among that agent's turns, so a split group, a new owner or a
+  re-rooted family keeps the range that was selected
+  ([round 2, finding 1](archive/day-view/review-findings-day-view-round-2.md#dv2-1));
+  and `openSession(family, { focus: lane, select: ref })` selects by it,
+  else the usual tip. Opening asks for the focused lane's family first,
+  since the family it was listed in may have split since
+  ([finding 3](archive/day-view/review-findings-day-view.md#dv-3)).
   The member is focused for Open/Resume and the collapsed chain hiding the
   turn is opened (`chainHolding`). The day view's pan and zoom are kept in
   the store when it closes (`dayViewport`), so Esc returns to the same day,
@@ -1041,19 +1050,30 @@ build; nothing about parsing, stitching or identity is specific to it.
   a fixed 56 px break labelled with its length. A pause is time with nothing
   running: from the latest `endedAt` (or start) of every earlier turn, in any
   lane, to the next start — an hour-long reply followed by a prompt a minute
-  later is one idle minute, not a break. Time labels: the first turn,
+  later is one idle minute, not a break. `running` turns seed that end, so
+  a reply that ran past midnight keeps the next morning busy until it
+  ended. Time labels: the first turn,
   each turn after a break, and local hours interpolated between turns.
   Edges into a fork or a prompt edit, or across lanes, are dashed like the
   tree's; a parent outside the day (or the filters) gets a short dotted
   lead-in instead of a dangling edge.
 - **Filters** are the welcome screen's: agent chips, the directory rail
   (a lane's **own** cwd, so a fork made in another repo shows there) and the
-  search (chat title, family title, ids, cwd). Keys: ←/→ within a chat, ↑/↓
-  to the adjacent lane's turn nearest in time, Enter opens, Esc deselects.
+  search (chat title, family title, ids, cwd). Picking a chat lands on its
+  latest turn by `endOf`, as the tree ranks its tip (the later-starting on a
+  tie), and the chat list's time range ends there. Keys: ←/→ within a chat
+  (in start order), ↑/↓ to the adjacent lane's turn nearest in time, Enter
+  opens, Esc deselects.
   The timeline is focusable, and every control that picks a chat or a turn
   (lane names, the card's chat list and ←/→) moves focus to it, so Enter
   opens the turn instead of pressing the button again. A focused button
-  keeps its own Enter.
+  keeps its own Enter. The shortcuts stand down while Settings is open; the
+  dialog also keeps its keys and focus to itself (see Settings).
+- **Wheel.** Both canvases, tree and day, take the wheel through
+  `useCanvasWheel` (`src/wheel.ts`): a native non-passive listener on the
+  SVG. React's `onWheel` is passive, so its `preventDefault` couldn't stop
+  the scrolling pane around the day view from scrolling under a zoom.
+  Scrolling elsewhere in the pane is untouched.
 - **Height.** The timeline and the side card share the pane's height: side
   by side, or in a narrow pane (a VS Code side panel) stacked, with the card
   shrinking and scrolling inside. Below 380 px for the whole view, the pane
@@ -1084,7 +1104,12 @@ parsers, stitching, fork rules or health thresholds.
   host. The refusal sits at the action, not at a control, so no button, key
   or bridge call gets past it; the run-desktop skill's `real` mode sets it.
   (The skill first refused clicks by their text, which other text and the
-  keyboard bypassed: [day-view review finding 1](archive/2026-10-modernize/review-findings-day-view.md#dv-1).)
+  keyboard bypassed: [day-view review finding 1](archive/day-view/review-findings-day-view.md#dv-1).)
+- The panel is a modal (`aria-modal`): focus moves into it when it opens
+  and back where it was when it closes, Tab cycles inside it, and its
+  `onKeyDown` stops every key at the dialog — Esc closes it — so no
+  shortcut of the page behind it acts while it is open ([day-view round 2,
+  finding 3](archive/day-view/review-findings-day-view-round-2.md#dv2-3)).
 - View settings are applied in the renderer: the sort time, remembered view
   state (compress, directory and agent filters, list or day, saved debounced) and whether
   a new fork opens in the chat panel (unset: VS Code yes, desktop no).
@@ -1365,18 +1390,23 @@ dangling parent, one root per path), not session counts.
   the window aren't loaded and an unchanged one isn't reloaded; a disabled
   agent is never asked; a Codex rename and a Claude record rewritten under
   the same uuid and time change only their families' revisions, and the day
-  re-reads exactly those two. `src/day-layout.test.ts`: tracks, breaks
-  measured from the latest end (a long reply isn't idle), ticks,
+  re-reads exactly those two; a Copilot reply running past midnight stays on
+  its first day and is the next day's `running`. `src/day-layout.test.ts`:
+  tracks, breaks measured from the latest end (a long reply, or one running
+  in from the day before, isn't idle), a chat landing on its latest-ending
+  turn, ticks,
   fork/edit/lead edges, same-instant ordering, navigation, and 300 random
   days with no overlapping turns and x in time order. `src/day.test.ts`:
   local day bounds across DST and month ends, and the filters. The store
   and welcome tests cover a turn opened from the day view (chain opened,
   member focused, the drawn end kept after its group split, the focused
-  chat's family asked first), stale day results, and the day markup.
+  chat's family asked first), a day refresh keeping the drawn range across
+  a split and a re-root, stale day results, and the day markup.
   **Registry:** with `AGENTREE_READ_ONLY_STORES` a fork is refused before
   any provider is asked, and hand-offs are refused. Focus, the kept
-  viewport and the narrow, short layout were checked in the desktop app
-  (run-desktop skill), not by a test.
+  viewport, the narrow, short layout, wheel cancellation and Settings'
+  keyboard isolation were checked in the desktop app (run-desktop skill),
+  not by a test: the renderer tests render static markup.
 - **Launch environment:** the fake app-server reports the `CODEX_HOME` it
   was started with — unset by default, the saved home when only a setting
   names it, the variable when that is set; resume commands and terminal

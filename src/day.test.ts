@@ -80,6 +80,7 @@ describe("filterDay", () => {
     start: 0,
     end: 1,
     chats: [root, fork, codex],
+    running: [{ provider: "codex", familyId: "cccc3333", sessionId: "cccc3333", start: -1, end: 0 }],
     turns: [turn(root, "r1"), turn(fork, "f1"), turn(codex, "c1")],
   };
   const ids = (d: DayActivity) => d.turns.map((t) => t.id);
@@ -91,6 +92,9 @@ describe("filterDay", () => {
 
   it("filters lanes by agent, by their own directory, and by search", () => {
     expect(ids(filterDay(day, { ...none, provider: "codex" }))).toEqual(["c1"]);
+    // A turn still running from the day before goes with its chat.
+    expect(filterDay(day, { ...none, provider: "codex" }).running).toHaveLength(1);
+    expect(filterDay(day, { ...none, provider: "claude" }).running).toEqual([]);
     // The fork's own directory, not its family's.
     expect(ids(filterDay(day, { ...none, cwd: "/work/other" }))).toEqual(["f1"]);
     // cwdKey: one directory however it is spelled.

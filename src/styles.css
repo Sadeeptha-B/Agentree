@@ -516,6 +516,7 @@ button.ghost:hover, a.ghost:hover { border-color: var(--line); color: var(--fg);
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 10px 40px #0004; padding: 6px 20px 14px;
 }
+.settings:focus { outline: none; }
 .settings-head { display: flex; align-items: center; justify-content: space-between; }
 .settings-head h2 { font-size: 16px; margin: 12px 0; }
 .settings section { border-top: 1px solid var(--line); padding: 10px 0; }

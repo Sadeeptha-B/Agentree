@@ -348,13 +348,29 @@ export interface DayTurn {
   midTurn?: boolean;
 }
 
+/**
+ * A turn that started before the window and was still running in it. It
+ * gets no mark — a turn belongs to the day it started — but the day isn't
+ * idle while it runs.
+ */
+export interface DayRun {
+  provider: ProviderId;
+  familyId: SessionId;
+  sessionId: SessionId;
+  start: number;
+  /** `endOf` the turn: at or after the window's start. */
+  end: number;
+}
+
 /** Every turn that started in `[start, end)`, across the enabled agents. */
 export interface DayActivity {
   start: number;
   end: number;
+  /** The sessions of `turns` and `running`; a lane is drawn only for one with turns. */
   chats: DayChat[];
   /** Oldest first. */
   turns: DayTurn[];
+  running: DayRun[];
 }
 
 /**

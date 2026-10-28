@@ -32,6 +32,19 @@ vi.hoisted(() => {
       ev("user.message", "e3", "2026-10-02T00:05:00.000Z", "And again"),
     ].join("\n") + "\n",
   );
+  // A reply that runs past midnight: two assistant messages, one turn.
+  const long = p.join(tmp, "copilot", "session-state", "c0c0c0c0-0000-4000-8000-000000000002");
+  fs.mkdirSync(long, { recursive: true });
+  fs.writeFileSync(p.join(long, "workspace.yaml"), "id: c0c0c0c0-0000-4000-8000-000000000002\ncwd: /work/late\nname: Long job\n");
+  fs.writeFileSync(
+    p.join(long, "events.jsonl"),
+    [
+      ev("user.message", "l1", "2026-10-01T23:50:00.000Z", "Run the long job"),
+      ev("assistant.message", "l2", "2026-10-01T23:55:00.000Z", "Working"),
+      ev("assistant.message", "l3", "2026-10-02T00:30:00.000Z", "Done"),
+      ev("user.message", "l4", "2026-10-02T00:31:00.000Z", "Next"),
+    ].join("\n") + "\n",
+  );
 });
 
 // Spied on, to show which families a day loads, and that a disabled agent is never asked.
@@ -122,12 +135,25 @@ describe("dayActivity", () => {
     const before = dayActivity(OCT1, OCT1 + DAY);
     const after = dayActivity(OCT1 + DAY, OCT1 + 2 * DAY);
     expect(ids(before, COPILOT_ID)).toEqual(["e1"]);
-    expect(ids(after)).toEqual(["e2", "e3"]);
+    expect(ids(after, COPILOT_ID)).toEqual(["e2", "e3"]);
     // Its parent is yesterday's: the view draws a lead-in, not a dangling edge.
     expect(after.turns[0]).toMatchObject({ parentId: "e1", provider: "copilot", sessionId: COPILOT_ID });
-    expect(after.chats).toEqual([
+    expect(after.chats).toContainEqual(
       expect.objectContaining({ provider: "copilot", sessionId: COPILOT_ID, title: "Late night", cwd: "/work/late" }),
+    );
+  });
+
+  it("keeps a reply that runs past midnight on the day it started, and tells the next day it ran", () => {
+    const LONG = "c0c0c0c0-0000-4000-8000-000000000002";
+    const before = dayActivity(OCT1, OCT1 + DAY);
+    const after = dayActivity(OCT1 + DAY, OCT1 + 2 * DAY);
+    expect(ids(before, LONG)).toEqual(["l1", "l2"]);
+    expect(before.turns.find((t) => t.id === "l2")).toMatchObject({ endedAt: at("2026-10-02T00:30:00.000Z") });
+    expect(ids(after, LONG)).toEqual(["l4"]);
+    expect(after.running).toEqual([
+      { provider: "copilot", familyId: LONG, sessionId: LONG, start: at("2026-10-01T23:55:00.000Z"), end: at("2026-10-02T00:30:00.000Z") },
     ]);
+    expect(before.running.filter((r) => r.sessionId === LONG)).toEqual([]);
   });
 
   it("loads only the families whose records can reach the window, and reuses unchanged ones", () => {
