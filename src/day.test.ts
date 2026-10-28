@@ -5,7 +5,7 @@ import type { DayActivity, DayChat, DayTurn, SessionMeta } from "../shared/types
 // A zone with daylight saving, so the 23- and 25-hour days are real. Node
 // re-reads TZ on assignment; each test file runs in its own process.
 process.env.TZ = "America/New_York";
-const { dayBounds, dayKeyOf, filterDay, isDayKey, latestActiveDay, resolveTarget, shiftDay } = await import("./day.ts");
+const { dayBounds, dayKeyOf, familyWant, filterDay, foundKey, isDayKey, latestActive, shiftDay, wantOf } = await import("./day.ts");
 
 const HOUR = 3_600_000;
 
@@ -43,12 +43,10 @@ describe("day keys and bounds", () => {
     expect(isDayKey("")).toBe(false);
   });
 
-  it("knows the day of the newest activity", () => {
-    const at = (activeAt: number) => ({ activeAt }) as SessionMeta;
-    expect(latestActiveDay([])).toBeNull();
-    expect(latestActiveDay([at(dayBounds("2026-10-20").start + HOUR), at(dayBounds("2026-10-26").end - 1)])).toBe(
-      "2026-10-26",
-    );
+  it("knows the conversation with the newest activity", () => {
+    const at = (id: string, activeAt: number) => ({ id, activeAt }) as SessionMeta;
+    expect(latestActive([])).toBeNull();
+    expect(latestActive([at("a", dayBounds("2026-10-20").start + HOUR), at("b", dayBounds("2026-10-26").end - 1)])?.id).toBe("b");
   });
 });
 
@@ -107,44 +105,45 @@ describe("filterDay", () => {
   });
 });
 
-describe("resolveTarget", () => {
-  const turn = (id: string, sessionId: string, familyId: string, endId: string, at: number, endedAt?: number, provider: DayTurn["provider"] = "claude"): DayTurn => ({
+describe("wanted turns", () => {
+  const turn = (id: string, sessionId: string, familyId: string, at: number, heldBy?: string[]): DayTurn => ({
     id,
-    ref: { point: { nodeId: id, sessionId, endId }, stableIds: [`s:${id}`] },
+    ref: { point: { nodeId: id, sessionId, endId: id }, stableIds: [`s:${id}`] },
     parentId: null,
     sessionId,
+    ...(heldBy ? { heldBy } : {}),
     familyId,
-    provider,
+    provider: "claude",
     role: "assistant",
     preview: id,
     timestamp: at,
-    ...(endedAt ? { endedAt } : {}),
   });
   const day: DayActivity = {
     start: 0,
     end: 100,
     chats: [],
     running: [],
-    turns: [
-      turn("p1", "P", "P", "p1", 10, 40),
-      turn("p2", "P", "P", "p2", 20),
-      turn("f1", "F", "P", "f1", 30),
-      turn("x1", "X", "X", "x1", 50),
-      turn("p1", "P", "P", "p1", 60, undefined, "codex"),
-    ],
+    turns: [turn("p1", "P", "P", 10, ["F"]), turn("f1", "F", "P", 30)],
   };
 
-  it("finds a tree's turn by where it was drawn to end, among that agent's turns", () => {
-    // Drawn as one node ending on p2; the day draws p2 on its own.
-    expect(resolveTarget(day, { provider: "claude", ref: { point: { nodeId: "p1", sessionId: "P", endId: "p2" } } })?.id).toBe("p2");
-    expect(resolveTarget(day, { provider: "codex", ref: { point: { nodeId: "p1", sessionId: "P", endId: "p1" } } })?.timestamp).toBe(60);
-    expect(resolveTarget(day, { provider: "claude", ref: { point: { nodeId: "gone", sessionId: "P", endId: "gone" } } })).toBeNull();
+  it("looks for a drawn turn through its lane, the sessions holding it, then its family", () => {
+    expect(wantOf(day.turns[0])).toEqual({ provider: "claude", sessions: ["P", "F"], ref: day.turns[0].ref });
+    expect(wantOf(day.turns[1]).sessions).toEqual(["F", "P"]);
   });
 
-  it("lands a conversation on the latest-ending turn of any of its sessions", () => {
-    // p1 runs to 40, after f1 (30) and p2 (20) started.
-    expect(resolveTarget(day, { provider: "claude", sessions: ["P", "F"] })?.id).toBe("p1");
-    expect(resolveTarget(day, { provider: "claude", sessions: ["F"] })?.id).toBe("f1");
-    expect(resolveTarget(day, { provider: "claude", sessions: ["nobody"] })).toBeNull();
+  it("looks for a conversation's latest turn through every session of it", () => {
+    const s = { id: "P", provider: "codex", forks: [{ id: "F" }, { id: "G" }] } as SessionMeta;
+    expect(familyWant(s)).toEqual({ provider: "codex", sessions: ["P", "F", "G"] });
+  });
+
+  it("selects what the worker found only when it is drawn in this day", () => {
+    const found = (id: string, timestamp: number, familyId = "P") => ({ familyId, id, timestamp, ref: day.turns[0].ref });
+    expect(foundKey(day, "claude", found("f1", 30))).toBe("claude:P:f1");
+    // It starts on another day, isn't in this snapshot, or is gone.
+    expect(foundKey(day, "claude", found("p1", 100))).toBeNull();
+    expect(foundKey(day, "claude", found("p9", 50))).toBeNull();
+    expect(foundKey(day, "claude", found("f1", 30, "F"))).toBeNull();
+    expect(foundKey(day, "codex", found("f1", 30))).toBeNull();
+    expect(foundKey(day, "claude", null)).toBeNull();
   });
 });

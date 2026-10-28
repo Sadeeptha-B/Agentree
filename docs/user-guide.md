@@ -135,9 +135,10 @@ The sketch below is illustrative; its counts are not a current store audit.
   is highlighted and brought forward under the family card. Clicking a name,
   or opening a card matched only by a fork, opens the tree **on that fork**:
   its newest turn is selected, and the panel's open/resume act on it.
-- **◷ date on a card:** shows that conversation in the [day view](#the-day-view)
-  of its latest activity, with its latest turn selected among every other
-  chat of that day.
+- **◷ date on a card:** shows that conversation's latest turn selected in
+  the [day view](#the-day-view), among every other chat of that day. The
+  date is the day of its latest activity; a turn that worked past midnight
+  is shown on the day it started.
 - **Fork names:** cards show up to three names, more when needed to show search
   matches, then `+N`. Names are ordered by activity after search matches.
 - **Sort indicator beside the count:** switches between last activity and last
@@ -183,10 +184,10 @@ conversation, on one graph.
   **filled dot is your prompt**, a **ring is the agent's turn**.
 - **Time runs left to right on one axis for every lane**: turns drawn one
   above the other happened at about the same time. A pause of 20 minutes or
-  more with nothing running (counted from when the last turn before it
-  ended, so a long agent reply isn't a pause, nor one still running from
-  the night before) is drawn as a short shaded
-  break labelled with its length, and a
+  more with no recorded activity (counted from the last message, tool call
+  or tool result before it, so a long agent reply or tool run isn't a
+  pause, nor work still going from the night before) is drawn as a short
+  shaded break labelled with its length, and a
   burst of turns keeps a minimum spacing, so the axis is to scale only
   between breaks. A short dotted lead-in means the turn continues one from
   an earlier day.
@@ -195,29 +196,35 @@ conversation, on one graph.
   direction; **fit** shows the whole day across, **latest** a readable size
   at the most recent turns. Lanes keep their height, so each chat's full
   name is shown, wrapped, at any zoom, in the lane and in the chat list;
-  the time labels stay put along the top as you scroll down.
+  the time labels stay put along the top as you scroll down. Under **All
+  conversations**, each lane also names its folder (the last part of its
+  directory, e.g. `Agentree`) at the bottom right.
 - **Switch chats:** click a turn or a chat's name (it selects the chat's
   latest turn, the one that finished last), or use the keys: **←/→** the previous/next turn in the chat,
   **↑/↓** the chat above/below, at its turn nearest in time. Picking a chat
   or a turn moves the keyboard to the timeline, so **Enter** then opens it. The card on the
   right lists the day's chats with their times, or shows the selected turn's
-  chat, time and the start of its text. Under **All conversations** it also
-  shows each chat's directory; with a directory picked in the rail, every
-  chat shown is in it.
+  chat, time, how long the agent kept working after it, and the start of its
+  text. Under **All conversations** the selected chat's card also shows its
+  directory.
 - **Getting here from a chat:** the **◷ date** button on a list card, or in
-  a tree's toolbar (for the selected turn), opens that chat's day with it
-  selected and in view. If the agent chips, directory or search would hide
-  it, they are cleared.
+  a tree's toolbar (for the selected turn), opens the day that turn started
+  with it selected and in view. If the agent chips, directory or search
+  would hide it, they are cleared.
 - **Open in tree** (or **Enter**, or double-click) opens that conversation's
   tree focused on that chat, with the turn selected as the day drew it (if
   the tree has changed since, the turn that now ends there); **Esc** comes
   back to the same day, turn and view.
 - **◀ ▶**, the date box and **today** change the day. An empty day offers a
-  jump to the most recent day with activity.
+  jump to the latest turn of the most recently active conversation the
+  filters let through.
 - The directory rail, the agent chips and the search narrow the day view as
   they narrow the list (by each chat's own directory, title or id). With
   “Remember view” on, Agentree reopens in the view you left it in, on today.
-- It updates live, like the list.
+- It updates live, like the list. The selected turn stays selected while it
+  is still in that chat; if the turn changed on disk so that it now starts
+  on another day, or is gone, it is deselected rather than replaced by
+  another.
 
 ### The tree
 
@@ -532,7 +539,9 @@ findings are resolved. Supported-scope restrictions and evidence limits:
   plumbing/subagent sessions are hidden.
 - The day view shows no labels, stars or dead-end marks, and only the start
   of each turn's text; open the turn in its tree for those. A turn belongs to
-  the day it started on.
+  the day it started on. Idle breaks are measured from what the agent wrote
+  to its history (messages, tool calls and results, turn ends): work that
+  leaves no record reads as idle.
 - The desktop app has no packaged installer. Detailed future scope and
   verification follow-ups live in the [remaining-work list](roadmap.md).
 

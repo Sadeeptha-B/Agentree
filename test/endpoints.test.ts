@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assignTips, childIndex, copyHolders, heldTip, newestLeaf, pathToRoot, toNodeMap } from "../shared/render.ts";
+import { assignTips, childIndex, copyHolders, endOf, heldTip, newestLeaf, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { MemberInfo } from "../shared/types.ts";
 import { mergeSameRoleRuns, parseRecords, type RawRecord } from "../electron/transcripts.ts";
 
@@ -62,5 +62,40 @@ describe("a branch's last activity is its end, not its start", () => {
     const a = nodes.find((n) => n.text.startsWith("A begins."))!;
     expect(a.endedAt).toBe(Date.parse(at(3)));
     expect(newestLeaf(nodes, childIndex(nodes))).toBe(a.id);
+  });
+});
+
+describe("activity under a turn is not its end", () => {
+  it("counts a reply's tool calls, results and tool-only replies for it, until the next drawn turn", () => {
+    const tool = (uuid: string, parentUuid: string, min: number, id: string): RawRecord => ({
+      type: "assistant",
+      uuid,
+      parentUuid,
+      timestamp: at(min),
+      message: { id, role: "assistant", content: [{ type: "tool_use", id: `tu_${uuid}`, name: "Bash", input: {} }] },
+    });
+    const result = (uuid: string, parentUuid: string, min: number): RawRecord => ({
+      type: "user",
+      uuid,
+      parentUuid,
+      timestamp: at(min),
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: `tu_${parentUuid}`, content: "ok" }] },
+    });
+    const nodes = tree([
+      user("u1", null, 0, "Build it"),
+      asst("a1", "u1", 1, "msg_a1", "Building."),
+      tool("a1t", "a1", 1, "msg_a1"),
+      result("r1", "a1t", 30),
+      tool("t2", "r1", 31, "msg_t2"),
+      result("r2", "t2", 45),
+      user("u2", "r2", 46, "Thanks"),
+    ]);
+    const reply = nodes.find((n) => n.text === "Building.")!;
+    // Drawn as one message; the work it set off ran until 10:45.
+    expect(endOf(reply)).toBe(Date.parse(at(1)));
+    expect(reply.activeUntil).toBe(Date.parse(at(45)));
+    // The next prompt is a turn of its own: it neither ends the reply nor is kept busy.
+    expect(nodes.find((n) => n.text === "Thanks")?.activeUntil).toBeUndefined();
+    expect(nodes.find((n) => n.text === "Build it")?.activeUntil).toBeUndefined();
   });
 });

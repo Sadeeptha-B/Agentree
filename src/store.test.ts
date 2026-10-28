@@ -1,6 +1,6 @@
 // Lives in src/ (not test/) so it type-checks with the renderer's DOM config.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DayActivity, MemberInfo, SessionDetail, SettingsState, TurnNode } from "../shared/types.ts";
+import type { DayActivity, DayFound, DayTurn, DayWant, MemberInfo, SessionDetail, SettingsState, TurnNode } from "../shared/types.ts";
 import { actionTarget } from "../shared/render.ts";
 
 const api = vi.hoisted(() => ({
@@ -497,62 +497,109 @@ describe("day view state", () => {
     answerOld(activity("2026-10-28", ["a"]));
     await first;
     const { start, end } = dayBounds("2026-10-27");
-    expect(api.getDay).toHaveBeenLastCalledWith(start, end);
+    expect(api.getDay).toHaveBeenLastCalledWith(start, end, undefined);
     expect(useStore.getState().dayActivity?.turns.map((t) => t.id)).toEqual(["b"]);
   });
 
-  it("keeps the day selection across a refresh while the turn is still there", async () => {
-    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a", "b"]));
+  /** What the worker answers for a want: `found`, as `dayActivity` would. */
+  const withFound = (a: DayActivity, found: DayFound | null): DayActivity => ({ ...a, found });
+  const foundAt = (id: string, timestamp: number, familyId = "P"): DayFound => ({
+    familyId,
+    id,
+    timestamp,
+    ref: { point: { nodeId: id, sessionId: familyId, endId: id } },
+  });
+
+  it("keeps the day selection across a refresh while the worker finds it in the day", async () => {
+    const day = activity("2026-10-28", ["a", "b"]);
+    const at = day.turns[1].timestamp;
+    api.getDay.mockResolvedValueOnce(day);
     await useStore.getState().loadDay();
     useStore.getState().set({ daySelected: "claude:P:b" });
-    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a", "b", "c"]));
+    api.getDay.mockResolvedValueOnce(withFound(activity("2026-10-28", ["a", "b", "c"]), foundAt("b", at)));
     await useStore.getState().loadDay();
     expect(useStore.getState().daySelected).toBe("claude:P:b");
-    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a"]));
+    // Asked for by the turn as drawn, through the sessions that hold it.
+    const want = api.getDay.mock.calls[1][2] as DayWant;
+    expect(want).toEqual({ provider: "claude", sessions: ["P"], ref: day.turns[1].ref });
+    api.getDay.mockResolvedValueOnce(withFound(activity("2026-10-28", ["a"]), null));
     await useStore.getState().loadDay();
     expect(useStore.getState().daySelected).toBeNull();
   });
 
-  it("keeps the day selection on the range it was drawn with when a refresh splits or re-roots it", async () => {
+  it("follows the selection to wherever the worker found it in its family, or lets it go", async () => {
     const base = dayBounds("2026-10-28").start;
-    const turn = (id: string, family: string, endId: string, stableIds: string[]) => ({
+    const turn = (id: string, family: string, heldBy?: string[]): DayTurn => ({
       id,
-      ref: { point: { nodeId: id, sessionId: family, endId }, stableIds },
+      ref: { point: { nodeId: id, sessionId: family, endId: id }, stableIds: [`m:${id}`] },
       parentId: null,
       sessionId: family,
+      ...(heldBy ? { heldBy } : {}),
       familyId: family,
-      provider: "claude" as const,
-      role: "assistant" as const,
+      provider: "claude",
+      role: "assistant",
       preview: id,
       timestamp: base + 1,
     });
-    const day = (turns: ReturnType<typeof turn>[]): DayActivity => ({ ...dayBounds("2026-10-28"), chats: [], running: [], turns });
-    // Drawn as one node, "A" then "B", ending on ep-a2.
-    api.getDay.mockResolvedValueOnce(day([turn("ep-a1", "P", "ep-a2", ["m:a", "m:b"])]));
+    const day = (turns: DayTurn[]): DayActivity => ({ ...dayBounds("2026-10-28"), chats: [], running: [], turns });
+    api.getDay.mockResolvedValueOnce(day([turn("p-a1", "P", ["F"])]));
     await useStore.getState().loadDay();
-    useStore.getState().set({ daySelected: "claude:P:ep-a1" });
-    // A quiet fork split it: the head now ends on A, and B is a node of its own.
-    api.getDay.mockResolvedValueOnce(day([turn("ep-a1", "P", "ep-a1", ["m:a"]), turn("ep-a2", "P", "ep-a2", ["m:b"])]));
+    useStore.getState().set({ daySelected: "claude:P:p-a1" });
+
+    // P deleted: F, re-rooted, draws it under its own id. The worker looked
+    // in P's family through F, the other session holding the turn.
+    api.getDay.mockResolvedValueOnce(withFound(day([turn("f-a1", "F"), turn("x-a1", "X")]), foundAt("f-a1", base + 1, "F")));
     await useStore.getState().loadDay();
-    expect(useStore.getState().daySelected).toBe("claude:P:ep-a2");
-    // P deleted: F, re-rooted, draws the same turn under its own ids.
-    api.getDay.mockResolvedValueOnce(day([turn("f-a1", "F", "f-a1", ["m:a"]), turn("f-a2", "F", "f-a2", ["m:b"])]));
+    expect((api.getDay.mock.calls[1][2] as DayWant).sessions).toEqual(["P", "F"]);
+    expect(useStore.getState().daySelected).toBe("claude:F:f-a1");
+
+    // Its end now starts on the next day (a group split at midnight): the
+    // refresh deselects it rather than keep a shorter range, and stays here.
+    api.getDay.mockResolvedValueOnce(withFound(day([turn("f-a1", "F")]), foundAt("f-a2", dayBounds("2026-10-29").start + 5, "F")));
     await useStore.getState().loadDay();
-    expect(useStore.getState().daySelected).toBe("claude:F:f-a2");
+    expect(useStore.getState()).toMatchObject({ day: "2026-10-28", daySelected: null });
+  });
+
+  it("keeps a turn picked while a refresh was out", async () => {
+    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a", "b"]));
+    await useStore.getState().loadDay();
+    useStore.getState().set({ daySelected: "claude:P:a" });
+    let answer!: (a: DayActivity) => void;
+    api.getDay.mockReturnValueOnce(new Promise((r) => (answer = r)));
+    const refresh = useStore.getState().loadDay();
+    useStore.getState().set({ daySelected: "claude:P:b" });
+    answer(withFound(activity("2026-10-28", ["a", "b"]), foundAt("a", 0)));
+    await refresh;
+    expect(useStore.getState().daySelected).toBe("claude:P:b");
   });
 
   it("shows a tree's selected turn in its day: the tree closes and the turn is picked as it was drawn", async () => {
     api.getSession.mockResolvedValueOnce(linear);
     await useStore.getState().openSession("P", { select: drawn("u2") });
     useStore.getState().set({ dayViewport: { day: "2026-10-05", tx: 1, ty: 2, k: 3 }, cwdFilter: "c:/elsewhere" });
-    api.getDay.mockResolvedValueOnce(activity("2026-10-05", ["u1", "u2", "a2"]));
-    await useStore.getState().showInDay("2026-10-05", { provider: "claude", ref: drawn("u2") });
+    const day = activity("2026-10-05", ["u1", "u2", "a2"]);
+    api.getDay.mockResolvedValueOnce(withFound(day, foundAt("u2", day.turns[1].timestamp)));
+    const want: DayWant = { provider: "claude", sessions: ["P"], ref: drawn("u2") };
+    await useStore.getState().showInDay("2026-10-05", want);
     const s = useStore.getState();
     expect(s.session).toBeNull();
     expect(s).toMatchObject({ listMode: "day", day: "2026-10-05", daySelected: "claude:P:u2", dayViewport: null, dayTarget: null });
-    expect(api.getDay).toHaveBeenLastCalledWith(dayBounds("2026-10-05").start, dayBounds("2026-10-05").end);
+    expect(api.getDay).toHaveBeenLastCalledWith(dayBounds("2026-10-05").start, dayBounds("2026-10-05").end, want);
     // Its lane was outside the directory filter: the filters give way to the chat asked for.
     expect(s.cwdFilter).toBe("");
+  });
+
+  it("shows a conversation on the day its latest turn started, when that was the day before", async () => {
+    // Its last activity was after midnight, in a turn that started before.
+    const late = activity("2026-10-05", ["late"]);
+    api.getDay.mockResolvedValueOnce(withFound(activity("2026-10-06", []), foundAt("late", late.turns[0].timestamp)));
+    api.getDay.mockResolvedValueOnce(withFound(late, foundAt("late", late.turns[0].timestamp)));
+    await useStore.getState().showInDay("2026-10-06", { provider: "claude", sessions: ["P", "F"] });
+    expect(useStore.getState()).toMatchObject({ day: "2026-10-05", daySelected: "claude:P:late", dayTarget: null });
+    const [, , again] = api.getDay.mock.calls[1];
+    expect(api.getDay.mock.calls[1].slice(0, 2)).toEqual([dayBounds("2026-10-05").start, dayBounds("2026-10-05").end]);
+    // Asked for again as found, so the second day can't land on another turn.
+    expect(again).toMatchObject({ provider: "claude", sessions: ["P", "F"], ref: foundAt("late", 0).ref });
   });
 
   it("drops a day target once the user has moved to another day", async () => {

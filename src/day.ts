@@ -1,5 +1,5 @@
-import { cwdKey, endOf, locateBy } from "../shared/render.ts";
-import type { DayActivity, DayChat, DayTurn, NodeRef, ProviderId, SessionId, SessionMeta } from "../shared/types.ts";
+import { cwdKey } from "../shared/render.ts";
+import type { DayActivity, DayChat, DayFound, DayTurn, DayWant, ProviderId, SessionMeta } from "../shared/types.ts";
 
 /**
  * The day view's rules, kept apart from the component so they can be tested
@@ -60,11 +60,11 @@ export const shortDay = (key: string): string =>
 /** "14:05" in the user's locale. */
 export const clock = (t: number): string => new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
-/** The local day of the newest activity among `sessions`, or null when there is none. */
-export function latestActiveDay(sessions: SessionMeta[]): string | null {
-  let latest = 0;
-  for (const s of sessions) if (s.activeAt > latest) latest = s.activeAt;
-  return latest > 0 ? dayKeyOf(latest) : null;
+/** The conversation with the newest activity among `sessions`, or null when none has any. */
+export function latestActive(sessions: SessionMeta[]): SessionMeta | null {
+  let latest: SessionMeta | null = null;
+  for (const s of sessions) if (s.activeAt > (latest?.activeAt ?? 0)) latest = s;
+  return latest;
 }
 
 export interface DayFilter {
@@ -127,21 +127,27 @@ export const turnKey = (t: { provider: ProviderId; familyId: string; id: string 
   `${t.provider}:${t.familyId}:${t.id}`;
 
 /**
- * A chat to find in the day view: a turn as another view drew it (the
- * tree's selection), or a conversation's sessions (a list card), which
- * lands on their latest-ending turn of the day.
+ * A drawn day turn, to find again in a newer snapshot (`DayWant`): through
+ * its lane's session, the other sessions holding it, then its family.
  */
-export type DayTarget = { provider: ProviderId } & ({ ref: NodeRef } | { sessions: SessionId[] });
+export const wantOf = (t: DayTurn): DayWant => ({
+  provider: t.provider,
+  sessions: [...new Set([t.sessionId, ...(t.heldBy ?? []), t.familyId])],
+  ref: t.ref,
+});
 
-/** The turn of `day` a target stands for, or null when it has none that day. */
-export function resolveTarget(day: DayActivity, target: DayTarget): DayTurn | null {
-  const mine = day.turns.filter((t) => t.provider === target.provider);
-  if ("ref" in target) return locateBy(mine, (t) => t.ref, target.ref);
-  const ids = new Set(target.sessions);
-  let best: DayTurn | null = null;
-  for (const t of mine) {
-    if (!ids.has(t.sessionId) && !ids.has(t.familyId)) continue;
-    if (!best || endOf(t) >= endOf(best)) best = t;
-  }
-  return best;
+/** A list card's conversation, to show by its latest-ending turn. */
+export const familyWant = (s: SessionMeta): DayWant => ({
+  provider: s.provider,
+  sessions: [s.id, ...(s.forks ?? []).map((f) => f.id)],
+});
+
+/**
+ * The key of the turn the worker found (`DayActivity.found`) among `day`'s,
+ * or null when it starts on another day — or isn't drawn in this snapshot.
+ */
+export function foundKey(day: DayActivity, provider: ProviderId, found: DayFound | null | undefined): string | null {
+  if (!found || found.timestamp < day.start || found.timestamp >= day.end) return null;
+  const key = turnKey({ provider, familyId: found.familyId, id: found.id });
+  return day.turns.some((t) => turnKey(t) === key) ? key : null;
 }

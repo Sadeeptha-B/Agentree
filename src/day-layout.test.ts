@@ -82,6 +82,20 @@ describe("day layout", () => {
     expect(l.ticks.filter((t) => t.kind === "resume").map((t) => t.t)).toEqual([T0 + 95 * MIN]);
   });
 
+  it("is not idle while the agent works after its reply: tool runs count, from `activeUntil`", () => {
+    const a = chat("A");
+    // One message at 09:01, its tool run until 10:00, the next prompt at 10:01.
+    const turns = [
+      turn(a, "q1", null, 0),
+      turn(a, "r1", "q1", 1, { role: "assistant", activeUntil: T0 + 60 * MIN }),
+      turn(a, "q2", "r1", 61),
+    ];
+    expect(buildDayLayout(turns, [a]).breaks).toEqual([]);
+    // Without the run recorded, the same messages would read as an hour's pause.
+    const bare = turns.map(({ activeUntil: _, ...t }) => t);
+    expect(buildDayLayout(bare, [a]).breaks).toHaveLength(1);
+  });
+
   it("puts a second branch of one chat on its own track", () => {
     const a = chat("A");
     const l = buildDayLayout(
@@ -225,6 +239,20 @@ describe("day layout", () => {
     expect(l.lanes[1].height).toBe(2 * LANE_PAD + labelLines(long) * LABEL_LINE_H);
     // The turn sits in the middle of the taller lane.
     expect(dot(l, "l1").y).toBe(l.lanes[1].top + l.lanes[1].height / 2);
+    // With folders shown, a line more for each name.
+    const dirs = buildDayLayout([turn(short, "s1", null, 0), turn(long, "l1", null, 1)], [short, long], [], { dirs: true });
+    expect(dirs.lanes[0].height).toBe(2 * LANE_PAD + 2 * LABEL_LINE_H);
+    expect(dirs.lanes[1].height).toBe(2 * LANE_PAD + (labelLines(long) + 1) * LABEL_LINE_H);
+  });
+
+  it("counts wide scripts and emoji as wide when wrapping a name", () => {
+    // 80 CJK characters: a whole em each, broken between any two.
+    const cjk = chat("C", { title: "日本語のタイトル".repeat(10) });
+    const latin = chat("L", { title: "a".repeat(80) });
+    expect(labelLines(cjk)).toBeGreaterThan(labelLines(latin));
+    // 136px of room at 12px a character: 11 to a line.
+    expect(labelLines(cjk)).toBe(Math.ceil(80 / 11));
+    expect(labelLines(chat("E", { title: "🚀".repeat(12) }))).toBe(2);
   });
 
   it("shrinks dots as zoom closes turns up, so a track's turns never touch", () => {

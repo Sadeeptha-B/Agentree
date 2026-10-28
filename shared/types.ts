@@ -51,6 +51,14 @@ export interface TurnNode {
    * active last is decided by this end (`endOf`), never by the start.
    */
   endedAt?: number;
+  /**
+   * The last activity recorded under this node before the next drawn turn,
+   * where that is later than its end: tool calls and results, tool-only
+   * replies, closing events — whatever counts as activity for `activeAt`
+   * in its harness. The agent was working until then. Only the day view's
+   * idle time reads it; display, "latest" and fork points never do.
+   */
+  activeUntil?: number;
   /** Claude Code marks subagent turns; we dim them. */
   isSidechain?: boolean;
   /**
@@ -335,6 +343,11 @@ export interface DayTurn {
   parentId: NodeId | null;
   /** Lane: the owning member session. */
   sessionId: SessionId;
+  /**
+   * The other sessions whose history holds it (`TurnNode.heldBy`), where
+   * there are any: where to look for it once its lane's session is gone.
+   */
+  heldBy?: SessionId[];
   familyId: SessionId;
   provider: ProviderId;
   role: NodeRole;
@@ -342,6 +355,8 @@ export interface DayTurn {
   preview: string;
   timestamp: number;
   endedAt?: number;
+  /** `TurnNode.activeUntil`, where it is later than the turn's end. */
+  activeUntil?: number;
   branchKind?: TurnNode["branchKind"];
   isSidechain?: boolean;
   /** A mid-turn message (`TurnNode.midTurn` or `injected`). */
@@ -358,8 +373,36 @@ export interface DayRun {
   familyId: SessionId;
   sessionId: SessionId;
   start: number;
-  /** `endOf` the turn: at or after the window's start. */
+  /** `activeEndOf` the turn: at or after the window's start. */
   end: number;
+}
+
+/**
+ * A turn the day view wants selected in the day it loads: its selection,
+ * carried across a refresh, or a chat asked for from another view. The
+ * worker finds it in its whole family, never in the day's slice alone (its
+ * end can start on another day) and never in another family (text
+ * identities repeat across unrelated chats).
+ */
+export interface DayWant {
+  provider: ProviderId;
+  /**
+   * The sessions to find its family through, in order; the first that
+   * loads is it. A drawn turn's lane, then its holders, then its family:
+   * the family it was drawn in may have split or been re-rooted.
+   */
+  sessions: SessionId[];
+  /** The turn as drawn (`locate`). Absent: the family's latest-ending turn. */
+  ref?: NodeRef;
+}
+
+/** Where a wanted turn is now. */
+export interface DayFound {
+  familyId: SessionId;
+  id: NodeId;
+  ref: NodeRef;
+  /** When it starts: outside the window, it is drawn on another day. */
+  timestamp: number;
 }
 
 /** Every turn that started in `[start, end)`, across the enabled agents. */
@@ -371,6 +414,8 @@ export interface DayActivity {
   /** Oldest first. */
   turns: DayTurn[];
   running: DayRun[];
+  /** The turn a `DayWant` asked for, when one was asked: null when it is gone. */
+  found?: DayFound | null;
 }
 
 /**
@@ -498,9 +543,10 @@ export interface AgentreeApi {
   getSession(id: string): Promise<SessionDetail | null>;
   /**
    * The turns that started in `[start, end)` (epoch ms; the renderer's local
-   * day), across every family of every enabled agent.
+   * day), across every family of every enabled agent. With `want`, also
+   * where that turn is now (`DayActivity.found`).
    */
-  getDay(start: number, end: number): Promise<DayActivity>;
+  getDay(start: number, end: number, want?: DayWant): Promise<DayActivity>;
   /**
    * Annotate a turn of the family `sessionId` belongs to. Written to every
    * member's sidecar under every id the turn has there, so the annotation

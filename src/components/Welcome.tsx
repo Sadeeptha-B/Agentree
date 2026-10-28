@@ -5,7 +5,7 @@ import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
 import { filterSessions, focusFor, ofProvider, railDirs, shownForks, timeOf, type RailDir } from "../list.ts";
 import { Settings } from "./Settings.tsx";
 import { DayView } from "./DayView.tsx";
-import { dayKeyOf, dayTitle, shortDay } from "../day.ts";
+import { dayKeyOf, familyWant, shortDay } from "../day.ts";
 import { ErrorBanner } from "./ErrorBanner.tsx";
 import logoUrl from "../../assets/logo.png";
 
@@ -340,13 +340,8 @@ export function Welcome() {
                     {/* Where this conversation sits in its day, among every other chat. */}
                     <button
                       className="ghost card-day"
-                      title={`Show this conversation in the day view of ${dayTitle(dayKeyOf(s.activeAt))}, among every chat that day`}
-                      onClick={() =>
-                        void showInDay(dayKeyOf(s.activeAt), {
-                          provider: s.provider,
-                          sessions: [s.id, ...(s.forks ?? []).map((f) => f.id)],
-                        })
-                      }
+                      title="Show this conversation's latest turn in the day view, among every chat that day (the day it started, if it ran past midnight)"
+                      onClick={() => void showInDay(dayKeyOf(s.activeAt), familyWant(s))}
                     >
                       ◷ {shortDay(dayKeyOf(s.activeAt))}
                     </button>

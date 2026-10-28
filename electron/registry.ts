@@ -1,9 +1,11 @@
-import { endOf, FORK_POINT_GONE, refOf, resolveForkPoint } from "../shared/render.ts";
+import { activeEndOf, endingAt, endOf, FORK_POINT_GONE, locate, refOf, resolveForkPoint } from "../shared/render.ts";
 import type {
   DayActivity,
   DayChat,
+  DayFound,
   DayRun,
   DayTurn,
+  DayWant,
   ForkPoint,
   ForkResult,
   NodeMeta,
@@ -269,21 +271,25 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
   const turns: DayTurn[] = [];
   const running: DayRun[] = [];
   for (const n of detail.nodes) {
-    if (n.timestamp > 0 && n.timestamp < start && endOf(n) >= start) {
-      running.push({ provider: meta.provider, familyId: meta.id, sessionId: n.sourceSessionId ?? meta.id, start: n.timestamp, end: endOf(n) });
+    const lane = n.sourceSessionId ?? meta.id;
+    if (n.timestamp > 0 && n.timestamp < start && activeEndOf(n) >= start) {
+      running.push({ provider: meta.provider, familyId: meta.id, sessionId: lane, start: n.timestamp, end: activeEndOf(n) });
     }
     if (!(n.timestamp >= start && n.timestamp < end)) continue;
+    const holders = (n.heldBy ?? []).filter((s) => s !== lane);
     turns.push({
       id: n.id,
       ref: refOf(n),
       parentId: n.parentId,
-      sessionId: n.sourceSessionId ?? meta.id,
+      sessionId: lane,
+      ...(holders.length ? { heldBy: holders } : {}),
       familyId: meta.id,
       provider: meta.provider,
       role: n.role,
       preview: previewOf(n),
       timestamp: n.timestamp,
       ...(n.endedAt && n.endedAt > n.timestamp ? { endedAt: n.endedAt } : {}),
+      ...(n.activeUntil && n.activeUntil > endOf(n) ? { activeUntil: n.activeUntil } : {}),
       ...(n.branchKind ? { branchKind: n.branchKind } : {}),
       ...(n.isSidechain ? { isSidechain: true } : {}),
       ...(n.midTurn || n.injected ? { midTurn: true } : {}),
@@ -324,8 +330,9 @@ let dayWindow = "";
  * Every turn that started in `[start, end)`, across the enabled agents. A
  * family is loaded only when its records can reach the window: none of them
  * is newer than `touchedAt`, and none older than `startedAt` (when known).
+ * With `want`, also where that turn is now (`findWant`).
  */
-export function dayActivity(start: number, end: number): DayActivity {
+export function dayActivity(start: number, end: number, want?: DayWant | null): DayActivity {
   if (`${start}:${end}` !== dayWindow || dayParts.size > 500) {
     dayParts.clear();
     dayWindow = `${start}:${end}`;
@@ -335,6 +342,8 @@ export function dayActivity(start: number, end: number): DayActivity {
   const running: DayRun[] = [];
   const seen = new Set<string>();
   const live = new Set<string>();
+  /** The families read on this pass, by provider and every member's id: a want is usually one of them. */
+  const loaded = new Map<string, SessionDetail>();
   for (const p of enabled()) {
     for (const m of guarded(p, () => p.list(), [])) {
       if (m.touchedAt < start || (m.startedAt || 0) >= end) continue;
@@ -344,6 +353,7 @@ export function dayActivity(start: number, end: number): DayActivity {
       if (!part) {
         const detail = guarded(p, () => p.load(m.id), null);
         if (!detail) continue;
+        for (const id of [detail.meta.id, ...detail.members.map((x) => x.id)]) loaded.set(`${p.id}:${id}`, detail);
         part = dayPart(detail, start, end);
         if (key) dayParts.set(key, part);
       }
@@ -360,5 +370,45 @@ export function dayActivity(start: number, end: number): DayActivity {
   }
   for (const key of dayParts.keys()) if (!live.has(key)) dayParts.delete(key);
   turns.sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return { start, end, chats, turns, running };
+  return { start, end, chats, turns, running, ...(want ? { found: findWant(want, turns, loaded) } : {}) };
+}
+
+/**
+ * Where a wanted turn is now. A turn of the day that ends where it did is
+ * it, whatever family it is in now (`endingAt`). Otherwise the answer is in
+ * its family, found through its sessions (`DayWant.sessions`): the end may
+ * now start on another day, the group may have grown, the family may have
+ * been re-rooted. The day's other families are never searched: an id or a
+ * text identity there can be an unrelated chat's.
+ */
+function findWant(want: DayWant, turns: DayTurn[], loaded: Map<string, SessionDetail>): DayFound | null {
+  const p = enabled().find((x) => x.id === want.provider);
+  if (!p) return null;
+  if (want.ref) {
+    const hit = endingAt(
+      turns.filter((t) => t.provider === want.provider),
+      (t) => t.ref,
+      want.ref.point,
+    );
+    if (hit) return { familyId: hit.familyId, id: hit.id, ref: hit.ref, timestamp: hit.timestamp };
+  }
+  const tried = new Set<string>();
+  for (const s of want.sessions) {
+    const detail = loaded.get(`${p.id}:${s}`) ?? guarded(p, () => p.load(s), null);
+    if (!detail || tried.has(detail.meta.id)) continue;
+    tried.add(detail.meta.id);
+    const node = want.ref ? locate(detail.nodes, want.ref) : latestTurn(detail.nodes);
+    if (node) return { familyId: detail.meta.id, id: node.id, ref: refOf(node), timestamp: node.timestamp };
+  }
+  return null;
+}
+
+/** A family's latest-ending turn with a time (`endOf`; the later-starting on a tie). */
+function latestTurn(nodes: TurnNode[]): TurnNode | null {
+  let best: TurnNode | null = null;
+  for (const n of nodes) {
+    if (n.timestamp <= 0) continue;
+    if (!best || endOf(n) > endOf(best) || (endOf(n) === endOf(best) && n.timestamp >= best.timestamp)) best = n;
+  }
+  return best;
 }

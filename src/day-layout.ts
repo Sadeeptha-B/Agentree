@@ -1,4 +1,4 @@
-import { endOf } from "../shared/render.ts";
+import { activeEndOf, endOf } from "../shared/render.ts";
 import type { DayChat, DayRun, DayTurn } from "../shared/types.ts";
 import { chatName, laneKey, turnKey } from "./day.ts";
 
@@ -10,13 +10,14 @@ import { chatName, laneKey, turnKey } from "./day.ts";
  * The axis is compressed time. Spacing follows the clock, capped so one slow
  * reply doesn't stretch the day, and never closer than `MIN_GAP` within a
  * track, so a burst of turns doesn't pile up. A pause of `IDLE_BREAK` or more
- * — nothing running: measured from the latest END of every earlier turn, so
- * an agent working through a long reply is not idle — collapses into a
- * fixed-width break that says how long it was.
+ * with no recorded activity — measured from the latest activity under every
+ * earlier turn (`activeEndOf`: its end, or the tool calls and results that
+ * followed it), so an agent working through a long reply or a tool loop is
+ * not idle — collapses into a fixed-width break that says how long it was.
  *
  * Zoom is time-only: x is scaled by the view, y never is. A lane is as tall
- * as its tracks or its chat's wrapped name, whichever needs more, in screen
- * pixels — so the name is readable whole at any zoom.
+ * as its tracks or its chat's wrapped name (and folder), whichever needs
+ * more, in screen pixels — so the name is readable whole at any zoom.
  */
 
 export const PAD = 40;
@@ -37,31 +38,44 @@ export const LABEL_LINE_H = 16;
 /** Room for a name's text in the column: less the agent dot, the turn count and padding (and ⑂ for a fork). */
 const LABEL_TEXT_W = LABEL_W - 64;
 const FORK_GLYPH_W = 14;
-/** Width of one character of a 12px name, generously: under-measuring would let it overflow its lane. */
+/**
+ * Width of a character of a 12px name, generously: under-measuring would let
+ * it overflow its lane. Most scripts fit in 7px; CJK, Hangul, fullwidth forms
+ * and emoji are drawn a whole em wide.
+ */
 const LABEL_CHAR_W = 7;
+const LABEL_WIDE_W = 12;
+const WIDE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6\p{Extended_Pictographic}]/u;
+const charW = (c: string) => (WIDE.test(c) ? LABEL_WIDE_W : LABEL_CHAR_W);
 
 /**
  * How many lines a chat's name wraps to in the label column, estimated as
  * the tree estimates its boxes (nothing can be measured before it is
- * drawn): words wrap whole, a word longer than a line breaks anywhere.
+ * drawn): words wrap whole, a word longer than a line breaks anywhere — as
+ * the browser breaks CJK, which has no spaces, between any two characters.
  */
 export function labelLines(chat: DayChat): number {
   const width = LABEL_TEXT_W - (chat.parentSessionId ? FORK_GLYPH_W : 0);
-  const per = Math.max(1, Math.floor(width / LABEL_CHAR_W));
+  const space = LABEL_CHAR_W;
   let lines = 1;
   let used = 0;
   for (const word of chatName(chat).split(/\s+/).filter(Boolean)) {
-    let w = word.length;
-    if (used > 0 && used + 1 + w <= per) {
-      used += 1 + w;
+    const chars = [...word].map(charW);
+    const w = chars.reduce((a, b) => a + b, 0);
+    if (used > 0 && used + space + w <= width) {
+      used += space + w;
       continue;
     }
     if (used > 0) lines++;
-    while (w > per) {
-      lines++;
-      w -= per;
+    used = 0;
+    // Too long for a line of its own: broken anywhere, character by character.
+    for (const c of chars) {
+      if (used > 0 && used + c > width) {
+        lines++;
+        used = 0;
+      }
+      used += c;
     }
-    used = w;
   }
   return lines;
 }
@@ -114,7 +128,7 @@ export type DayEdge =
 export interface DayBreak {
   x0: number;
   x1: number;
-  /** Idle time, ms: from the latest end of the turns before it to the next start. */
+  /** Idle time, ms: from the latest recorded activity of the turns before it to the next start. */
   ms: number;
 }
 
@@ -191,9 +205,15 @@ function timeOrder(turns: DayTurn[]): DayTurn[] {
 
 /**
  * `running`: turns from before the window still running in it (`DayRun`).
- * They get no mark, but nothing is idle until they end.
+ * They get no mark, but nothing is idle until they end. `dirs`: each lane's
+ * name is followed by its directory's last folder, on a line of its own.
  */
-export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayRun[] = []): DayLayout {
+export function buildDayLayout(
+  turns: DayTurn[],
+  chats: DayChat[],
+  running: DayRun[] = [],
+  { dirs = false }: { dirs?: boolean } = {},
+): DayLayout {
   const sorted = timeOrder(turns);
   const first = new Map<string, number>();
   for (const t of sorted) if (!first.has(laneKey(t))) first.set(laneKey(t), t.timestamp);
@@ -228,7 +248,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
     const familyStart = i === 0 || ordered[i - 1].familyId !== chat.familyId || ordered[i - 1].provider !== chat.provider;
     if (familyStart && i > 0) y += FAMILY_GAP;
     const tracks = Math.max(1, tails[i].length);
-    const height = LANE_PAD * 2 + Math.max(tracks * TRACK_H, labelLines(chat) * LABEL_LINE_H);
+    const height = LANE_PAD * 2 + Math.max(tracks * TRACK_H, (labelLines(chat) + (dirs ? 1 : 0)) * LABEL_LINE_H);
     lanes.push({ key: laneKey(chat), chat, familyStart, top: y, height, tracks, turns: [] });
     y += height;
   });
@@ -241,7 +261,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
   /** Turns drawn just after a break: where the time labels resume. */
   const resumed = new Set<string>();
   let prev: DayDot | null = null;
-  /** The latest end of every turn so far, in any lane: until then, something was running. */
+  /** The latest recorded activity under every turn so far, in any lane: until then, the agent was working. */
   let busyUntil = Math.max(0, ...running.map((r) => r.end));
   for (const t of drawn) {
     const key = turnKey(t);
@@ -264,7 +284,7 @@ export function buildDayLayout(turns: DayTurn[], chats: DayChat[], running: DayR
     if (held !== undefined) x = Math.max(x, held + MIN_GAP);
     if (idle && prev) breaks.push({ x0: prev.x, x1: x, ms: idle });
     lastX.set(slot, x);
-    busyUntil = Math.max(busyUntil, t.timestamp, t.endedAt ?? 0);
+    busyUntil = Math.max(busyUntil, activeEndOf(t));
     const dot: DayDot = {
       key,
       turn: t,

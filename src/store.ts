@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
-import { childIndex, locate, locateBy, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
-import { dayBounds, filterDay, resolveTarget, todayKey, turnKey, type DayTarget } from "./day.ts";
+import { childIndex, locate, newestLeaf, refOf, toNodeMap, type NodeMap } from "../shared/render.ts";
+import { dayBounds, dayKeyOf, filterDay, foundKey, todayKey, turnKey, wantOf } from "./day.ts";
 import { chainHolding } from "./tree-layout.ts";
 import type {
   DayActivity,
+  DayWant,
   NodeId,
   NodeRef,
   NodeMeta,
@@ -39,25 +40,30 @@ interface State {
   dayLoading: boolean;
   /**
    * The day view's selected turn (`turnKey`). A refresh carries it by the
-   * turn as drawn (`DayTurn.ref`, `locateBy`), as a tree reload does: a split
-   * group, a new owner or a re-rooted family doesn't move it to another range.
+   * turn as drawn (`wantOf`: its `NodeRef` and the sessions holding it),
+   * resolved in its whole family by the worker, as a tree reload does: a
+   * split group, a new owner or a re-rooted family doesn't move it to
+   * another range or another chat. One that now starts on another day is
+   * deselected; a refresh never changes the day.
    */
   daySelected: string | null;
   /** The day view's pan and zoom when it last closed (a tree opened from it), to come back to. */
   dayViewport: { day: string; tx: number; ty: number; k: number } | null;
   /**
    * A chat asked for from another view (`showInDay`), selected once its
-   * day's turns arrive; `day` is the day it was asked for on.
+   * day's turns arrive; `day` is the day it is expected on.
    */
-  dayTarget: (DayTarget & { day: string }) | null;
+  dayTarget: (DayWant & { day: string }) | null;
   /** Show another day. Its turns load with `loadDay`. */
   setDay: (key: string) => void;
   /**
-   * Switch to the day view on `day` and select `target` there: a list card's
-   * conversation, or the tree's selected turn (the tree closes). Filters that
+   * Switch to the day view and select `target`: a list card's conversation
+   * (its latest-ending turn), or the tree's selected turn (the tree closes).
+   * `day` is where it is expected; one that starts on another day — a turn
+   * that ran past midnight — is shown on that day instead. Filters that
    * would hide it are cleared. A fresh fit brings it into view.
    */
-  showInDay: (day: string, target: DayTarget) => Promise<void>;
+  showInDay: (day: string, target: DayWant) => Promise<void>;
   /** (Re)load the current day's turns. A result for a day the user has left is dropped. */
   loadDay: () => Promise<void>;
 
@@ -286,40 +292,61 @@ export const useStore = create<State>((set, get) => ({
 
   loadDay: () =>
     dayGate(async () => {
-      const day = get().day;
-      const { start, end } = dayBounds(day);
-      set({ dayLoading: true });
-      try {
-        const activity = await api.getDay(start, end);
-        // The user moved to another day meanwhile; the gate runs again for it.
-        if (get().day !== day) return;
-        const target = get().dayTarget;
-        if (target?.day === day) {
-          // A chat asked for from the list or a tree: shown even if the
-          // filters would hide it.
-          const found = resolveTarget(activity, target);
-          const { filter: query, cwdFilter: cwd, providerFilter: provider } = get();
-          const hidden =
-            !!found && !filterDay(activity, { query, cwd, provider }).turns.some((t) => turnKey(t) === turnKey(found));
-          set({
-            dayActivity: activity,
-            daySelected: found ? turnKey(found) : null,
-            dayTarget: null,
-            ...(hidden ? { filter: "", cwdFilter: "", providerFilter: "" as const } : {}),
-          });
-          return;
-        }
+      // A chat asked for that starts on another day moves there once.
+      for (let hop = 0; hop < 2; hop++) {
+        const day = get().day;
+        const { start, end } = dayBounds(day);
+        const target = get().dayTarget?.day === day ? get().dayTarget : null;
         const sel = get().daySelected;
         const was = sel ? get().dayActivity?.turns.find((t) => turnKey(t) === sel) : undefined;
-        // Node ids are unique per agent at most: look among that agent's turns.
-        const now = was
-          ? locateBy(activity.turns.filter((t) => t.provider === was.provider), (t) => t.ref, was.ref)
-          : null;
-        set({ dayActivity: activity, daySelected: now ? turnKey(now) : null });
-      } catch (e) {
-        if (get().day === day) set({ error: String(e) });
-      } finally {
-        set({ dayLoading: false });
+        const want: DayWant | undefined = target
+          ? { provider: target.provider, sessions: target.sessions, ...(target.ref ? { ref: target.ref } : {}) }
+          : was
+            ? wantOf(was)
+            : undefined;
+        set({ dayLoading: true });
+        try {
+          const activity = await api.getDay(start, end, want);
+          // The user moved to another day meanwhile; the gate runs again for it.
+          if (get().day !== day) return;
+          const key = want ? foundKey(activity, want.provider, activity.found) : null;
+          if (target) {
+            const found = activity.found;
+            if (found && !key && hop === 0) {
+              const there = dayKeyOf(found.timestamp);
+              if (there !== day) {
+                set({
+                  day: there,
+                  dayActivity: null,
+                  daySelected: null,
+                  dayTarget: { ...target, sessions: [...new Set([found.familyId, ...target.sessions])], ref: found.ref, day: there },
+                });
+                continue;
+              }
+            }
+            // A chat asked for from the list or a tree: shown even if the
+            // filters would hide it.
+            const { filter: query, cwdFilter: cwd, providerFilter: provider } = get();
+            const hidden = !!key && !filterDay(activity, { query, cwd, provider }).turns.some((t) => turnKey(t) === key);
+            set({
+              dayActivity: activity,
+              daySelected: key,
+              dayTarget: null,
+              ...(hidden ? { filter: "", cwdFilter: "", providerFilter: "" as const } : {}),
+            });
+            return;
+          }
+          // A turn picked while this load was out stands while it is drawn.
+          const now = get().daySelected;
+          const kept = now === sel ? key : now && activity.turns.some((t) => turnKey(t) === now) ? now : null;
+          set({ dayActivity: activity, daySelected: kept });
+          return;
+        } catch (e) {
+          if (get().day === day) set({ error: String(e) });
+          return;
+        } finally {
+          set({ dayLoading: false });
+        }
       }
     }),
 
