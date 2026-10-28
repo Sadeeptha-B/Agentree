@@ -272,16 +272,22 @@ records). Codex: items other than messages, within the node's own turn.
 Copilot: non-message activity events after it (tool runs, `assistant.turn_end`).
 A drawn turn's own records never count for the turn before it, so a reply
 isn't kept busy until the next prompt. A merged node takes the latest of its
-parts'. Activity is a fact about a physical copy, not about the drawn node:
-when stitching draws a shared turn once, each other copy keeps its own on its
-occurrence (`occurrences[].activeUntil`), the work its session recorded under
-the turn after copying it (a fork that went on with a tool run). A copy's own
-records, the re-stamped last one included, are its start and end, never
-activity, so copied history adds none. Codex needs no such rule: a fork's
-work after a shared turn is a turn of its own. Only the day view's idle time
-reads any of this (`activeEndOf`, and the occurrences as runs); display,
-"latest" and fork points never do
-([day-view round 4, finding 3](archive/day-view/review-findings-day-view-round-4.md#dv4-3)).
+parts'. Activity is a fact about a physical copy, not about the drawn node.
+Each parse keeps the times of the activity records under each node, leaving
+out the node's own records, so a copy's re-stamped record is no activity
+(Claude `Parsed.activity`, Copilot `ParsedSession.activity`). When stitching
+draws a shared turn once, the other copy keeps, on its occurrence, the work
+its session recorded under the turn: the activity times its source (the
+parent's copy) doesn't have, as `occurrences[].activeFrom`–`activeUntil`.
+Copiers keep each record's time, so copied history, however late it ends
+(Copilot's fork copies through the turn's closing events), is shared and adds
+none, and the work starts at its own first record, not at the turn's start
+(a fork copied days later can't cover the days between). Codex needs no such
+rule: its forks share turns by reference, and work after a shared turn is a
+turn of its own. Only the day view's idle time reads any of this
+(`activeEndOf`, and the occurrences as runs); display, "latest" and fork
+points never do ([day-view round 4, finding 3](archive/day-view/review-findings-day-view-round-4.md#dv4-3);
+[round 5, finding 1](archive/day-view/review-findings-day-view-round-5.md#dv5-1)).
 
 ### Identity scheme and compatibility
 
@@ -1013,8 +1019,9 @@ build; nothing about parsing, stitching or identity is specific to it.
   `running` (`DayRun`: lane, start, end): nodes that started earlier and
   whose recorded activity (`activeEndOf`) reaches `start`, so a tool run
   past midnight counts too; and a member's work under its copy of a shared
-  turn (an occurrence's `activeUntil`), in **that member's** lane, from the
-  turn's start. No mark, but the day isn't idle while they run (see
+  turn (an occurrence's `activeFrom`–`activeUntil`), in **that member's**
+  lane, from its own first record. No mark, but the day isn't idle while
+  they run (see
   Layout). Their chat is listed, so the filters apply to them as to that
   lane; a lane is drawn only for a chat with turns.
 - **Which families load.** No record of a family is newer than `touchedAt`
@@ -1093,7 +1100,8 @@ build; nothing about parsing, stitching or identity is specific to it.
   target pending (`dayTarget`) until a load of that day arrives — whichever
   load does, since the gate may coalesce it with the view's own. The
   worker resolves it as above. A turn found starting on another day moves
-  the view there once and is selected: `activeAt` names the day the
+  the view there and is selected, once per request (the moved target
+  carries `moved`, so a newer request gets its own move): `activeAt` names the day the
   activity ended, a turn the day it started, and they differ for a turn
   that worked past midnight
   ([round 3](archive/day-view/review-findings-day-view-round-3.md#dv3-4)).
@@ -1485,8 +1493,12 @@ dangling parent, one root per path), not session counts.
   head; a conversation's latest-ending turn; and `activeUntil` from Copilot
   tool runs and `turn_end`, a Codex command within its turn, a run past
   midnight as `running`, and a Copilot fork's work under a reply it shares
-  as a run in the fork's lane (within a day and past midnight; a Claude
-  fork's re-stamped copy as none). `test/endpoints.test.ts`: Claude tool results and
+  as a run in the fork's lane from its own first record (within a day, and
+  after midnight under an evening reply). Copies that add nothing give no
+  run: a Claude fork's re-stamped copy, and a fresh fork made by
+  Agentree's own Copilot writer, whose copy ends with the parent's closing
+  events. A Claude fork copied two days after the reply runs from its own
+  tool result, not from the reply's day. `test/endpoints.test.ts`: Claude tool results and
   tool-only replies count for the reply, the next prompt doesn't.
   `src/day-layout.test.ts`: tracks, breaks measured from the latest
   activity (a long reply, a tool run, one running in from the day before,
@@ -1506,7 +1518,8 @@ dangling parent, one root per path), not session counts.
   meanwhile asked for again by its drawn end, across a split), `showInDay`
   from a tree (the tree closes, hiding filters give way, a target for a day
   left meanwhile is dropped), from a card whose latest turn started the day
-  before, and twice for one day (the newer request stands), stale day
+  before, twice for one day (the newer request stands), and a newer request
+  making its own move to its turn's day after an older one had moved, stale day
   results, and
   the day markup (lane folders only under All conversations, no paths in
   the chat list, the ◷ card button, the empty day's latest turn).

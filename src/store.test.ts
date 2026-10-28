@@ -16,7 +16,7 @@ const api = vi.hoisted(() => ({
 vi.mock("./api.ts", () => ({ api }));
 
 const { useStore } = await import("./store.ts");
-const { dayBounds } = await import("./day.ts");
+const { dayBounds, dayKeyOf } = await import("./day.ts");
 
 const node = (
   id: string,
@@ -591,6 +591,30 @@ describe("day view state", () => {
     // The answer about A wasn't adopted; B was asked for as drawn, through b2.
     expect((api.getDay.mock.calls[2][2] as DayWant).ref).toEqual(t("b", "b2").ref);
     expect(useStore.getState().daySelected).toBe("claude:P:b2");
+  });
+
+  it("lets a newer request move to the day its turn started, though the older one had moved already", async () => {
+    // A asked for on Oct 3 starts on Oct 2; B, asked for on Oct 2 while A
+    // reloads there, started on Oct 1.
+    const want = (s: string): DayWant => ({ provider: "claude", sessions: [s] });
+    const oct1 = activity("2026-10-01", ["b1"]);
+    const at2 = activity("2026-10-02", ["a1"]).turns[0].timestamp;
+    const b1 = foundAt("b1", oct1.turns[0].timestamp);
+    api.getDay.mockResolvedValueOnce(withFound(activity("2026-10-03", []), foundAt("a1", at2)));
+    let answerA!: (a: DayActivity) => void;
+    api.getDay.mockReturnValueOnce(new Promise((r) => (answerA = r)));
+    api.getDay.mockResolvedValueOnce(withFound(activity("2026-10-02", []), b1));
+    api.getDay.mockResolvedValueOnce(withFound(oct1, b1));
+    api.getDay.mockResolvedValueOnce(withFound(oct1, b1));
+    const a = useStore.getState().showInDay("2026-10-03", want("A"));
+    await vi.waitFor(() => expect(api.getDay).toHaveBeenCalledTimes(2));
+    useStore.getState().set({ listMode: "list" });
+    const b = useStore.getState().showInDay("2026-10-02", want("B"));
+    answerA(withFound(activity("2026-10-02", ["a1"]), foundAt("a1", at2)));
+    await Promise.all([a, b]);
+    const asked = api.getDay.mock.calls.map((c) => [dayKeyOf(c[0] as number), (c[2] as DayWant).sessions[0]]);
+    expect(asked.slice(0, 4)).toEqual([["2026-10-03", "A"], ["2026-10-02", "P"], ["2026-10-02", "B"], ["2026-10-01", "P"]]);
+    expect(useStore.getState()).toMatchObject({ day: "2026-10-01", daySelected: "claude:P:b1", dayTarget: null, error: null });
   });
 
   it("lets a newer request for the same day stand over an older one's answer", async () => {

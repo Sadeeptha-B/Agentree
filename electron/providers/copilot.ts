@@ -91,6 +91,8 @@ interface ParsedSession {
   nodes: TurnNode[];
   /** For each turn, the index of the LAST event line belonging to it. */
   endLine: number[];
+  /** Times of the activity events after each turn, by node id: what stitching tells copied history from a fork's own work. */
+  activity: Map<string, number[]>;
   touchedAt: number;
   /** Oldest timestamp on any event; 0 if none carried one. */
   startedAt: number;
@@ -117,6 +119,7 @@ function parseEvents(dir: string): ParsedSession | null {
 
   const nodes: TurnNode[] = [];
   const endLine: number[] = [];
+  const after = new Map<string, number[]>();
   let touchedAt = 0;
   let startedAt = 0;
   let activeAt = 0;
@@ -143,7 +146,12 @@ function parseEvents(dir: string): ParsedSession | null {
     // still working on it (`TurnNode.activeUntil`). The next drawn message
     // isn't: a reply must not stay busy until the user's next prompt.
     const last = nodes[nodes.length - 1];
-    if (activity && !drawn && last && ts > (last.activeUntil ?? last.timestamp)) last.activeUntil = ts;
+    if (activity && !drawn && last && ts > 0) {
+      const list = after.get(last.id);
+      if (list) list.push(ts);
+      else after.set(last.id, [ts]);
+      if (ts > (last.activeUntil ?? last.timestamp)) last.activeUntil = ts;
+    }
 
     if (ev.type === "user.message" || ev.type === "assistant.message") {
       if (!drawn) continue;
@@ -165,7 +173,7 @@ function parseEvents(dir: string): ParsedSession | null {
     }
   }
 
-  return { ws, nodes, endLine, touchedAt, startedAt, activeAt };
+  return { ws, nodes, endLine, activity: after, touchedAt, startedAt, activeAt };
 }
 
 const parses = new Map<string, { mtimeMs: number; size: number; parsed: ParsedSession }>();
@@ -261,6 +269,7 @@ function stitched(fam: Family): TurnNode[] {
       sessionId: m.ws.id,
       parentSessionId: m.ws.id === fam.rootId ? null : m.ws.forkedFrom,
       nodes,
+      activity: p.activity,
     });
   }
   return mergeSameRoleRuns(stitchFamily(members));
