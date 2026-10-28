@@ -16,6 +16,7 @@ Current implementation context, consolidated on 2026-10-27 from the engineering 
 - [Chains](#chains) and [layout](#layout)
 - [Live view and family lifecycle](#live-view)
 - [List identity, membership and activity](#welcome-screen)
+- [Day view](#day-view)
 - [Settings implementation](#settings)
 - [Load and caches](#not-dying-under-load)
 - [Annotations and persisted data](#annotations)
@@ -46,10 +47,10 @@ thread**.
 assets/                        logo.png (transparent), sized variants, logo.icns
 electron/main.ts               BrowserWindow + ipcMain handlers; forwards store calls to the backend
 electron/preload.ts            contextBridge → window.agentree, and nothing else
-electron/backend.ts            the table of store calls the worker serves (list, load, annotate, fork, health, watch targets)
+electron/backend.ts            the table of store calls the worker serves (list, load, day, annotate, fork, health, watch targets)
 electron/worker.ts             worker-thread entry serving backend.ts (bundled as worker.cjs)
 electron/backend-client.ts     host-side handle on the worker: async proxy, restart on crash
-electron/registry.ts           Provider interface; routes by "who owns this id"; health; annotate; watch targets
+electron/registry.ts           Provider interface; routes by "who owns this id"; health; annotate; watch targets; a day's turns
 electron/paths.ts              every root, lazily: environment variable > settings > default
 electron/settings.ts           ~/.agentree/settings.json: validated per field, cached by stat
 electron/shell.ts              resume argv per harness + commands in the host shell's syntax (PowerShell / POSIX)
@@ -71,7 +72,8 @@ electron/watch.ts              live view: fs.watch + stat polling of targets the
 shared/types.ts                node/session/health types + the IPC contract
 shared/render.ts               lineage walks, branch counting, token math
 src/tree-layout.ts             chain compression + tidy layout
-src/components/                TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome · Settings
+src/day.ts, src/day-layout.ts  day view: local days, filters; lanes, tracks and the compressed time axis
+src/components/                TreeCanvas (the SVG) · NodePanel · Toolbar · Welcome · DayView · Settings
 src/list.ts                    welcome-list rules: filters, rail, search, fork names
 vscode-ext/                    VS Code extension: same providers, same renderer
 test/                          vitest suites, synthetic fixtures (test/fixtures/make-fixtures.mjs), a fake codex app-server
@@ -967,6 +969,68 @@ The tree follows the transcripts on disk.
     one reloaded quiet fork floated a September family to the top.
   - `touchedAt`, the newest timestamp on **any** record ("last file
     change"), shown in the card's tooltip.
+  - `startedAt`, the **oldest** timestamp on any record of any member (0
+    when unknown). Not shown; only the [day view](#day-view) uses it.
+
+## Day view
+
+The welcome screen's **List | Day** switch (`listMode` in the store, kept in
+the remembered `view` as `mode`) shows one local calendar day's turns across
+every family, on one timeline. It projects the trees the providers already
+build; nothing about parsing, stitching or identity is specific to it.
+
+- **One worker call.** The renderer turns the day into `[start, end)` from
+  local midnights (`dayBounds` in `src/day.ts`: by the calendar, so a DST day
+  is 23 or 25 hours) and calls `getDay(start, end)`. `dayActivity` in
+  `registry.ts` lists each **enabled** provider's families, loads those whose
+  records can reach the window, and keeps the nodes whose **start**
+  (`timestamp`) falls in it — a node belongs to the day it started, like the
+  list's dates. A disabled provider is never listed or loaded (tested).
+- **Which families load.** No record of a family is newer than `touchedAt`
+  or older than `startedAt`, so only families with `touchedAt >= start` and
+  `startedAt < end` are loaded. `startedAt` is a *narrowing bound only*: each
+  provider takes the minimum record timestamp per file/page (Claude: over all
+  copies of a moved session; Codex: over the family's pages; Copilot: over
+  members), and `oldest()` returns 0 — load it anyway — when any part is
+  unknown. A fixture test checks it is no later than any node in every
+  fixture family of all three providers. On the target machine (158
+  families): cold 70–370 ms per day after a cold list, warm ~18 ms.
+- **Cache.** The day refreshes on every welcome-watch event, which during a
+  live session is every reply. Projections are cached per family by
+  `provider:id:touchedAt:activeAt:startedAt:nodeCount:members`, and the
+  whole cache is dropped when the window or the configured data locations
+  change, so only the family being written reloads. **Annotations are not
+  projected** (no label, star or dead-end mark in the day view): a sidecar
+  write doesn't move any key part, so a cached annotation could go stale.
+- **Lanes are owners, not holders.** A turn's lane is its
+  `sourceSessionId`, the session the tree draws it in; a shared prefix is
+  drawn once, as in the tree. Lanes are keyed `provider:sessionId` and turns
+  `provider:familyId:nodeId`, since node ids are unique only per family.
+  `DayChat` carries the member's parent and its title for "forked from".
+  **Open in tree** goes through `openSession(family, { focus: lane, select:
+  node })`: the turn is selected while the family still has it (else the
+  usual tip), the member is focused for Open/Resume, and the collapsed chain
+  hiding the turn is opened (`chainHolding`). Esc returns to the same day
+  and turn.
+- **Layout** (`src/day-layout.ts`, fuzzed like the tree's): families in order
+  of their first turn of the day, a root's lane first. Inside a lane, tracks
+  as in a git log: a turn continues the track its parent ends, anything else
+  (a rewind, an edited prompt, a parent before the day while the lane already
+  has a track) opens one. One x-axis for all lanes, in time order (turns
+  stamped the same instant parent first — Codex writes a prompt and its reply
+  in one second): steps follow the clock (6 px/min, capped at 120 px), never
+  closer than 16 px within a track, and a pause of 20 minutes or more becomes
+  a fixed 56 px break labelled with its length. Time labels: the first turn,
+  each turn after a break, and local hours interpolated between turns.
+  Edges into a fork or a prompt edit, or across lanes, are dashed like the
+  tree's; a parent outside the day (or the filters) gets a short dotted
+  lead-in instead of a dangling edge.
+- **Filters** are the welcome screen's: agent chips, the directory rail
+  (a lane's **own** cwd, so a fork made in another repo shows there) and the
+  search (chat title, family title, ids, cwd). Keys: ←/→ within a chat, ↑/↓
+  to the adjacent lane's turn nearest in time, Enter opens, Esc deselects.
+- A turn's preview is its first 400 characters, whitespace folded; the tree
+  has the rest.
 
 ## Settings
 
@@ -1255,7 +1319,19 @@ dangling parent, one root per path), not session counts.
   whitespace-only differences stay distinct, scheme-2 literals are
   recognised; text-keyed stitching keeps indentation variants apart.
 - **Registry**: no duplicate list entries; watch discovery never invokes a
-  disabled provider. **Settings**: no view kept while remembering is off.
+  disabled provider. **Settings**: no view kept while remembering is off;
+  the remembered list-or-day mode round-trips and an unknown one is dropped.
+- **Day view** (`test/day.test.ts`): `startedAt` bounds every fixture
+  family's nodes (Claude, Codex, and a synthetic Copilot session); exact
+  turns and owner lanes for a Claude fork family; a half-open window; a
+  conversation split at midnight keeps its cross-day parent; families outside
+  the window aren't loaded and an unchanged one isn't reloaded; a disabled
+  agent is never asked. `src/day-layout.test.ts`: tracks, breaks, ticks,
+  fork/edit/lead edges, same-instant ordering, navigation, and 300 random
+  days with no overlapping turns and x in time order. `src/day.test.ts`:
+  local day bounds across DST and month ends, and the filters. The store
+  and welcome tests cover a turn opened from the day view (chain opened,
+  member focused), stale day results, and the day markup.
 - **Launch environment:** the fake app-server reports the `CODEX_HOME` it
   was started with — unset by default, the saved home when only a setting
   names it, the variable when that is set; resume commands and terminal

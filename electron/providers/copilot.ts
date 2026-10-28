@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { assignTips, childIndex, copyHolders, countBranchPoints, forkSummaries } from "../../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, forkSummaries, oldest } from "../../shared/render.ts";
 import type {
   ForkResult,
   MemberInfo,
@@ -92,6 +92,8 @@ interface ParsedSession {
   /** For each turn, the index of the LAST event line belonging to it. */
   endLine: number[];
   touchedAt: number;
+  /** Oldest timestamp on any event; 0 if none carried one. */
+  startedAt: number;
   /** Newest conversational event (`ACTIVITY`); 0 if none. */
   activeAt: number;
 }
@@ -116,6 +118,7 @@ function parseEvents(dir: string): ParsedSession | null {
   const nodes: TurnNode[] = [];
   const endLine: number[] = [];
   let touchedAt = 0;
+  let startedAt = 0;
   let activeAt = 0;
   const lines = raw.split("\n");
 
@@ -129,6 +132,7 @@ function parseEvents(dir: string): ParsedSession | null {
     }
     const ts = ev.timestamp ? Date.parse(ev.timestamp) : 0;
     if (ts > touchedAt) touchedAt = ts;
+    if (ts > 0 && (!startedAt || ts < startedAt)) startedAt = ts;
     if (ts > activeAt && ev.type && ACTIVITY.test(ev.type)) activeAt = ts;
 
     if (ev.type === "user.message" || ev.type === "assistant.message") {
@@ -155,7 +159,7 @@ function parseEvents(dir: string): ParsedSession | null {
     }
   }
 
-  return { ws, nodes, endLine, touchedAt, activeAt };
+  return { ws, nodes, endLine, touchedAt, startedAt, activeAt };
 }
 
 const parses = new Map<string, { mtimeMs: number; size: number; parsed: ParsedSession }>();
@@ -269,11 +273,13 @@ function metaFor(fam: Family): SessionMeta | null {
   const nodes = stitched(fam);
   let activeAt = 0;
   let touchedAt = 0;
+  const starts: number[] = [];
   for (const m of fam.members) {
     const p = parsed(m.dir);
     if (!p) continue;
     activeAt = Math.max(activeAt, p.activeAt || p.touchedAt);
     touchedAt = Math.max(touchedAt, p.touchedAt);
+    starts.push(p.startedAt);
   }
 
   const firstUser = rootParsed.nodes.find((n) => n.role === "user");
@@ -290,6 +296,7 @@ function metaFor(fam: Family): SessionMeta | null {
     title,
     activeAt,
     touchedAt,
+    startedAt: oldest(starts),
     nodeCount: nodes.length,
     branchPoints: countBranchPoints(childIndex(nodes)),
     resumeCommand: resumeCmd(fam.rootId, rootMember.ws.cwd),

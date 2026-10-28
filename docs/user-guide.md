@@ -23,7 +23,7 @@ This guide owns user workflows, configuration and limitations. The
 
 - [Launch](#1-get-it-running)
 - [Tree legend](#2-the-idea-in-one-picture)
-- [List, tree and panel](#3-a-quick-tour)
+- [List, day view, tree and panel](#3-a-quick-tour)
 - [Everyday workflows](#4-everyday-workflows)
 - [Fork restrictions](#5-good-to-know)
 - [Settings and data locations](#settings-and-data-locations)
@@ -154,6 +154,49 @@ The list updates live. Start a chat in VS Code and it appears within a moment.
 A quiet Codex fork uses its creation time until it has conversational activity;
 reloading it does not by itself move the family to the top. Archived bases can
 still supply history to live forks even when all-archived families are hidden.
+
+### The day view
+
+The **List | Day** switch beside the search box turns the list into one day's
+timeline: every turn started that day (your local calendar day), in every
+conversation, on one graph.
+
+```
+ ◀ [10/28/2026] ▶ today   Wed, Oct 28, 2026   35 turns · 5 chats
+ ┌──────────────────────┬─────────────────────────────────────────┬────────────┐
+ │                      │ 07:41      ░ 09:01              10:00   │ Chats this │
+ │ ● Review modernize 8 │ ●○─●○──●○  ░                     ●○     │ day        │
+ │ ● Personal site   20 │            ░ ●○●○●○ ●○ ●○●○ ●○  ●○●○    │  …         │
+ │ ● Daily graph   ⑂  3 │            ░                 ╌╌╌╌●○  ●  │            │
+ └──────────────────────┴─────────────────────────────────────────┴────────────┘
+```
+
+- **One lane per chat.** A fork has its own lane under the conversation it
+  came from, joined to the turn it was forked at by a dashed line. A turn
+  two chats share appears once, in the chat that owns it, as in the tree.
+  A second branch inside one chat (an edited prompt, a rewind) gets its own
+  track in that lane.
+- **Colour is the agent** (Claude clay, Codex teal, Copilot blue); a
+  **filled dot is your prompt**, a **ring is the agent's turn**.
+- **Time runs left to right on one axis for every lane**: turns drawn one
+  above the other happened at about the same time. Pauses of 20 minutes or
+  more are drawn as a short shaded break labelled with their length, and a
+  burst of turns keeps a minimum spacing, so the axis is to scale only
+  between breaks. A short dotted lead-in means the turn continues one from
+  an earlier day.
+- **Switch chats:** click a turn or a chat's name (it selects that chat's
+  latest turn), or use the keys: **←/→** the previous/next turn in the chat,
+  **↑/↓** the chat above/below, at its turn nearest in time. The card on the
+  right shows the turn's chat, directory, time and the start of its text.
+- **Open in tree** (or **Enter**, or double-click) opens that conversation's
+  tree focused on that chat, with the turn selected; **Esc** comes back to
+  the same day.
+- **◀ ▶**, the date box and **today** change the day. An empty day offers a
+  jump to the most recent day with activity.
+- The directory rail, the agent chips and the search narrow the day view as
+  they narrow the list (by each chat's own directory, title or id). With
+  “Remember view” on, Agentree reopens in the view you left it in, on today.
+- It updates live, like the list.
 
 ### The tree
 
@@ -354,7 +397,7 @@ fall back independently; a malformed JSON file falls back to defaults.
 | Sort / `sortBy` | `"active"` | `"active"` dates/sorts by messages and tools; `"touched"` includes all record timestamps, bookkeeping included. Also switch beside the list count |
 | Agents / `providers` | Claude, Codex and Copilot enabled | A disabled agent's history isn't read or watched at all: not listed, opened, forked or health-checked. Chips only filter the current list |
 | Archived Codex / `showArchivedCodex` | `false` | Include families whose every thread is archived. Archived bases of live forks are read either way |
-| Remember view / `rememberView` | `true` | Save compress-chains, directory and agent filters in `view`. Free-text search is not remembered. Turning it off clears the saved view, and none is saved while it is off |
+| Remember view / `rememberView` | `true` | Save compress-chains, directory and agent filters, and list-or-day, in `view`. Free-text search is not remembered. Turning it off clears the saved view, and none is saved while it is off |
 | Open fresh fork / `openForkInChat` | Unset: on in VS Code, off on desktop | Automatically open a successful Claude/Codex fork in the chat panel. Explicit `true`/`false` overrides the host default; no native panel exists for Copilot CLI |
 | Data/binary paths / `paths` | Unset; defaults below | `claudeConfigDir`, `codexHome`, `copilotHome`, `codexBin`; environment values override them |
 | Desktop update check / `updateCheck` | `true` | Check at the next desktop launch; the extension uses VS Code's extension-update mechanism |
@@ -463,6 +506,9 @@ findings are resolved. Supported-scope restrictions and evidence limits:
   unsupported. Copilot has no per-turn token counts. Subagent turns have no
   separate lane; Claude sidechains that are drawn are dimmed, while Codex's
   plumbing/subagent sessions are hidden.
+- The day view shows no labels, stars or dead-end marks, and only the start
+  of each turn's text; open the turn in its tree for those. A turn belongs to
+  the day it started on.
 - The desktop app has no packaged installer. Detailed future scope and
   verification follow-ups live in the [remaining-work list](roadmap.md).
 
@@ -490,6 +536,7 @@ findings are resolved. Supported-scope restrictions and evidence limits:
 Open:            Ctrl/Cmd+Shift+P → "Agentree: Open Conversation Trees"
 Find:            agent chip + directory + title/fork-name search
 Sort:            click "by last activity / last file change" beside the count
+Day view:        List | Day switch · ←/→ within a chat · ↑/↓ other chats · Enter = open in tree
 Navigate:        drag · scroll-zoom · fit · Esc = back to list
 Unfold turns:    click a dotted ⋮ n segment
 Lines:           solid = same session · long dash = fork / edited branch

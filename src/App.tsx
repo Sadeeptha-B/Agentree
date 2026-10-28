@@ -8,7 +8,7 @@ import { NodePanel } from "./components/NodePanel.tsx";
 import { ErrorBanner } from "./components/ErrorBanner.tsx";
 
 export function App() {
-  const { session, boot, error, set, close, reloadSession, refreshSessions, settingsRev } = useStore();
+  const { session, boot, error, set, close, reloadSession, refreshSessions, loadDay, settingsRev } = useStore();
   const sessionId = session?.meta.id ?? null;
 
   useEffect(() => {
@@ -17,14 +17,16 @@ export function App() {
 
   // Live view: follow the transcript on disk. With a session open we watch its
   // family's folders; on the welcome screen every root, so a conversation
-  // started in another terminal shows up on its own. A settings change
-  // re-subscribes: the targets are resolved once, and a root may have moved.
+  // started in another terminal shows up on its own, in the list or the day
+  // view. A settings change re-subscribes: the targets are resolved once, and
+  // a root may have moved.
   useEffect(() => {
     return api.watch(sessionId, () => {
-      if (sessionId) void reloadSession();
-      else void refreshSessions();
+      if (sessionId) return void reloadSession();
+      void refreshSessions();
+      if (useStore.getState().listMode === "day") void loadDay();
     });
-  }, [sessionId, reloadSession, refreshSessions, settingsRev]);
+  }, [sessionId, reloadSession, refreshSessions, loadDay, settingsRev]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

@@ -1,10 +1,11 @@
 // Lives in src/ (not test/) so it type-checks with the renderer's DOM config.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { MemberInfo, SessionDetail, SettingsState, TurnNode } from "../shared/types.ts";
+import type { DayActivity, MemberInfo, SessionDetail, SettingsState, TurnNode } from "../shared/types.ts";
 import { actionTarget } from "../shared/render.ts";
 
 const api = vi.hoisted(() => ({
   getSession: vi.fn(),
+  getDay: vi.fn(),
   listSessions: vi.fn(async () => []),
   providerHealth: vi.fn(async () => []),
   patchNode: vi.fn(async (_sessionId: string, _nodeId: string, _patch: unknown) => {}),
@@ -15,6 +16,7 @@ const api = vi.hoisted(() => ({
 vi.mock("./api.ts", () => ({ api }));
 
 const { useStore } = await import("./store.ts");
+const { dayBounds } = await import("./day.ts");
 
 const node = (
   id: string,
@@ -117,6 +119,12 @@ beforeEach(() => {
     focus: null,
     error: null,
     annotationError: null,
+    expanded: new Set(),
+    compress: true,
+    listMode: "list",
+    day: "2026-10-28",
+    dayActivity: null,
+    daySelected: null,
   });
 });
 
@@ -168,16 +176,30 @@ describe("renderer store lifecycle", () => {
   });
 
   it("restores remembered view state at launch, and saves it again when it changes", async () => {
-    const remembered = settingsState(true, { compress: false, cwdFilter: "c:/work", providerFilter: "codex" });
+    const remembered = settingsState(true, { compress: false, cwdFilter: "c:/work", providerFilter: "codex", mode: "day" });
     api.getSettings.mockResolvedValueOnce(remembered);
     api.setSettings.mockResolvedValue(remembered);
     vi.useFakeTimers();
     try {
       await useStore.getState().boot();
-      expect(useStore.getState()).toMatchObject({ compress: false, cwdFilter: "c:/work", providerFilter: "codex" });
+      expect(useStore.getState()).toMatchObject({
+        compress: false,
+        cwdFilter: "c:/work",
+        providerFilter: "codex",
+        listMode: "day",
+      });
       useStore.getState().set({ providerFilter: "" });
       await vi.advanceTimersByTimeAsync(600);
-      expect(api.setSettings).toHaveBeenCalledWith({ view: { compress: false, cwdFilter: "c:/work", providerFilter: "" } });
+      expect(api.setSettings).toHaveBeenCalledWith({
+        view: { compress: false, cwdFilter: "c:/work", providerFilter: "", mode: "day" },
+      });
+      // Switching back to the list is remembered too.
+      api.setSettings.mockClear();
+      useStore.getState().set({ listMode: "list" });
+      await vi.advanceTimersByTimeAsync(600);
+      expect(api.setSettings).toHaveBeenCalledWith({
+        view: { compress: false, cwdFilter: "c:/work", providerFilter: "", mode: "list" },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -378,5 +400,90 @@ describe("renderer store lifecycle", () => {
     await useStore.getState().patch("p-a1", { label: undefined });
     expect(api.patchNode).toHaveBeenCalledWith("P", "p-a1", { label: null });
     expect(JSON.parse(JSON.stringify(api.patchNode.mock.calls[0][2]))).toEqual({ label: null });
+  });
+});
+
+describe("day view state", () => {
+  /** Q1 → A1 → Q2 → A2 → Q3 → A3: everything between the root and the leaf collapses into one chain. */
+  const linear = detail(
+    "P",
+    ["u1", "a1", "u2", "a2", "u3", "a3"].map((id, i, all) => ({
+      ...node(id, i ? all[i - 1] : null, id, `s:${id}`, "P"),
+      role: id.startsWith("u") ? ("user" as const) : ("assistant" as const),
+      timestamp: i + 1,
+    })),
+    [member("P", null)],
+  );
+  const activity = (day: string, ids: string[]): DayActivity => ({
+    ...dayBounds(day),
+    chats: [],
+    turns: ids.map((id) => ({
+      id,
+      parentId: null,
+      sessionId: "P",
+      familyId: "P",
+      provider: "claude",
+      role: "user",
+      preview: id,
+      timestamp: dayBounds(day).start + 1,
+    })),
+  });
+
+  it("opens a turn picked in the day view, with the collapsed run hiding it opened", async () => {
+    api.getSession.mockResolvedValueOnce(linear);
+    await useStore.getState().openSession("P", { focus: "P", select: "u2" });
+    const s = useStore.getState();
+    expect(s.selected).toBe("u2");
+    expect(s.focus).toBe("P");
+    expect([...s.expanded]).toEqual(["chain:a1"]);
+    // Reading history, not the tip: a live update must not drag it away.
+    expect(s.following).toBe(false);
+  });
+
+  it("falls back to the tip when the picked turn is no longer in the family", async () => {
+    api.getSession.mockResolvedValueOnce(linear);
+    await useStore.getState().openSession("P", { select: "gone" });
+    expect(useStore.getState()).toMatchObject({ selected: "a3", following: true });
+    expect(useStore.getState().expanded.size).toBe(0);
+  });
+
+  it("drops a day's turns that arrive after the user moved to another day, and loads that one", async () => {
+    let answerOld!: (a: DayActivity) => void;
+    api.getDay.mockReturnValueOnce(new Promise((r) => (answerOld = r)));
+    api.getDay.mockResolvedValueOnce(activity("2026-10-27", ["b"]));
+    const first = useStore.getState().loadDay();
+    useStore.getState().setDay("2026-10-27");
+    void useStore.getState().loadDay();
+    answerOld(activity("2026-10-28", ["a"]));
+    await first;
+    const { start, end } = dayBounds("2026-10-27");
+    expect(api.getDay).toHaveBeenLastCalledWith(start, end);
+    expect(useStore.getState().dayActivity?.turns.map((t) => t.id)).toEqual(["b"]);
+  });
+
+  it("keeps the day selection across a refresh while the turn is still there", async () => {
+    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a", "b"]));
+    await useStore.getState().loadDay();
+    useStore.getState().set({ daySelected: "claude:P:b" });
+    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a", "b", "c"]));
+    await useStore.getState().loadDay();
+    expect(useStore.getState().daySelected).toBe("claude:P:b");
+    api.getDay.mockResolvedValueOnce(activity("2026-10-28", ["a"]));
+    await useStore.getState().loadDay();
+    expect(useStore.getState().daySelected).toBeNull();
+  });
+
+  it("comes back to the same day and turn when the tree is closed", async () => {
+    useStore.getState().set({ listMode: "day", day: "2026-10-01", daySelected: "claude:P:u2" });
+    api.getSession.mockResolvedValueOnce(linear);
+    await useStore.getState().openSession("P", { select: "u2" });
+    useStore.getState().close();
+    expect(useStore.getState()).toMatchObject({ listMode: "day", day: "2026-10-01", daySelected: "claude:P:u2" });
+  });
+
+  it("forgets the old day's turns as soon as another day is picked", () => {
+    useStore.getState().set({ dayActivity: activity("2026-10-28", ["a"]), daySelected: "claude:P:a" });
+    useStore.getState().setDay("2026-10-29");
+    expect(useStore.getState()).toMatchObject({ day: "2026-10-29", dayActivity: null, daySelected: null });
   });
 });

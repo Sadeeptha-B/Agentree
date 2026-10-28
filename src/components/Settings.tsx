@@ -126,14 +126,14 @@ export function Settings() {
               type="checkbox"
               checked={s.rememberView}
               onChange={(e) => {
-                const { compress, cwdFilter, providerFilter } = useStore.getState();
+                const { compress, cwdFilter, providerFilter, listMode } = useStore.getState();
                 void saveSettings({
                   rememberView: e.target.checked,
-                  view: e.target.checked ? { compress, cwdFilter, providerFilter } : null,
+                  view: e.target.checked ? { compress, cwdFilter, providerFilter, mode: listMode } : null,
                 });
               }}
             />{" "}
-            Remember compress-chains, the directory and the agent filter between launches
+            Remember compress-chains, the directory and agent filters, and list or day view between launches
           </label>
         </section>
 

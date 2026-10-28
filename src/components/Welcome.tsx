@@ -1,17 +1,12 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../store.ts";
-import { when } from "../format.ts";
+import { tilde, when } from "../format.ts";
 import type { ProviderHealth, ProviderId } from "../../shared/types.ts";
 import { filterSessions, focusFor, ofProvider, railDirs, shownForks, timeOf, type RailDir } from "../list.ts";
 import { Settings } from "./Settings.tsx";
+import { DayView } from "./DayView.tsx";
 import { ErrorBanner } from "./ErrorBanner.tsx";
 import logoUrl from "../../assets/logo.png";
-
-/** `/Users/me/Personal/Agentree` → `~/Personal/Agentree`; same for `C:\Users\me\…`. */
-function tilde(p: string): string {
-  const m = /^\/(?:Users|home)\/[^/]+(\/.*)?$/.exec(p) ?? /^[A-Za-z]:\\Users\\[^\\]+(\\.*)?$/i.exec(p);
-  return m ? "~" + (m[1] ?? "") : p;
-}
 
 /** Last segment of a POSIX or Windows path. */
 const leaf = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p;
@@ -91,8 +86,9 @@ const RAIL_DIRS = 10;
 export function Welcome() {
   const {
     sessions, health, filter, cwdFilter, providerFilter, loading, update, openSession, set, settings, settingsOpen,
-    saveSettings, error, settingsError,
+    saveSettings, error, settingsError, listMode,
   } = useStore();
+  const dayMode = listMode === "day";
   const sortBy = settings?.settings.sortBy ?? "active";
   const [moreOpen, setMoreOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -174,7 +170,7 @@ export function Welcome() {
         </nav>
       </aside>
 
-      <main className="session-pane">
+      <main className={`session-pane ${dayMode ? "day-mode" : ""}`}>
         {/* The list's own failures, and a settings change that wasn't saved
             (the settings dialog shows that one itself while it is open). */}
         <ErrorBanner message={error} onDismiss={() => set({ error: null })} />
@@ -212,30 +208,55 @@ export function Welcome() {
           </div>
         )}
         <div className="session-pane-head">
+          {/* The list, or one day's turns across every chat; the rail, the
+              agent chips and the search filter both. */}
+          <div className="mode-toggle" role="group" aria-label="View">
+            <button
+              className={dayMode ? "" : "on"}
+              aria-pressed={!dayMode}
+              onClick={() => set({ listMode: "list" })}
+            >
+              List
+            </button>
+            <button
+              className={dayMode ? "on" : ""}
+              aria-pressed={dayMode}
+              title="Every chat's turns of one day, on one timeline"
+              onClick={() => set({ listMode: "day" })}
+            >
+              Day
+            </button>
+          </div>
           <input
             className="search"
-            placeholder="Filter by title (forks too), directory, or id…"
+            placeholder={
+              dayMode ? "Filter chats by title, directory, or id…" : "Filter by title (forks too), directory, or id…"
+            }
             value={filter}
             onChange={(e) => set({ filter: e.target.value })}
           />
-          <span className="muted small">
-            {loading && sessions.length === 0 ? "scanning…" : `${visible.length} conversations`}
-          </span>
+          {!dayMode && (
+            <span className="muted small">
+              {loading && sessions.length === 0 ? "scanning…" : `${visible.length} conversations`}
+            </span>
+          )}
           {/* Which time orders the list is a setting; say which, here, and let
               one click switch it — a remembered "last file change" otherwise
               looks like the list ignoring activity. */}
-          <button
-            className="ghost sort-toggle small"
-            disabled={!settings}
-            title={
-              sortBy === "touched"
-                ? "Sorted by the last write to any of the session's files, bookkeeping included. Click to sort by the last message or tool activity."
-                : "Sorted by the last message or tool activity. Click to sort by the last change to the session's files."
-            }
-            onClick={() => void saveSettings({ sortBy: sortBy === "touched" ? "active" : "touched" })}
-          >
-            by {sortBy === "touched" ? "last file change" : "last activity"} ⇅
-          </button>
+          {!dayMode && (
+            <button
+              className="ghost sort-toggle small"
+              disabled={!settings}
+              title={
+                sortBy === "touched"
+                  ? "Sorted by the last write to any of the session's files, bookkeeping included. Click to sort by the last message or tool activity."
+                  : "Sorted by the last message or tool activity. Click to sort by the last change to the session's files."
+              }
+              onClick={() => void saveSettings({ sortBy: sortBy === "touched" ? "active" : "touched" })}
+            >
+              by {sortBy === "touched" ? "last file change" : "last activity"} ⇅
+            </button>
+          )}
         </div>
 
         <HealthRows
@@ -266,77 +287,81 @@ export function Welcome() {
           </div>
         )}
 
-        <ul className="tree-list">
-          {visible.map((s) => {
-            const forks = shownForks(s, filter);
-            return (
-              <li key={`${s.provider}:${s.id}`} className="tree-card">
-                <button className="tree-main" onClick={() => void openSession(s.id, { focus: focusFor(s, filter) })}>
-                  <span className="tree-title">
-                    <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
-                    {s.title}
-                    {s.archived && <span className="fork-badge">archived</span>}
-                  </span>
-                  <span className="muted small tree-sub">
-                    {!cwdFilter && (
-                      <>
-                        <code className="cwd" title={s.cwd}>
-                          {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
-                        </code>
-                        {" · "}
-                      </>
-                    )}
-                    {s.nodeCount} turns
-                    {s.branchPoints > 0 && (
-                      <span className="branch-badge" title="branch points">
-                        ⑂ {s.branchPoints}
-                      </span>
-                    )}
-                    {(s.members ?? 1) > 1 && (
-                      <span className="fork-badge" title="sessions stitched into this tree (forks)">
-                        {s.members} sessions
-                      </span>
-                    )}
-                    {" · "}
-                    <span
-                      title={
-                        sortBy === "touched"
-                          ? `Last file change. Last message or tool activity: ${new Date(s.activeAt).toLocaleString()}`
-                          : `Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`
-                      }
-                    >
-                      {when(timeOf(s, sortBy))}
-                    </span>
-                    {" · "}
-                    <code className="id-short">{s.id.slice(0, 8)}</code>
-                  </span>
-                </button>
-                {/* The family's other chats by name: a fork's title is often the
-                    more descriptive one, and each opens the tree on that fork. */}
-                {forks.shown.length > 0 && (
-                  <div className="fork-line muted small">
-                    <span className="fork-glyph">⑂</span>
-                    {forks.shown.map((f, i) => (
-                      <span key={f.id}>
-                        {i > 0 && " · "}
-                        <button
-                          className={`fork-name ${forks.matched.has(f.id) ? "match" : ""}`}
-                          title={`Open the tree on this fork · ${f.id.slice(0, 8)} · ${when(f.activeAt)}`}
-                          onClick={() => void openSession(s.id, { focus: f.id })}
-                        >
-                          {f.title}
-                        </button>
-                      </span>
-                    ))}
-                    {forks.more > 0 && <span className="fork-more"> · +{forks.more}</span>}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        {dayMode && <DayView />}
 
-        {!loading && visible.length === 0 && (
+        {!dayMode && (
+          <ul className="tree-list">
+            {visible.map((s) => {
+              const forks = shownForks(s, filter);
+              return (
+                <li key={`${s.provider}:${s.id}`} className="tree-card">
+                  <button className="tree-main" onClick={() => void openSession(s.id, { focus: focusFor(s, filter) })}>
+                    <span className="tree-title">
+                      <span className={`provider-chip ${s.provider}`}>{s.provider}</span>
+                      {s.title}
+                      {s.archived && <span className="fork-badge">archived</span>}
+                    </span>
+                    <span className="muted small tree-sub">
+                      {!cwdFilter && (
+                        <>
+                          <code className="cwd" title={s.cwd}>
+                            {s.cwd ? tilde(s.cwd) : "(unknown directory)"}
+                          </code>
+                          {" · "}
+                        </>
+                      )}
+                      {s.nodeCount} turns
+                      {s.branchPoints > 0 && (
+                        <span className="branch-badge" title="branch points">
+                          ⑂ {s.branchPoints}
+                        </span>
+                      )}
+                      {(s.members ?? 1) > 1 && (
+                        <span className="fork-badge" title="sessions stitched into this tree (forks)">
+                          {s.members} sessions
+                        </span>
+                      )}
+                      {" · "}
+                      <span
+                        title={
+                          sortBy === "touched"
+                            ? `Last file change. Last message or tool activity: ${new Date(s.activeAt).toLocaleString()}`
+                            : `Last message or tool activity. Last file change: ${new Date(s.touchedAt).toLocaleString()}`
+                        }
+                      >
+                        {when(timeOf(s, sortBy))}
+                      </span>
+                      {" · "}
+                      <code className="id-short">{s.id.slice(0, 8)}</code>
+                    </span>
+                  </button>
+                  {/* The family's other chats by name: a fork's title is often the
+                      more descriptive one, and each opens the tree on that fork. */}
+                  {forks.shown.length > 0 && (
+                    <div className="fork-line muted small">
+                      <span className="fork-glyph">⑂</span>
+                      {forks.shown.map((f, i) => (
+                        <span key={f.id}>
+                          {i > 0 && " · "}
+                          <button
+                            className={`fork-name ${forks.matched.has(f.id) ? "match" : ""}`}
+                            title={`Open the tree on this fork · ${f.id.slice(0, 8)} · ${when(f.activeAt)}`}
+                            onClick={() => void openSession(s.id, { focus: f.id })}
+                          >
+                            {f.title}
+                          </button>
+                        </span>
+                      ))}
+                      {forks.more > 0 && <span className="fork-more"> · +{forks.more}</span>}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {!dayMode && !loading && visible.length === 0 && (
           <p className="muted empty">
             {sessions.length === 0
               ? "No agent sessions found in ~/.claude/projects, ~/.codex/sessions or ~/.copilot/session-state."

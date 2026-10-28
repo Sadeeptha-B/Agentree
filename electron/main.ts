@@ -93,6 +93,8 @@ ipcMain.handle(CH.listSessions, () => backend.listSessions());
 
 ipcMain.handle(CH.getSession, (_e, id: string) => backend.getSession(id));
 
+ipcMain.handle(CH.getDay, (_e, start: number, end: number) => backend.getDay(start, end));
+
 ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: NodeMeta) =>
   backend.patchNode(sessionId, nodeId, patch),
 );

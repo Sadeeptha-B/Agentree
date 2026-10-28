@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { assignTips, childIndex, copyHolders, countBranchPoints, cwdKey, endOf, forkSummaries } from "../shared/render.ts";
+import { assignTips, childIndex, copyHolders, countBranchPoints, cwdKey, endOf, forkSummaries, oldest } from "../shared/render.ts";
 import type {
   MemberInfo,
   NodeId,
@@ -554,6 +554,8 @@ export interface Parsed {
   title: string;
   /** Newest timestamp on ANY record, displayed or not. 0 if none carried one. */
   touchedAt: number;
+  /** Oldest timestamp on ANY record: no turn starts before it. 0 if none carried one. */
+  startedAt: number;
   /** Newest timestamp on a conversation record (`isActivity`). 0 if none. */
   activeAt: number;
   cwd: string;
@@ -572,6 +574,7 @@ const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
   problem,
   title: "",
   touchedAt: 0,
+  startedAt: 0,
   activeAt: 0,
   cwd: "",
   unknownTypes: {},
@@ -722,6 +725,7 @@ export function parseRecords(
   const parentOf = new Map<string, string | null>();
   const records: RawRecord[] = [];
   let touchedAt = 0;
+  let startedAt = 0;
   let activeAt = 0;
   let cwd = "";
   const cwds: string[] = [];
@@ -749,6 +753,7 @@ export function parseRecords(
     if (rec.timestamp) {
       const t = Date.parse(rec.timestamp);
       if (t > touchedAt) touchedAt = t;
+      if (t > 0 && (!startedAt || t < startedAt)) startedAt = t;
       if (t > activeAt && isActivity(rec)) activeAt = t;
     }
     // Where the session continues (`sessionCwd`), from the conversation
@@ -1025,6 +1030,7 @@ export function parseRecords(
       aiTitle.trim() ||
       (titleDraft?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 90),
     touchedAt,
+    startedAt,
     activeAt,
     cwd: sessionCwd(cwds, dirName) || cwd,
     entrypoint,
@@ -1097,6 +1103,8 @@ interface FileSummary {
   cwd: string;
   activeAt: number;
   touchedAt: number;
+  /** `Parsed.startedAt`; 0 if unknown. */
+  startedAt: number;
   nodeCount: number;
   branchPoints: number;
   entrypoint?: string;
@@ -1147,6 +1155,7 @@ function summaryOf(
     // long tool loop, making a running session look minutes stale.
     touchedAt: parsed.touchedAt || stat.mtimeMs,
     activeAt: parsed.activeAt || parsed.touchedAt || stat.mtimeMs,
+    startedAt: parsed.startedAt,
     nodeCount: merged.length,
     branchPoints: countBranchPoints(childIndex(merged)),
     entrypoint: parsed.entrypoint,
@@ -1254,6 +1263,7 @@ function resolveSource(copies: FileSummary[]): SessionSummary {
     createdMs: Math.min(...copies.map((c) => c.createdMs)),
     // A shadow's bookkeeping can be newer than anything read for the tree.
     touchedAt: Math.max(summary.touchedAt, ...copies.map((c) => c.touchedAt)),
+    startedAt: oldest([summary.startedAt, ...copies.map((c) => c.startedAt)]),
     copies,
     parse,
   };
@@ -1559,6 +1569,7 @@ const signature = (group: SessionSummary[]) => copiesSig(group.flatMap((g) => g.
 function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
   const activeAt = Math.max(...group.map((g) => g.activeAt));
   const touchedAt = Math.max(...group.map((g) => g.touchedAt));
+  const startedAt = oldest(group.map((g) => g.startedAt));
 
   if (group.length === 1) {
     const g = group[0];
@@ -1570,6 +1581,7 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
       title: g.title || "Untitled",
       activeAt,
       touchedAt,
+      startedAt,
       nodeCount: g.nodeCount,
       branchPoints: g.branchPoints,
       resumeCommand: claudeResume(g.id, g.cwd),
@@ -1591,6 +1603,7 @@ function familyMeta(group: SessionSummary[], built?: Family): SessionMeta {
     title: r.title || "Untitled",
     activeAt,
     touchedAt,
+    startedAt,
     nodeCount: fam.nodes.length,
     branchPoints: countBranchPoints(childIndex(fam.nodes)),
     resumeCommand: claudeResume(fam.rootId, r.cwd),

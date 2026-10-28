@@ -42,6 +42,7 @@ function invoke<T>(method: string, ...args: unknown[]): Promise<T> {
 const api: AgentreeApi = {
   listSessions: () => invoke("listSessions"),
   getSession: (id) => invoke("getSession", id),
+  getDay: (start, end) => invoke("getDay", start, end),
   patchNode: (sessionId, nodeId, patch) => invoke("patchNode", sessionId, nodeId, patch),
   forkAt: (sessionId, point) => invoke("forkAt", sessionId, point),
   providerHealth: () => invoke("providerHealth"),

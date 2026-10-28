@@ -26,10 +26,11 @@ Read the [design notes](docs/design.md) before changing parsing, stitching, iden
 | Identity | `electron/identity.ts` (persisted semantic keys), `electron/providers/stitch.ts` |
 | Settings and sidecars | `electron/{settings,paths,meta,lineage}.ts` |
 | Shared model and renderer | `shared/{types,render}.ts`, `src/{store,list,tree-layout}.ts`, `src/components/` |
+| Day view | `registry.dayActivity` (worker), `src/{day,day-layout}.ts`, `src/components/DayView.tsx` |
 | Watches and hand-offs | `electron/{watch,shell,launch,native,terminal,update}.ts` |
 | Verification | `test/`, `src/*.test.ts`, `test/fixtures/make-fixtures.mjs` |
 
-The design notes explain [host boundaries](docs/design.md#architecture), [identity](docs/design.md#one-node-several-identities) and its [persisted scheme](docs/design.md#identity-scheme-and-compatibility), [Claude](docs/design.md#claude-code), [Codex forks](docs/design.md#codex-fork), [list/activity rules](docs/design.md#welcome-screen) and [persistence](docs/design.md#annotations).
+The design notes explain [host boundaries](docs/design.md#architecture), [identity](docs/design.md#one-node-several-identities) and its [persisted scheme](docs/design.md#identity-scheme-and-compatibility), [Claude](docs/design.md#claude-code), [Codex forks](docs/design.md#codex-fork), [list/activity rules](docs/design.md#welcome-screen), the [day view](docs/design.md#day-view) and [persistence](docs/design.md#annotations).
 
 ## Commands and verification
 

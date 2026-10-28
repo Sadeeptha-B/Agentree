@@ -1,7 +1,10 @@
 import { create } from "zustand";
 import { api } from "./api.ts";
 import { childIndex, forkPointOf, newestLeaf, resolveForkPoint, toNodeMap, type NodeMap } from "../shared/render.ts";
+import { dayBounds, todayKey, turnKey } from "./day.ts";
+import { chainHolding } from "./tree-layout.ts";
 import type {
+  DayActivity,
   NodeId,
   NodeMeta,
   NodeStatus,
@@ -25,6 +28,20 @@ interface State {
   cwdFilter: string;
   /** Show only one agent's sessions. Empty means every agent. */
   providerFilter: ProviderId | "";
+
+  /** The welcome screen's view: one card per family, or one day's turns across all of them. */
+  listMode: "list" | "day";
+  /** The day the day view shows: a local `YYYY-MM-DD` key. */
+  day: string;
+  /** That day's turns, once loaded; null while another day's would be wrong. */
+  dayActivity: DayActivity | null;
+  dayLoading: boolean;
+  /** The day view's selected turn (`turnKey`). Kept across a reload while the turn is still there. */
+  daySelected: string | null;
+  /** Show another day. Its turns load with `loadDay`. */
+  setDay: (key: string) => void;
+  /** (Re)load the current day's turns. A result for a day the user has left is dropped. */
+  loadDay: () => Promise<void>;
 
   session: SessionDetail | null;
   nodes: NodeMap;
@@ -72,9 +89,10 @@ interface State {
   /**
    * Open the family holding `id`. With `focus`, select that member session's
    * own tip (`MemberInfo.tipId`) instead of the family's newest leaf, and act
-   * on that member (`State.focus`).
+   * on that member (`State.focus`). With `select`, select that turn instead
+   * (opening the chain that hides it) while the family still has it.
    */
-  openSession: (id: string, opts?: { focus?: string }) => Promise<void>;
+  openSession: (id: string, opts?: { focus?: string; select?: NodeId }) => Promise<void>;
   close: () => void;
 
   select: (id: NodeId | null) => void;
@@ -132,6 +150,7 @@ function gate(): (run: () => Promise<void>) => Promise<void> {
 
 const listGate = gate();
 const sessionGate = gate();
+const dayGate = gate();
 
 /**
  * Which open view an async result belongs to. Bumped by every open and close;
@@ -166,6 +185,12 @@ export const useStore = create<State>((set, get) => ({
   cwdFilter: "",
   providerFilter: "",
 
+  listMode: "list",
+  day: todayKey(),
+  dayActivity: null,
+  dayLoading: false,
+  daySelected: null,
+
   session: null,
   nodes: new Map(),
   children: new Map(),
@@ -195,7 +220,9 @@ export const useStore = create<State>((set, get) => ({
       const v = settings.settings.rememberView ? settings.settings.view : undefined;
       set({
         settings,
-        ...(v ? { compress: v.compress, cwdFilter: v.cwdFilter, providerFilter: v.providerFilter } : {}),
+        ...(v
+          ? { compress: v.compress, cwdFilter: v.cwdFilter, providerFilter: v.providerFilter, listMode: v.mode ?? "list" }
+          : {}),
       });
     } catch {
       /* defaults; the list still loads */
@@ -233,6 +260,33 @@ export const useStore = create<State>((set, get) => ({
       }
     }),
 
+  setDay: (day) => {
+    if (day === get().day) return;
+    // The old day's turns under the new day's title would be a lie.
+    set({ day, dayActivity: null, daySelected: null });
+  },
+
+  loadDay: () =>
+    dayGate(async () => {
+      const day = get().day;
+      const { start, end } = dayBounds(day);
+      set({ dayLoading: true });
+      try {
+        const activity = await api.getDay(start, end);
+        // The user moved to another day meanwhile; the gate runs again for it.
+        if (get().day !== day) return;
+        const sel = get().daySelected;
+        set({
+          dayActivity: activity,
+          daySelected: sel && activity.turns.some((t) => turnKey(t) === sel) ? sel : null,
+        });
+      } catch (e) {
+        if (get().day === day) set({ error: String(e) });
+      } finally {
+        set({ dayLoading: false });
+      }
+    }),
+
   openSession: async (id, opts) => {
     const mine = ++view;
     set({ loading: true });
@@ -247,14 +301,17 @@ export const useStore = create<State>((set, get) => ({
       const children = childIndex(session.nodes);
       const tip = newestLeaf(session.nodes, children);
       const focus = session.members.find((m) => m.id === opts?.focus) ?? null;
-      const selected = focus?.tipId && nodes.has(focus.tipId) ? focus.tipId : tip;
+      const asked = opts?.select && nodes.has(opts.select) ? opts.select : null;
+      const selected = asked ?? (focus?.tipId && nodes.has(focus.tipId) ? focus.tipId : tip);
+      // A turn picked from outside the tree is shown, not left inside a collapsed run.
+      const chain = asked ? chainHolding(asked, children, get().compress) : null;
       set({
         session,
         nodes,
         children,
         selected,
         focus: focus?.id ?? null,
-        expanded: new Set(),
+        expanded: new Set(chain ? [chain] : []),
         // Follow the conversation only from its tip; a focused fork that
         // isn't the tip is a place the user asked to read.
         following: selected === tip,
@@ -413,8 +470,8 @@ async function writeSettings(patch: SettingsPatch): Promise<SettingsState | null
 }
 
 /**
- * Remembered view state: with the setting on, compress-chains and the list
- * filters are saved (debounced) whenever they change, and `boot` restores
+ * Remembered view state: with the setting on, compress-chains, the list
+ * filters and list-or-day are saved (debounced) whenever they change, and `boot` restores
  * them. Off, nothing is written: turning it off cancels a pending save, a
  * save that fires rechecks the setting, and the settings store keeps no view
  * while it is off (whichever write lands last).
@@ -427,13 +484,19 @@ function cancelViewSave() {
 const remembering = () => !!useStore.getState().settings?.settings.rememberView;
 useStore.subscribe((s, prev) => {
   if (!remembering()) return cancelViewSave();
-  if (s.compress === prev.compress && s.cwdFilter === prev.cwdFilter && s.providerFilter === prev.providerFilter) return;
+  if (
+    s.compress === prev.compress &&
+    s.cwdFilter === prev.cwdFilter &&
+    s.providerFilter === prev.providerFilter &&
+    s.listMode === prev.listMode
+  )
+    return;
   cancelViewSave();
   viewTimer = setTimeout(() => {
     viewTimer = null;
     if (!remembering()) return;
-    const { compress, cwdFilter, providerFilter } = useStore.getState();
-    writeSettings({ view: { compress, cwdFilter, providerFilter } }).then(
+    const { compress, cwdFilter, providerFilter, listMode } = useStore.getState();
+    writeSettings({ view: { compress, cwdFilter, providerFilter, mode: listMode } }).then(
       (settings) => settings && useStore.setState({ settings }),
       () => {
         /* not remembered this time; the view itself is unaffected */

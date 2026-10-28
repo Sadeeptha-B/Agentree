@@ -10,6 +10,7 @@ import type { AgentreeApi, NodeMeta, SettingsPatch } from "../shared/types.ts";
 const api: AgentreeApi = {
   listSessions: () => ipcRenderer.invoke(CH.listSessions),
   getSession: (id) => ipcRenderer.invoke(CH.getSession, id),
+  getDay: (start, end) => ipcRenderer.invoke(CH.getDay, start, end),
   patchNode: (sessionId, nodeId, patch: NodeMeta) =>
     ipcRenderer.invoke(CH.patchNode, sessionId, nodeId, patch),
   forkAt: (sessionId, point) => ipcRenderer.invoke(CH.forkAt, sessionId, point),
