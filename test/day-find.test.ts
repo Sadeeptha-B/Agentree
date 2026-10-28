@@ -57,6 +57,32 @@ const ROOT = vi.hoisted(() => {
   session("c1000000-0000-4000-8000-00000000000f", "name: Meanwhile\n", [
     ev("user.message", "m1", "2T00:05:00.000", { content: "Unrelated" }),
   ]);
+  // A parent and its fork sharing a reply; only the fork went on working
+  // under it, then the parent's next prompt. Once within a day (Oct 3), once
+  // past midnight (Oct 3–4).
+  const shared = (day: string, px: string, prompt: string, at: [string, string]) => [
+    ev("user.message", `${px}1`, `${day}T${at[0]}`, { content: prompt }),
+    ev("assistant.message", `${px}2`, `${day}T${at[1]}`, { content: "Working", toolRequests: [{ name: "shell" }] }),
+  ];
+  const forkOf = (parent: string) => `forked_from: ${parent}\n`;
+  session("c2000000-0000-4000-8000-00000000000a", "name: Shared build\n", [
+    ...shared("3", "g", "Build it", ["09:00:00.000", "09:01:00.000"]),
+    ev("user.message", "g3", "3T10:01:00.000", { content: "Next" }),
+  ]);
+  session("c2000000-0000-4000-8000-00000000000b", `name: Shared build (fork)\n${forkOf("c2000000-0000-4000-8000-00000000000a")}`, [
+    ...shared("3", "h", "Build it", ["09:00:00.000", "09:01:00.000"]),
+    ev("tool.execution_complete", "h3", "3T10:00:00.000"),
+    ev("assistant.turn_end", "h4", "3T10:00:01.000"),
+  ]);
+  session("c2000000-0000-4000-8000-00000000000c", "name: Night shared\n", [
+    ...shared("3", "k", "Night build", ["23:50:00.000", "23:51:00.000"]),
+    ev("user.message", "k3", "4T00:41:00.000", { content: "Next" }),
+  ]);
+  session("c2000000-0000-4000-8000-00000000000d", `name: Night shared (fork)\n${forkOf("c2000000-0000-4000-8000-00000000000c")}`, [
+    ...shared("3", "j", "Night build", ["23:50:00.000", "23:51:00.000"]),
+    ev("tool.execution_complete", "j3", "4T00:40:00.000"),
+    ev("assistant.turn_end", "j4", "4T00:40:01.000"),
+  ]);
 
   // A Codex turn whose command runs for 48 minutes after the reply, then the next turn.
   const thread = "01900000-0000-7000-8000-0000000c0001";
@@ -151,6 +177,9 @@ describe("a day turn's selection, found again in its family", () => {
     // …but the selection is where it ended: on another day, so not this one's.
     expect(after.found).toMatchObject({ familyId: EP, id: "ep-a2", timestamp: at("2026-10-01T10:03:00.000Z") });
     expect(after.found!.timestamp).toBeGreaterThanOrEqual(end);
+    // The fork re-stamped its last copied record (10:20): that is its copy's
+    // own end, not work done under the turn.
+    expect(after.running.filter((r) => r.sessionId === EF)).toEqual([]);
   });
 
   it("finds a conversation's latest-ending turn, wherever it starts", () => {
@@ -179,6 +208,31 @@ describe("idle time from recorded activity", () => {
       ["Migrating", at("2026-10-01T13:50:00.000Z")],
       ["Done?", undefined],
     ]);
+  });
+
+  it("keeps work a fork recorded under a shared reply, in the fork's lane", () => {
+    const [G, H] = ["a", "b"].map((c) => `c2000000-0000-4000-8000-00000000000${c}`);
+    const OCT3 = OCT1 + 2 * DAY;
+    const a = dayActivity(OCT3, OCT3 + DAY);
+    // Drawn once, in the parent's lane, which recorded nothing after it.
+    const working = turn(a, G, "Working");
+    expect(working).toMatchObject({ heldBy: [H] });
+    expect(working.activeUntil).toBeUndefined();
+    // The fork's work under it survives, as the fork's: its lane is listed, so the filters apply to it.
+    expect(a.running.filter((r) => r.familyId === G)).toEqual([
+      { provider: "copilot", familyId: G, sessionId: H, start: at("2026-10-03T09:01:00.000Z"), end: at("2026-10-03T10:00:01.000Z") },
+    ]);
+    expect(a.chats.some((c) => c.sessionId === H)).toBe(true);
+  });
+
+  it("keeps a fork's work under a shared reply running into the next day", () => {
+    const [K, J] = ["c", "d"].map((c) => `c2000000-0000-4000-8000-00000000000${c}`);
+    const OCT4 = OCT1 + 3 * DAY;
+    const next = dayActivity(OCT4, OCT4 + DAY);
+    expect(next.running.filter((r) => r.familyId === K)).toEqual([
+      { provider: "copilot", familyId: K, sessionId: J, start: at("2026-10-03T23:51:00.000Z"), end: at("2026-10-04T00:40:01.000Z") },
+    ]);
+    expect(next.turns.filter((t) => t.familyId === K).map((t) => t.id)).toEqual(["k3"]);
   });
 
   it("carries a tool run past midnight into the next day, as running", () => {
