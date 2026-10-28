@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { DayChat, DayTurn } from "../shared/types.ts";
 import {
-  BREAK_W, buildDayLayout, DOT_R, IDLE_BREAK, laneLatest, MIN_GAP, stepInLane, stepLane, TRACK_H,
-  type DayLayout,
+  BREAK_W, buildDayLayout, DOT_R, dotRadius, IDLE_BREAK, LABEL_LINE_H, labelLines, LANE_PAD, laneLatest, MIN_GAP,
+  stepInLane, stepLane, TRACK_H, visibleTicks, type DayLayout,
 } from "./day-layout.ts";
 
 const MIN = 60_000;
@@ -154,6 +154,20 @@ describe("day layout", () => {
     for (const t of l.ticks) for (const b of l.breaks) expect(t.x > b.x0 && t.x < b.x1).toBe(false);
   });
 
+  it("keeps fixed-size time labels apart at any zoom, a resume over an hour", () => {
+    const a = chat("A");
+    const turns = [0, 10, 19, 28, 37, 46, 55, 64, 73, 200, 209].map((m, i) => turn(a, `t${i}`, i ? `t${i - 1}` : null, m));
+    const l = buildDayLayout(turns, [a]);
+    for (const k of [0.1, 0.3, 0.6, 1, 2]) {
+      const shown = visibleTicks(l.ticks, k);
+      for (let i = 1; i < shown.length; i++) expect((shown[i].x - shown[i - 1].x) * k).toBeGreaterThanOrEqual(64);
+      expect(shown[0].kind).toBe("start");
+    }
+    // Zoomed in, every label fits; zoomed out, the resume after the break outlasts the hours near it.
+    expect(visibleTicks(l.ticks, 4)).toHaveLength(l.ticks.length);
+    expect(visibleTicks(l.ticks, 0.3).map((t) => t.kind)).toContain("resume");
+  });
+
   it("walks within a chat and across chats", () => {
     const a = chat("A");
     const b = chat("B");
@@ -197,6 +211,28 @@ describe("day layout", () => {
     expect(buildDayLayout(turns, [a, b], running).breaks).toEqual([]);
   });
 
+  it("makes a lane tall enough for its chat's whole name, wrapped", () => {
+    const short = chat("S", { title: "Short" });
+    const long = chat("L", { title: "Review the Agentree modernization round three findings and their resolution" });
+    const word = chat("W", { title: "x".repeat(60) });
+    expect(labelLines(short)).toBe(1);
+    expect(labelLines(long)).toBeGreaterThan(2);
+    expect(labelLines(word)).toBeGreaterThan(2);
+    // A fork's name has less room (the ⑂ glyph), so it never wraps to fewer lines.
+    expect(labelLines({ ...long, parentSessionId: "X" })).toBeGreaterThanOrEqual(labelLines(long));
+    const l = buildDayLayout([turn(short, "s1", null, 0), turn(long, "l1", null, 1)], [short, long]);
+    expect(l.lanes[0].height).toBe(2 * LANE_PAD + TRACK_H);
+    expect(l.lanes[1].height).toBe(2 * LANE_PAD + labelLines(long) * LABEL_LINE_H);
+    // The turn sits in the middle of the taller lane.
+    expect(dot(l, "l1").y).toBe(l.lanes[1].top + l.lanes[1].height / 2);
+  });
+
+  it("shrinks dots as zoom closes turns up, so a track's turns never touch", () => {
+    expect(dotRadius(1)).toBe(DOT_R);
+    for (const k of [0.375, 0.4, 0.5, 0.75, 1, 2]) expect(MIN_GAP * k).toBeGreaterThanOrEqual(2 * dotRadius(k) + 2);
+    expect(dotRadius(0.05)).toBe(2);
+  });
+
   it("ignores turns whose chat isn't listed, and chats without turns", () => {
     const a = chat("A");
     const l = buildDayLayout([turn(a, "a1", null, 0), turn(chat("Z"), "z1", null, 1)], [a, chat("Empty")]);
@@ -218,7 +254,10 @@ describe("day layout fuzz", () => {
     for (let seed = 1; seed <= 300; seed++) {
       const r = rng(seed);
       const chats = Array.from({ length: 1 + Math.floor(r() * 6) }, (_, i) =>
-        chat(`S${i}`, i > 0 && r() < 0.3 ? { familyId: "S0", parentSessionId: "S0" } : {}),
+        chat(`S${i}`, {
+          title: Array.from({ length: Math.floor(r() * 14) }, () => "word".repeat(1 + Math.floor(r() * 4))).join(" ") || `S${i}`,
+          ...(i > 0 && r() < 0.3 ? { familyId: "S0", parentSessionId: "S0" } : {}),
+        }),
       );
       const turns: DayTurn[] = [];
       let minute = 0;
@@ -246,6 +285,12 @@ describe("day layout fuzz", () => {
       }
       for (let i = 1; i < l.lanes.length; i++) {
         expect(l.lanes[i].top).toBeGreaterThanOrEqual(l.lanes[i - 1].top + l.lanes[i - 1].height);
+      }
+      for (const lane of l.lanes) expect(lane.height).toBeGreaterThanOrEqual(2 * LANE_PAD + labelLines(lane.chat) * LABEL_LINE_H);
+      for (const d of l.dots) {
+        const lane = l.lanes[d.lane];
+        expect(d.y - DOT_R).toBeGreaterThanOrEqual(lane.top);
+        expect(d.y + DOT_R).toBeLessThanOrEqual(lane.top + lane.height);
       }
     }
   });

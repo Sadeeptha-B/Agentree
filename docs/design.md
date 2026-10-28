@@ -1069,6 +1069,18 @@ build; nothing about parsing, stitching or identity is specific to it.
   opens the turn instead of pressing the button again. A focused button
   keeps its own Enter. The shortcuts stand down while Settings is open; the
   dialog also keeps its keys and focus to itself (see Settings).
+- **Zoom is time-only.** The view maps layout x to `tx + x·k` and layout y
+  to `ty + y` (`screen` in `DayView.tsx`), instead of scaling the drawing:
+  a lane keeps its pixel height, so a chat's name can be shown whole. A
+  lane is as tall as its tracks or its wrapped name (`labelLines`, an
+  estimate from character counts — nothing can be measured before it is
+  drawn — generous like the tree's `nodeWidth`, with tracks centred). With
+  x alone scaled, turns close up as the view zooms out, so dots shrink
+  (`dotRadius`: a track's turns stay clear down to k ≈ 0.375, then 2px).
+  Time labels are drawn at a fixed size in a strip pinned along the top,
+  and which fit is decided at the current zoom (`visibleTicks`: 64px
+  apart, an hour yielding to a first turn or a resume); the layout returns
+  them all. The side card's chat list wraps names beside their agent chip.
 - **Wheel.** Both canvases, tree and day, take the wheel through
   `useCanvasWheel` (`src/wheel.ts`): a native non-passive listener on the
   SVG. React's `onWheel` is passive, so its `preventDefault` couldn't stop
@@ -1394,7 +1406,8 @@ dangling parent, one root per path), not session counts.
   its first day and is the next day's `running`. `src/day-layout.test.ts`:
   tracks, breaks measured from the latest end (a long reply, or one running
   in from the day before, isn't idle), a chat landing on its latest-ending
-  turn, ticks,
+  turn, lanes as tall as their wrapped names (fuzzed too), dots that shrink
+  with zoom without touching, time labels kept apart at any zoom, ticks,
   fork/edit/lead edges, same-instant ordering, navigation, and 300 random
   days with no overlapping turns and x in time order. `src/day.test.ts`:
   local day bounds across DST and month ends, and the filters. The store
