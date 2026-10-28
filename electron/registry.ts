@@ -254,7 +254,7 @@ function previewOf(n: TurnNode): string {
   return n.role === "assistant" ? "(thinking only)" : "(empty)";
 }
 
-/** A family's part of one day: its lanes, turns and the turns still running into it. */
+/** A family's part of one day: its lanes, turns, and work without a mark of its own. */
 interface DayPart {
   chats: DayChat[];
   turns: DayTurn[];
@@ -263,8 +263,10 @@ interface DayPart {
 
 /**
  * The turns of `detail` that started in `[start, end)`, each in the lane of
- * the session that owns it — drawn once, as in the tree — and the ones that
- * started earlier and were still running at `start`.
+ * the session that owns it — drawn once, as in the tree — and the work in
+ * the window without a mark of its own (`DayRun`): turns that started
+ * earlier and were still running at `start`, and what members recorded on
+ * their copies of a shared turn.
  */
 export function dayPart(detail: SessionDetail, start: number, end: number): DayPart {
   const { meta, members } = detail;
@@ -272,8 +274,17 @@ export function dayPart(detail: SessionDetail, start: number, end: number): DayP
   const running: DayRun[] = [];
   for (const n of detail.nodes) {
     const lane = n.sourceSessionId ?? meta.id;
-    if (n.timestamp > 0 && n.timestamp < start && activeEndOf(n) >= start) {
-      running.push({ provider: meta.provider, familyId: meta.id, sessionId: lane, start: n.timestamp, end: activeEndOf(n) });
+    const work = (sessionId: SessionId, until: number) => {
+      if (n.timestamp > 0 && n.timestamp < end && until >= start) {
+        running.push({ provider: meta.provider, familyId: meta.id, sessionId, start: n.timestamp, end: until });
+      }
+    };
+    // Its own lane's, when it started earlier (a turn of the day is drawn,
+    // and carries its own); and each copy's, in the lane of the member that
+    // recorded it — the turn is drawn once, in its owner's.
+    if (n.timestamp < start) work(lane, activeEndOf(n));
+    for (const o of n.occurrences ?? []) {
+      if (o.sessionId !== lane && o.activeUntil && o.activeUntil > endOf(n)) work(o.sessionId, o.activeUntil);
     }
     if (!(n.timestamp >= start && n.timestamp < end)) continue;
     const holders = (n.heldBy ?? []).filter((s) => s !== lane);

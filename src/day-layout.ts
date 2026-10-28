@@ -204,9 +204,10 @@ function timeOrder(turns: DayTurn[]): DayTurn[] {
 }
 
 /**
- * `running`: turns from before the window still running in it (`DayRun`).
- * They get no mark, but nothing is idle until they end. `dirs`: each lane's
- * name is followed by its directory's last folder, on a line of its own.
+ * `running`: recorded work with no mark of its own (`DayRun`) — turns from
+ * before the window still running in it, work a member recorded on its copy
+ * of a shared turn. Nothing is idle while it runs. `dirs`: each lane's name
+ * is followed by its directory's last folder, on a line of its own.
  */
 export function buildDayLayout(
   turns: DayTurn[],
@@ -261,9 +262,16 @@ export function buildDayLayout(
   /** Turns drawn just after a break: where the time labels resume. */
   const resumed = new Set<string>();
   let prev: DayDot | null = null;
-  /** The latest recorded activity under every turn so far, in any lane: until then, the agent was working. */
-  let busyUntil = Math.max(0, ...running.map((r) => r.end));
+  /**
+   * The latest recorded activity of every turn and run started so far, in
+   * any lane: until then, an agent was working. Runs join in start order,
+   * before the first turn that starts after them.
+   */
+  let busyUntil = 0;
+  const runs = [...running].sort((a, b) => a.start - b.start);
+  let nextRun = 0;
   for (const t of drawn) {
+    while (nextRun < runs.length && runs[nextRun].start < t.timestamp) busyUntil = Math.max(busyUntil, runs[nextRun++].end);
     const key = turnKey(t);
     const lane = laneOf.get(laneKey(t))!;
     const track = trackOf.get(key)!;

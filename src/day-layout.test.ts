@@ -225,6 +225,19 @@ describe("day layout", () => {
     expect(buildDayLayout(turns, [a, b], running).breaks).toEqual([]);
   });
 
+  it("isn't idle while a fork works under a shared turn, from when that turn started", () => {
+    const p = chat("P");
+    const f = chat("F", { familyId: "P", parentSessionId: "P" });
+    // P's reply at 09:01, drawn once; F worked under its copy until 10:00; P's next prompt at 10:01.
+    const turns = [turn(p, "q1", null, 0), turn(p, "r1", "q1", 1, { role: "assistant" }), turn(p, "q2", "r1", 61)];
+    const run = { provider: "claude" as const, familyId: "P", sessionId: "F", start: T0 + MIN, end: T0 + 60 * MIN };
+    expect(buildDayLayout(turns, [p, f]).breaks).toHaveLength(1);
+    expect(buildDayLayout(turns, [p, f], [run]).breaks).toEqual([]);
+    // Work counts only from its start: it can't make the pause before that start busy.
+    const late = [turn(p, "q1", null, 0), turn(p, "r1", "q1", 40, { role: "assistant" })];
+    expect(buildDayLayout(late, [p, f], [{ ...run, start: T0 + 40 * MIN, end: T0 + 90 * MIN }]).breaks).toHaveLength(1);
+  });
+
   it("makes a lane tall enough for its chat's whole name, wrapped", () => {
     const short = chat("S", { title: "Short" });
     const long = chat("L", { title: "Review the Agentree modernization round three findings and their resolution" });

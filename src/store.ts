@@ -44,14 +44,19 @@ interface State {
    * resolved in its whole family by the worker, as a tree reload does: a
    * split group, a new owner or a re-rooted family doesn't move it to
    * another range or another chat. One that now starts on another day is
-   * deselected; a refresh never changes the day.
+   * deselected; a refresh never changes the day. A turn picked while a load
+   * is out is asked for again: the answer about the earlier one says
+   * nothing about it.
    */
   daySelected: string | null;
   /** The day view's pan and zoom when it last closed (a tree opened from it), to come back to. */
   dayViewport: { day: string; tx: number; ty: number; k: number } | null;
   /**
    * A chat asked for from another view (`showInDay`), selected once its
-   * day's turns arrive; `day` is the day it is expected on.
+   * day's turns arrive; `day` is the day it is expected on. Each request is
+   * a new object: a load adopts its answer only while it is still the one
+   * pending, so a newer request for the same day isn't consumed by an older
+   * answer.
    */
   dayTarget: (DayWant & { day: string }) | null;
   /** Show another day. Its turns load with `loadDay`. */
@@ -293,11 +298,16 @@ export const useStore = create<State>((set, get) => ({
   loadDay: () =>
     dayGate(async () => {
       // A chat asked for that starts on another day moves there once.
-      for (let hop = 0; hop < 2; hop++) {
+      let hopped = false;
+      for (;;) {
         const day = get().day;
         const { start, end } = dayBounds(day);
-        const target = get().dayTarget?.day === day ? get().dayTarget : null;
+        // What the user wants shown, as this request is made: a pending
+        // target (each request is a new object), or the turn selected in
+        // the snapshot on screen. An answer is adopted only while it still is.
+        const pending = get().dayTarget;
         const sel = get().daySelected;
+        const target = pending?.day === day ? pending : null;
         const was = sel ? get().dayActivity?.turns.find((t) => turnKey(t) === sel) : undefined;
         const want: DayWant | undefined = target
           ? { provider: target.provider, sessions: target.sessions, ...(target.ref ? { ref: target.ref } : {}) }
@@ -309,12 +319,17 @@ export const useStore = create<State>((set, get) => ({
           const activity = await api.getDay(start, end, want);
           // The user moved to another day meanwhile; the gate runs again for it.
           if (get().day !== day) return;
+          // Another chat was asked for, or another turn picked, meanwhile:
+          // this answer is about the old one. Ask again for the new one,
+          // from the snapshot it was picked in (still the one on screen).
+          if (get().dayTarget !== pending || get().daySelected !== sel) continue;
           const key = want ? foundKey(activity, want.provider, activity.found) : null;
           if (target) {
             const found = activity.found;
-            if (found && !key && hop === 0) {
+            if (found && !key && !hopped) {
               const there = dayKeyOf(found.timestamp);
               if (there !== day) {
+                hopped = true;
                 set({
                   day: there,
                   dayActivity: null,
@@ -336,10 +351,7 @@ export const useStore = create<State>((set, get) => ({
             });
             return;
           }
-          // A turn picked while this load was out stands while it is drawn.
-          const now = get().daySelected;
-          const kept = now === sel ? key : now && activity.turns.some((t) => turnKey(t) === now) ? now : null;
-          set({ dayActivity: activity, daySelected: kept });
+          set({ dayActivity: activity, daySelected: key });
           return;
         } catch (e) {
           if (get().day === day) set({ error: String(e) });

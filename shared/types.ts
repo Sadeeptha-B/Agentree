@@ -107,9 +107,12 @@ export interface TurnNode {
    * The other sessions of the family that hold a copy of this turn, with the
    * id it has there. Stitching draws one node per turn; this keeps where else
    * it lives (`sourceSessionId` is the one drawn). Physical copies only; who
-   * holds the turn is `heldBy`.
+   * holds the turn is `heldBy`. `activeUntil` is that copy's own: work its
+   * session recorded under the turn after copying it (a fork that went on
+   * with a tool run). Drawing the turn once must not erase that work, and it
+   * was that session's, not the owner's.
    */
-  occurrences?: { sessionId: SessionId; id: NodeId }[];
+  occurrences?: { sessionId: SessionId; id: NodeId; activeUntil?: number }[];
   /**
    * Every member session whose history holds ALL of this node: the sessions
    * that open or resume onto it. Claude and Copilot: its owner and every
@@ -364,16 +367,20 @@ export interface DayTurn {
 }
 
 /**
- * A turn that started before the window and was still running in it. It
- * gets no mark — a turn belongs to the day it started — but the day isn't
- * idle while it runs.
+ * Recorded work in the window that has no mark of its own in its lane: a
+ * turn that started before the window and was still running in it (a turn
+ * belongs to the day it started), or work a member recorded on its copy of
+ * a turn drawn in another lane (`TurnNode.occurrences`). The day isn't idle
+ * while it runs, and it belongs to the lane of the session that did it, so
+ * the filters apply to it as to that lane.
  */
 export interface DayRun {
   provider: ProviderId;
   familyId: SessionId;
   sessionId: SessionId;
+  /** When the turn it was recorded under started. */
   start: number;
-  /** `activeEndOf` the turn: at or after the window's start. */
+  /** Its last activity (`activeEndOf`, or the copy's `activeUntil`): at or after the window's start. */
   end: number;
 }
 
