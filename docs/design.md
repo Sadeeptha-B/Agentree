@@ -2,7 +2,7 @@
 
 Current implementation context, consolidated on 2026-10-27 from the engineering material formerly in `AGENTS.md` and updated for the round 3 resolution. This document preserves provider research, observed behavior, rationale and earlier failed approaches. Working commands and ownership boundaries live in [AGENTS.md](../AGENTS.md); user workflows, settings and limitations live in the [user guide](user-guide.md).
 
-> **Reviews:** the findings of the [round 3](archive/2026-10-modernize/review-findings-round-3.md#resolution) and [round 4](archive/2026-10-modernize/review-findings-round-4.md#resolution) reviews are resolved; each report maps its findings to fixes and regression tests. The contracts they established are described below: [membership and focus](#membership-focus-and-family-lifecycle) (with a node's [start and end](#a-node-starts-and-ends)), the [identity scheme](#identity-scheme-and-compatibility), [metadata across copies](#one-session-several-folders), [settings isolation and launch environment](#settings), [annotation ownership and reconciliation](#annotations) and the [live view](#live-view).
+> **Reviews:** the findings of the [round 3](archive/2026-10-modernize/review-findings-round-3.md#resolution), [round 4](archive/2026-10-modernize/review-findings-round-4.md#resolution) and [round 5](archive/2026-10-modernize/review-findings-round-5.md#resolution) reviews are resolved; each report maps its findings to fixes and regression tests. The contracts they established are described below: [membership and focus](#membership-focus-and-family-lifecycle) (with a node's [start and end](#a-node-starts-and-ends)), the [fork point](#the-fork-point), the [identity scheme](#identity-scheme-and-compatibility), [metadata across copies](#one-session-several-folders), [Codex vocabulary selection](#codex-the-page-graph), [settings isolation and launch environment](#settings), the [worker method table](#the-backend-worker), [annotation ownership, reconciliation and write failures](#annotations), the [live view](#live-view) and the [Windows terminal launch](#windows).
 
 ## Contents
 
@@ -96,6 +96,12 @@ expected ticks; before, none).
   for its **type** only, and resume argv lives in `shell.ts` so the host can
   build terminal commands without loading parsers. `grep` the built
   `main.cjs` / `extension.cjs` for a parser symbol if in doubt.
+- Because of that, the proxy can't read the worker's method table at run
+  time; it restates the names as a record over `MethodName`
+  (`METHOD_NAMES`), which the compiler checks for completeness. A method
+  added to `backend.ts` and not there fails typecheck. (Before, a separate
+  name list omitted `resumeLaunch`, and terminal resume threw in both hosts:
+  [round 5 finding 2](archive/2026-10-modernize/review-findings-round-5.md#r5-2).)
 - Watch targets are resolved in the worker (finding a session's files can mean
   a scan) and watched on the host (`watchLater`).
 - A worker that dies fails the calls in flight and is restarted on the next one.
@@ -179,6 +185,27 @@ Physical file locators live on the session
 is read as one record set, so every anchor resolves whichever file holds
 it (see "One session, several folders").
 
+### The fork point
+
+A node id names a display group's **head**, not where the group ends, and
+the group can change between the snapshot the user clicked in and the one
+the backend reloads: a quiet fork appearing splits a run under the same
+head, one disappearing folds the head into a longer run, a live reply
+extends it. So a fork request carries the cut as drawn — `ForkPoint`
+(`forkPointOf`): the node id, the session it is drawn from, and the record
+its last part ends on (`lastRawId`). Every provider resolves it the same way
+(`resolveForkPoint` in `shared/render.ts`): the same node while it still
+ends there, else the one node that now does (a split), else a refusal asking
+the user to reselect. An old head id is never read as a different range.
+For Codex the end is the turn, so a turn that gained prose is still that
+turn; one that gained a steering prompt is refused by its `forkBlocked`.
+
+The renderer keeps the same contract across a reload: `carry` selects the
+node that ends where the selection did before falling back to the same id
+(a group that grew or was folded in) and then to `stableIds` (a re-rooted
+family). Before, a split shortened both the selected prefix and a fork
+taken from it ([round 5 finding 3](archive/2026-10-modernize/review-findings-round-5.md#r5-3)).
+
 ### Membership, focus and family lifecycle
 
 Canonical display ownership, member history and action intent are separate:
@@ -210,9 +237,14 @@ Canonical display ownership, member history and action intent are separate:
   history with two others leaves two families. Any member's id loads the
   family it is in now, so reload asks first for the focused member, then
   for the sessions holding the selected node, and only then for the old root
-  and the other members; the first that loads is adopted, and selection is
-  carried by `stableIds`. The old root still loading proves only that it
-  survived, not that the user's member is still with it ([round 4 finding 4](archive/2026-10-modernize/review-findings-round-4.md#r4-4)).
+  and the other members; the first that loads is adopted, and the selection
+  is carried by its [fork point](#the-fork-point), then `stableIds`. The old
+  root still loading proves only that it survived, not that the user's
+  member is still with it ([round 4 finding 4](archive/2026-10-modernize/review-findings-round-4.md#r4-4)).
+  The focus can change while the stores are read: a result looked up for an
+  earlier choice that doesn't hold the current one is not adopted, and the
+  lookup runs again from the current choice, so a member choice stands until
+  the user changes it or the member is gone ([round 5 finding 4](archive/2026-10-modernize/review-findings-round-5.md#r5-4)).
   Nothing reconstructs a relationship for which no evidence survives.
   Annotations are reconciled as membership grows (see [Annotations](#annotations)).
 
@@ -316,7 +348,16 @@ Verified on 286 rollouts / 25 cuts.
   no matching: a page's first turn hangs off the last turn of its base with
   `firstOrdinal < cut` (recursively through the base's own base).
 - **History encoding and event vocabulary vary independently**, and are read
-  independently. Codex 0.153–0.162 also wrote forks of paginated threads as
+  independently. A page speaks one vocabulary. `history_mode: "paginated"`
+  pages use items. Any other page is read by what carries its **prose**
+  (`readsAsLegacy`): items when a `UserMessage`/`AgentMessage` item exists
+  (legacy prose events beside them are then not read), legacy events when
+  only they carry prose, and items when there are items and no prose of
+  either kind, so an untaught item vocabulary still counts as failed. An
+  item's presence proves nothing on its own: a VS Code rollout of CLI
+  0.164.0-alpha.11.1 (observed) has legacy prose and one completed
+  `Extension` item, and switching on that item emptied the conversation
+  ([round 5 finding 1](archive/2026-10-modernize/review-findings-round-5.md#r5-1)). Codex 0.153–0.162 also wrote forks of paginated threads as
   **copied prefixes**: `forked_from_id`, no `history_base`, and the parent's
   turns physically repeated (verified: 7 such forks on the target machine,
   their copied turn ids and items identical to the parent's). With the item
@@ -866,9 +907,10 @@ The tree follows the transcripts on disk.
 - A family can lose its root (its transcript deleted) while a fork survives,
   or split in two. The reload asks for the focused member, the sessions
   holding the selected turn, then the root and every other member it knew,
-  adopts the first family that loads, and carries the selection over by
-  `stableIds` (see [membership](#membership-focus-and-family-lifecycle)).
-  Closing a tree refreshes the list.
+  adopts the first family that loads (asking again if the user picked another
+  member meanwhile), and carries the selection over by where it ended, then
+  by `stableIds` (see [membership](#membership-focus-and-family-lifecycle)
+  and [the fork point](#the-fork-point)). Closing a tree refreshes the list.
 - Codex and Copilot roots (`sessions/` and `archived_sessions/`) are also
   **stat-polled** every second, and so is Codex's `session_index.jsonl`
   (renames). Codex appends were verified invisible to
@@ -1055,6 +1097,15 @@ the extension writing the same sidecar at the same moment can lose one side's
 change. A cleared field travels as `null` (the VS Code bridge drops
 `undefined`).
 
+**Write failures.** The panel shows an annotation at once, as a guess.
+`annotate` throws when nothing was written (the turn is gone) or a sidecar
+write fails; the store then shows "Not saved: …" under the annotation
+buttons (`annotationError`, cleared by the next save that succeeds) and
+redraws the family from disk. It doesn't undo the guess: one member's
+sidecar may have been written before another's failed, so only a re-read
+says what is saved. Before, a failed write looked saved ([round 5 finding 5](archive/2026-10-modernize/review-findings-round-5.md#r5-5),
+inherited from the original code).
+
 ### Saved data layout and compatibility
 
 Under the configured Agentree home (the guide owns its location/overrides):
@@ -1102,11 +1153,16 @@ provider-qualified ID or different hash cannot simply replace existing keys.
 - "Resume in terminal" waits for the launcher's `spawn` (or `error`) event
   before answering, so a missing terminal is reported instead of silently
   doing nothing.
-- "Resume in terminal" on Windows runs `cmd /d /c start "" /D "<cwd>" powershell.exe -NoExit -Command "<argv>"`
+- "Resume in terminal" on Windows runs `cmd /d /c start "" powershell.exe -NoExit -EncodedCommand <base64>`
   with `windowsVerbatimArguments`. Node's `detached` maps to
   `DETACHED_PROCESS`, which gives a console program *no* console, so a direct
-  spawn never appears (verified). `start` gives it a new window. It was
-  verified with a cwd containing a space and `&`.
+  spawn never appears (verified). `start` gives it a new window. The script
+  is the copied command's own `Set-Location -LiteralPath …; <argv>`, base64
+  of UTF-16LE: cmd expands `%NAME%` anywhere in its command line, quoted or
+  not, so no path may reach it as text. (Before, cwd and store path were
+  quoted into cmd's line, and a directory named with a `%…%` pair could
+  become another path: [round 5 finding 6](archive/2026-10-modernize/review-findings-round-5.md#r5-6).)
+  A test executes that cmd → PowerShell boundary (without `start`) on Windows.
 - The desktop update check follows the build's own `origin` and branch
   (stamped into `dist-electron/build-info.json`), so a fork compares against
   itself and a feature branch against itself — never offering a `git pull`
@@ -1121,9 +1177,9 @@ provider-qualified ID or different hash cannot simply replace existing keys.
 
 ## Tests
 
-After the [round 4 resolution](archive/2026-10-modernize/review-findings-round-4.md#resolution):
-114 tests in 16 files, typecheck and both production builds pass. Each round 3
-and round 4 finding has a regression test that failed on the code before its
+After the [round 5 resolution](archive/2026-10-modernize/review-findings-round-5.md#resolution):
+122 tests in 16 files, typecheck and both production builds pass. Each round
+3, 4 and 5 finding has a regression test that failed on the code before its
 fix (round 4's documentation finding excepted). The examples
 below describe coverage, not a promise that every possible member endpoint
 or native resume was checked. Working commands and safe probe rules are
@@ -1153,11 +1209,14 @@ dangling parent, one root per path), not session counts.
   2 and 3 (folded, literal-chain and `u:` keys, an ambiguous one, clearing
   them); a label made before its fork existed outliving the original; a
   rename in a contained copy and in a diverged copy before its first new
-  record. Round 4: a family split by deleting its bridging member.
+  record. Round 4: a family split by deleting its bridging member. Round 5:
+  a fork point taken before a quiet fork split its node still forks the
+  drawn range, and one whose node was folded into a longer one is refused.
 - **Codex:** a `.zst` edit page, a fork through an archived thread, a
   guardian thread, a missing base, a copied-prefix fork in the item
   vocabulary, early usage, a rename in the index, an unknown item vocabulary
-  (failed), the IDE wrapper, steering, legacy stitching, and fork anchors
+  (failed), legacy prose beside a completed `Extension` item (the observed
+  0.164 shape), the IDE wrapper, steering, legacy stitching, and fork anchors
   (whole turns only, refusal of cut-away turns, routing through a fork that
   still holds the turn), with app-server mocked.
 - **Pipeline invariants:** every enabled Claude fork in every fixture family
@@ -1170,13 +1229,17 @@ dangling parent, one root per path), not session counts.
   outlives its root.
 - **Backend client:** a real worker (`test/fake-worker.cjs`) that crashes;
   the retry on its replacement must survive the old worker's late `exit`;
-  disposal is final.
+  disposal is final. The real worker, bundled by esbuild as the hosts ship
+  it, answers every method of `backend.ts` through the proxy, including
+  `resumeLaunch` with the store variable of a disposable home.
 - **Renderer store** (`src/store.test.ts`, in `src/` for the DOM config):
   a reload resolving after close, a family whose root was deleted, cleared
   fields sent as `null`, the focused member's Open/Resume payload across
   selection and reload, disabling remembered view inside the save debounce,
-  an older settings response arriving last, and reload after a family split
-  (focused member, else the selected turn's side). `src/welcome.test.tsx`
+  an older settings response arriving last, reload after a family split
+  (focused member, else the selected turn's side), a selection kept at its
+  end when its node splits, a member chosen while a reload is in flight
+  (deferred responses), and a failed annotation write shown and redrawn. `src/welcome.test.tsx`
   renders the welcome screen and settings dialog to check a failed save is
   shown, then cleared by a successful retry.
 - **Annotations** (`test/annotations.test.ts`): two prompts sharing a prompt
@@ -1204,8 +1267,9 @@ dangling parent, one root per path), not session counts.
   complete rollouts, so its fork behaviour was verified by hand on copied real
   rollouts (see "Codex fork").
 - **Shell quoting** on both platforms; **desktop hand-off**: deep links and the
-  per-OS terminal launch (Windows `start` quoting, AppleScript escaping, Linux
-  emulator choice, missing-cwd fallback).
+  per-OS terminal launch (Windows: the encoded script, executed through cmd →
+  PowerShell with literal `%…%` in the directory and store path; AppleScript
+  escaping, Linux emulator choice, missing-cwd fallback).
 
 When a harness changes format, add a fixture for the new shape before changing
 the parser.
@@ -1234,6 +1298,6 @@ the parser.
 
 ## Known gaps
 
-The [user guide](user-guide.md#limitations) owns the user-facing limitations. The [current roadmap](roadmap.md) tracks remaining work. Review reproductions, acceptance conditions and their resolutions remain in the [round 3 report](archive/2026-10-modernize/review-findings-round-3.md); earlier handoffs, review resolutions and the completed roadmap are in the [historical record](archive/2026-10-modernize/README.md).
+The [user guide](user-guide.md#limitations) owns the user-facing limitations. The [current roadmap](roadmap.md) tracks remaining work. Review reproductions, acceptance conditions and their resolutions remain in the [round 3](archive/2026-10-modernize/review-findings-round-3.md), [round 4](archive/2026-10-modernize/review-findings-round-4.md) and [round 5](archive/2026-10-modernize/review-findings-round-5.md) reports; earlier handoffs, review resolutions and the completed roadmap are in the [historical record](archive/2026-10-modernize/README.md).
 
 Observed counts and timings in these notes describe particular 2026-10-27 datasets, rather than release guarantees. Source inspection, fixture coverage and an executed vendor resume are different strengths of evidence. Keep that distinction when updating a claim.
