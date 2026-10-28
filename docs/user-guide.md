@@ -254,7 +254,10 @@ This is the core move:
 3. In VS Code the new session opens in the chat panel by default; on desktop
    use the returned buttons. The automatic-open setting can override either
    default. The fork contains the conversation up to and including the
-   selected turn, and nothing after it.
+   selected turn as it was drawn when you clicked, and nothing after it. If
+   that turn changed on disk in the meantime (a reply was extended, or a
+   fork appearing elsewhere regrouped it), Agentree refuses rather than fork
+   a different range: select it again once the tree has refreshed.
 4. Type your new direction. The new branch grows in the tree as you go, joined
    by a dashed line.
 
@@ -288,7 +291,9 @@ An annotation is saved with every session of the family, including forks
 found later (the next time the tree is opened), so deleting the original
 transcript doesn't lose it. Keep Agentree's data directory with your history
 backups all the same: the desktop app and the extension writing at the same
-moment can lose one change.
+moment can lose one change. If an annotation can't be saved (a read-only or
+full disk, say), the panel says "Not saved" under the buttons and redraws the
+tree from what is actually on disk.
 
 ### Context and token numbers
 
@@ -420,8 +425,9 @@ and is not a Windows installer. The manual README steps work on Windows.
 
 ## Limitations
 
-The [round 3](archive/2026-10-modernize/review-findings-round-3.md) and
-[round 4](archive/2026-10-modernize/review-findings-round-4.md) reviews'
+The [round 3](archive/2026-10-modernize/review-findings-round-3.md),
+[round 4](archive/2026-10-modernize/review-findings-round-4.md) and
+[round 5](archive/2026-10-modernize/review-findings-round-5.md) reviews'
 findings are resolved. Supported-scope restrictions and evidence limits:
 
 - Open/Resume continue the panel session's **current vendor path**, which can
