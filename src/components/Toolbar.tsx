@@ -4,7 +4,7 @@ import { refOf } from "../../shared/render.ts";
 import logoUrl from "../../assets/logo.png";
 
 export function Toolbar() {
-  const { session, compress, set, close, selected, nodes, showInDay } = useStore();
+  const { session, compress, set, close, selected, nodes, focus, showInDay } = useStore();
   if (!session) return null;
   // The selected turn's day, with every other chat of that day around it.
   const node = selected ? nodes.get(selected) : undefined;
@@ -31,7 +31,16 @@ export function Toolbar() {
         className="ghost"
         disabled={!day}
         title={day ? `Show the selected turn in the day view of ${dayTitle(day)}, among every chat that day` : "The selected turn has no time"}
-        onClick={() => node && day && void showInDay(day, { provider: session.meta.provider, ref: refOf(node) })}
+        onClick={() =>
+          node &&
+          day &&
+          void showInDay(day, {
+            provider: session.meta.provider,
+            // Its family is found again through the sessions holding it.
+            sessions: [...new Set([focus, node.sourceSessionId, ...(node.heldBy ?? []), session.meta.id].filter((x): x is string => !!x))],
+            ref: refOf(node),
+          })
+        }
       >
         ◷ {day ? shortDay(day) : "day"}
       </button>

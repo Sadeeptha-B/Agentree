@@ -133,14 +133,20 @@ function parseEvents(dir: string): ParsedSession | null {
     const ts = ev.timestamp ? Date.parse(ev.timestamp) : 0;
     if (ts > touchedAt) touchedAt = ts;
     if (ts > 0 && (!startedAt || ts < startedAt)) startedAt = ts;
-    if (ts > activeAt && ev.type && ACTIVITY.test(ev.type)) activeAt = ts;
+    const activity = !!ev.type && ACTIVITY.test(ev.type);
+    if (ts > activeAt && activity) activeAt = ts;
+
+    const text = (ev.data?.content ?? "").trim();
+    const tools = (ev.data?.toolRequests ?? []).map((t) => t.name ?? "").filter(Boolean);
+    const drawn = (ev.type === "user.message" || ev.type === "assistant.message") && (!!text || tools.length > 0);
+    // Tool runs, turn ends and empty messages after a turn are the agent
+    // still working on it (`TurnNode.activeUntil`). The next drawn message
+    // isn't: a reply must not stay busy until the user's next prompt.
+    const last = nodes[nodes.length - 1];
+    if (activity && !drawn && last && ts > (last.activeUntil ?? last.timestamp)) last.activeUntil = ts;
 
     if (ev.type === "user.message" || ev.type === "assistant.message") {
-      const text = (ev.data?.content ?? "").trim();
-      const tools = (ev.data?.toolRequests ?? [])
-        .map((t) => t.name ?? "")
-        .filter(Boolean);
-      if (!text && tools.length === 0) continue;
+      if (!drawn) continue;
       const n = nodes.length;
       nodes.push({
         // Real event uuids — stable, and unique across the whole family.

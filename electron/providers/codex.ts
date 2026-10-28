@@ -6,6 +6,7 @@ import {
   childIndex,
   copyHolders,
   countBranchPoints,
+  endOf,
   FORK_POINT_GONE,
   forkSummaries,
   oldest,
@@ -413,9 +414,8 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     const p = r.payload;
     if (!p) continue;
 
-    if (r.type === "event_msg" && (p.type === "item_completed" || p.type === "item_started") && ts > page.activeAt) {
-      page.activeAt = ts;
-    }
+    const activity = r.type === "event_msg" && (p.type === "item_completed" || p.type === "item_started");
+    if (activity && ts > page.activeAt) page.activeAt = ts;
     if (r.type === "turn_context" && p.model) model = p.model;
     // Each turn records where it ran; the last one is where the thread is.
     if (r.type === "turn_context" && p.cwd) page.cwd = p.cwd;
@@ -423,6 +423,11 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     if (!p.turn_id) continue;
     turnRecords++;
     const b = builder(p.turn_id, ord);
+    // Items after a node, within its turn, are the agent still working on
+    // it (`TurnNode.activeUntil`): tool calls, reasoning. Not the messages,
+    // which are nodes (or a node's end) themselves, and never across turns.
+    const prose = p.item?.type === "UserMessage" || p.item?.type === "AgentMessage";
+    if (activity && !prose && b.cur && ts > (b.cur.activeUntil ?? b.cur.timestamp)) b.cur.activeUntil = ts;
 
     if (r.type === "token_usage_record" && p.usage) {
       // A response that produced only tools or reasoning reports usage before
@@ -500,11 +505,13 @@ function parsePaginated(page: Page, records: RawRecord[]): void {
     }
   }
 
-  // Tools after a turn's last prose still belong to that reply.
   for (const b of turns.values()) {
+    // Tools after a turn's last prose still belong to that reply.
     if (b.lastAssistant && b.tools.length) {
       b.lastAssistant.toolUses = [...(b.lastAssistant.toolUses ?? []), ...b.tools];
     }
+    // Activity no later than a node's own end adds nothing.
+    for (const n of b.turn.nodes) if (n.activeUntil !== undefined && n.activeUntil <= endOf(n)) delete n.activeUntil;
   }
   page.turns = [...turns.values()]
     .map((b) => b.turn)
@@ -570,6 +577,9 @@ function parseLegacy(page: Page, records: RawRecord[]): void {
     } else if (rec.type === "response_item") {
       if ((p.type === "function_call" || p.type === "custom_tool_call") && p.name) {
         pendingTools.push(p.name);
+        // A tool call is the agent still working on the last turn (`TurnNode.activeUntil`).
+        const last = nodes[nodes.length - 1];
+        if (last && ts > (last.activeUntil ?? last.timestamp)) last.activeUntil = ts;
       } else if (p.type === "reasoning" && Array.isArray(p.summary)) {
         const t = p.summary.map((s) => s.text ?? "").filter(Boolean).join("\n\n");
         if (t) pendingThinking += (pendingThinking ? "\n\n" : "") + t;

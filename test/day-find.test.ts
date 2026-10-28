@@ -1,0 +1,192 @@
+import fs from "node:fs";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import type { DayActivity, DayTurn, DayWant } from "../shared/types.ts";
+
+// The day view's selection and idle time against real projections (the
+// layout's use of `activeUntil` and `running` is src/day-layout.test.ts), in a
+// disposable home: Copilot sessions written here, and copies of the Claude
+// endpoint fixtures (the quiet fork is added by a test).
+const ROOT = vi.hoisted(() => {
+  const p = require("node:path") as typeof import("node:path");
+  const fs = require("node:fs") as typeof import("node:fs");
+  const tmp = fs.mkdtempSync(p.join((require("node:os") as typeof import("node:os")).tmpdir(), "agentree-day-find-"));
+  process.env.AGENTREE_HOME = p.join(tmp, "agentree");
+  process.env.CLAUDE_CONFIG_DIR = p.join(tmp, "claude");
+  process.env.CODEX_HOME = p.join(tmp, "codex");
+  process.env.COPILOT_HOME = p.join(tmp, "copilot");
+  fs.mkdirSync(p.join(tmp, "claude", "projects", "c--work-endpoint"), { recursive: true });
+  fs.copyFileSync(
+    p.join(__dirname, "fixtures", "claude", "2.1", "projects", "c--work-endpoint", "50000000-0000-4000-8000-00000000000b.jsonl"),
+    p.join(tmp, "claude", "projects", "c--work-endpoint", "50000000-0000-4000-8000-00000000000b.jsonl"),
+  );
+
+  const session = (id: string, yaml: string, events: object[]) => {
+    const dir = p.join(tmp, "copilot", "session-state", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(p.join(dir, "workspace.yaml"), `id: ${id}\ncwd: /work/copilot\n${yaml}`);
+    fs.writeFileSync(p.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  };
+  const ev = (type: string, id: string, ts: string, data: object = {}) => ({ type, id, timestamp: `2026-10-0${ts}Z`, data });
+  const hello = (px: string, day: string) => [
+    ev("user.message", `${px}1`, `${day}:00.000`, { content: "Hello" }),
+    ev("assistant.message", `${px}2`, `${day}:30.000`, { content: "Hello there" }),
+  ];
+  // P, and F, its quiet fork: the same two events under rewritten ids.
+  session("c1000000-0000-4000-8000-00000000000a", "name: Greeting\n", hello("p", "1T10:00"));
+  session("c1000000-0000-4000-8000-00000000000b", "name: Greeting (fork)\nforked_from: c1000000-0000-4000-8000-00000000000a\n", hello("f", "1T10:00"));
+  // X: an unrelated chat that opened the same way an hour earlier.
+  session("c1000000-0000-4000-8000-00000000000c", "name: Other greeting\n", hello("x", "1T09:00"));
+  // A reply whose tool runs for an hour, then the next prompt a minute later.
+  session("c1000000-0000-4000-8000-00000000000d", "name: Build\n", [
+    ev("user.message", "b1", "1T11:00:00.000", { content: "Run the build" }),
+    ev("assistant.message", "b2", "1T11:01:00.000", { content: "Working", toolRequests: [{ name: "shell" }] }),
+    ev("tool.execution_start", "b3", "1T11:01:01.000"),
+    ev("tool.execution_complete", "b4", "1T12:00:00.000"),
+    ev("assistant.turn_end", "b5", "1T12:00:01.000"),
+    ev("user.message", "b6", "1T12:01:00.000", { content: "Thanks" }),
+  ]);
+  // The same past midnight, and another chat's turn while the tool still ran.
+  session("c1000000-0000-4000-8000-00000000000e", "name: Night build\n", [
+    ev("user.message", "n1", "1T23:50:00.000", { content: "Run the night build" }),
+    ev("assistant.message", "n2", "1T23:51:00.000", { content: "Starting", toolRequests: [{ name: "shell" }] }),
+    ev("tool.execution_complete", "n3", "2T00:40:00.000"),
+    ev("assistant.turn_end", "n4", "2T00:40:01.000"),
+    ev("user.message", "n5", "2T00:41:00.000", { content: "Next" }),
+  ]);
+  session("c1000000-0000-4000-8000-00000000000f", "name: Meanwhile\n", [
+    ev("user.message", "m1", "2T00:05:00.000", { content: "Unrelated" }),
+  ]);
+
+  // A Codex turn whose command runs for 48 minutes after the reply, then the next turn.
+  const thread = "01900000-0000-7000-8000-0000000c0001";
+  const turnA = "01900000-0000-7000-8000-0000000c00a1";
+  const turnB = "01900000-0000-7000-8000-0000000c00b1";
+  let ordinal = 1;
+  const rec = (hm: string, payload: object, type = "event_msg") => ({
+    timestamp: `2026-10-01T${hm}:00.000Z`,
+    ordinal: ordinal++,
+    type,
+    payload,
+  });
+  const item = (hm: string, kind: "item_started" | "item_completed", turn_id: string, item: object) =>
+    rec(hm, { type: kind, thread_id: thread, turn_id, item });
+  const dir = p.join(tmp, "codex", "sessions", "2026", "10", "01");
+  fs.mkdirSync(dir, { recursive: true });
+  const meta = { id: thread, cwd: "/work/codex", cli_version: "0.162.1", source: "vscode", thread_source: "user", history_mode: "paginated" };
+  fs.writeFileSync(
+    p.join(dir, `rollout-2026-10-01T13-00-00-${thread}.jsonl`),
+    [
+      { timestamp: "2026-10-01T13:00:00.000Z", type: "session_meta", payload: meta },
+      rec("13:00", { type: "task_started", turn_id: turnA }),
+      item("13:00", "item_completed", turnA, { type: "UserMessage", id: "item-1", content: [{ type: "text", text: "Migrate it" }] }),
+      item("13:01", "item_completed", turnA, { type: "AgentMessage", id: "item-2", content: [{ type: "Text", text: "Migrating" }] }),
+      item("13:02", "item_started", turnA, { type: "CommandExecution", id: "exec-1", command: ["migrate"] }),
+      item("13:50", "item_completed", turnA, { type: "CommandExecution", id: "exec-1", command: ["migrate"], status: "completed" }),
+      rec("13:50", { type: "task_complete", turn_id: turnA }),
+      rec("13:51", { type: "task_started", turn_id: turnB }),
+      item("13:51", "item_completed", turnB, { type: "UserMessage", id: "item-1", content: [{ type: "text", text: "Done?" }] }),
+    ]
+      .map((r) => JSON.stringify(r))
+      .join("\n") + "\n",
+  );
+  return tmp;
+});
+
+const { dayActivity } = await import("../electron/registry.ts");
+
+const at = (iso: string) => Date.parse(iso);
+const OCT1 = at("2026-10-01T00:00:00.000Z");
+const DAY = 24 * 3_600_000;
+const [P, F, X, BUILD, NIGHT, MEANWHILE] = ["a", "b", "c", "d", "e", "f"].map((c) => `c1000000-0000-4000-8000-00000000000${c}`);
+const EP = "50000000-0000-4000-8000-00000000000b";
+const EF = "50000000-0000-4000-8000-00000000000c";
+
+/** What the renderer asks for to carry a selected turn (`wantOf`). */
+const wantOf = (t: DayTurn): DayWant => ({
+  provider: t.provider,
+  sessions: [...new Set([t.sessionId, ...(t.heldBy ?? []), t.familyId])],
+  ref: t.ref,
+});
+const turn = (a: DayActivity, sessionId: string, preview: string) =>
+  a.turns.find((t) => t.sessionId === sessionId && t.preview === preview)!;
+
+describe("a day turn's selection, found again in its family", () => {
+  it("follows a re-rooted family to the fork holding the turn, never to an unrelated chat with the same text", () => {
+    const before = dayActivity(OCT1, OCT1 + DAY);
+    const reply = turn(before, P, "Hello there");
+    // Drawn once, in P's lane; F holds it too.
+    expect(reply).toMatchObject({ familyId: P, heldBy: [F] });
+    // X's reply has the same text identity: only family context tells them apart.
+    expect(turn(before, X, "Hello there").ref.stableIds).toEqual(reply.ref.stableIds);
+
+    fs.rmSync(path.join(ROOT, "copilot", "session-state", P), { recursive: true });
+    const after = dayActivity(OCT1, OCT1 + DAY, wantOf(reply));
+    expect(after.found).toMatchObject({ familyId: F, id: "f2" });
+    expect(turn(after, F, "Hello there").id).toBe("f2");
+  });
+
+  it("is gone when no session that held it is left", () => {
+    const x = turn(dayActivity(OCT1, OCT1 + DAY), X, "Hello there");
+    const want: DayWant = { ...wantOf(x), sessions: ["nobody"], ref: { ...x.ref, point: { ...x.ref.point, sessionId: "nobody" } } };
+    expect(dayActivity(OCT1, OCT1 + DAY, want).found).toBeNull();
+  });
+
+  it("finds a selected end that a split moved onto the next day, rather than its shorter head", () => {
+    // ep-a1 "First prose." (10:01) and ep-a2 "Later prose." (10:03) are one
+    // node while EP stands alone. A window ending between them stands for
+    // midnight: the node starts in it, its end after it.
+    const end = at("2026-10-01T10:02:00.000Z");
+    const merged = dayActivity(OCT1, end).turns.find((t) => t.id === "ep-a1")!;
+    expect(merged.ref.point).toMatchObject({ sessionId: EP, endId: "ep-a2" });
+
+    // The quiet fork after "First prose." splits it.
+    fs.copyFileSync(
+      path.join(__dirname, "fixtures", "claude", "2.1", "projects", "c--work-endpoint", `${EF}.jsonl`),
+      path.join(ROOT, "claude", "projects", "c--work-endpoint", `${EF}.jsonl`),
+    );
+    const after = dayActivity(OCT1, end, wantOf(merged));
+    // The day's own turn under that head is now the shorter range…
+    expect(after.turns.find((t) => t.id === "ep-a1")?.ref.point.endId).toBe("ep-a1");
+    // …but the selection is where it ended: on another day, so not this one's.
+    expect(after.found).toMatchObject({ familyId: EP, id: "ep-a2", timestamp: at("2026-10-01T10:03:00.000Z") });
+    expect(after.found!.timestamp).toBeGreaterThanOrEqual(end);
+  });
+
+  it("finds a conversation's latest-ending turn, wherever it starts", () => {
+    const a = dayActivity(OCT1 + DAY, OCT1 + 2 * DAY, { provider: "copilot", sessions: [BUILD] });
+    expect(a.found).toMatchObject({ familyId: BUILD, id: "b6" });
+    expect(a.turns.some((t) => t.sessionId === BUILD)).toBe(false);
+  });
+});
+
+describe("idle time from recorded activity", () => {
+  it("keeps a reply busy through its tool run, until a minute before the next prompt", () => {
+    const a = dayActivity(OCT1, OCT1 + DAY);
+    const working = turn(a, BUILD, "Working");
+    expect(working).toMatchObject({ timestamp: at("2026-10-01T11:01:00.000Z"), activeUntil: at("2026-10-01T12:00:01.000Z") });
+    // Display and "latest" are untouched: the reply is one message.
+    expect(working.endedAt).toBeUndefined();
+    // The next prompt is its own turn, not the reply's activity.
+    expect(turn(a, BUILD, "Thanks").activeUntil).toBeUndefined();
+  });
+
+  it("keeps a Codex reply busy through the commands after it, within its turn", () => {
+    const a = dayActivity(OCT1, OCT1 + DAY);
+    const codex = a.turns.filter((t) => t.provider === "codex");
+    expect(codex.map((t) => [t.preview, t.activeUntil])).toEqual([
+      ["Migrate it", undefined],
+      ["Migrating", at("2026-10-01T13:50:00.000Z")],
+      ["Done?", undefined],
+    ]);
+  });
+
+  it("carries a tool run past midnight into the next day, as running", () => {
+    const next = dayActivity(OCT1 + DAY, OCT1 + 2 * DAY);
+    expect(next.running.filter((r) => r.sessionId === NIGHT)).toEqual([
+      { provider: "copilot", familyId: NIGHT, sessionId: NIGHT, start: at("2026-10-01T23:51:00.000Z"), end: at("2026-10-02T00:40:01.000Z") },
+    ]);
+    // So with another chat at 00:05, the night build's prompt at 00:41 follows one idle minute, not 50.
+    expect(turn(next, MEANWHILE, "Unrelated").timestamp).toBe(at("2026-10-02T00:05:00.000Z"));
+  });
+});

@@ -263,6 +263,18 @@ continued after a sibling branch was written looked older than it, and
 focusing its member landed on the sibling ([round 4 finding 3](archive/2026-10-modernize/review-findings-round-4.md#r4-3)).
 The list's sort setting doesn't touch this: it orders sessions, not leaves.
 
+`activeUntil` is a third time, distinct from both: the last **activity**
+recorded under a node before the next drawn turn, where that is later than
+its end. Activity is what counts for the list's `activeAt` in that harness
+(see [Welcome screen](#welcome-screen)). Claude: every activity record counts
+for its nearest drawn ancestor (tool results, tool-only replies, subagent
+records). Codex: items other than messages, within the node's own turn.
+Copilot: non-message activity events after it (tool runs, `assistant.turn_end`).
+A drawn turn's own records never count for the turn before it, so a reply
+isn't kept busy until the next prompt. A merged node takes the latest of its
+parts'. Only the day view's idle time reads it (`activeEndOf`); display,
+"latest" and fork points never do.
+
 ### Identity scheme and compatibility
 
 Stable keys are a persistence contract: annotations are saved under them.
@@ -991,8 +1003,10 @@ build; nothing about parsing, stitching or identity is specific to it.
   list's dates. A disabled provider is never listed or loaded (tested).
   Nodes that started earlier and end at or after `start` come along as
   `running` (`DayRun`: lane, start, end): no mark, but the day isn't idle
-  while they run (see Layout). Their chat is listed so the filters apply to
-  them; a lane is drawn only for a chat with turns.
+  while they run (see Layout). Running is by recorded activity
+  (`activeEndOf`: the end, or `activeUntil`), so a tool run past midnight
+  counts too. Their chat is listed so the filters apply to them; a lane is
+  drawn only for a chat with turns.
 - **Which families load.** No record of a family is newer than `touchedAt`
   or older than `startedAt`, so only families with `touchedAt >= start` and
   `startedAt < end` are loaded. `startedAt` is a *narrowing bound only*: each
@@ -1022,34 +1036,52 @@ build; nothing about parsing, stitching or identity is specific to it.
   drawn once, as in the tree. Lanes are keyed `provider:sessionId` and turns
   `provider:familyId:nodeId`, since node ids are unique only per family.
   `DayChat` carries the member's parent and its title for "forked from".
-- **A selection is the drawn turn, not its id.** Each `DayTurn` has a
-  `NodeRef` (`refOf`: its `ForkPoint` and `stableIds`). Every snapshot a
-  selection crosses resolves it with one rule, `locateBy` in
-  `shared/render.ts` (`locate` is the same over a family's nodes): the node
-  that still ends where it did, then the same id, then the same semantic
-  identity. A tree reload uses it; a day refresh re-keys `daySelected` by
-  it, among that agent's turns, so a split group, a new owner or a
-  re-rooted family keeps the range that was selected
-  ([round 2, finding 1](archive/day-view/review-findings-day-view-round-2.md#dv2-1));
-  and `openSession(family, { focus: lane, select: ref })` selects by it,
-  else the usual tip. Opening asks for the focused lane's family first,
-  since the family it was listed in may have split since
+- **A selection is the drawn turn, found in its family.** Each `DayTurn`
+  has a `NodeRef` (`refOf`: its `ForkPoint` and `stableIds`) and the other
+  sessions holding it (`heldBy`). A day is a slice across families, and the
+  rule that carries a selection, `locateBy` in `shared/render.ts`, is sound
+  only within one family: node ids and text-derived identities repeat in
+  unrelated chats that opened the same way, and a selected node's end can
+  start on another day. So the renderer never resolves a selection against
+  the day's turns. It sends a `DayWant` with the load (`getDay(start, end,
+  want)`: the provider, the ref, and the sessions to find its family
+  through: lane, holders, family), and the worker answers `found`
+  (`findWant` in `registry.ts`): a turn of the day that ends where it did
+  (`endingAt`, sound across families: a session's record is in one family
+  only), else `locate` in the first of those sessions' families that loads.
+  Within a family, identity alone must be unambiguous: the one node holding
+  one of its identities, else the one holding its last. Found but starting
+  on another day, a refresh deselects it (a refresh never changes the day);
+  gone, likewise. A split group, a new owner or a re-rooted family keeps the
+  range that was selected and the chat it was in
+  ([round 2, finding 1](archive/day-view/review-findings-day-view-round-2.md#dv2-1);
+  [round 3, findings 1 and 2](archive/day-view/review-findings-day-view-round-3.md#dv3-1)).
+  The family is usually one the same pass just reloaded, so this rarely
+  costs a load. `openSession(family, { focus: lane, select: ref })` selects
+  by `locate`, else the usual tip. Opening asks for the focused lane's
+  family first, since the family it was listed in may have split since
   ([finding 3](archive/day-view/review-findings-day-view.md#dv-3)).
   The member is focused for Open/Resume and the collapsed chain hiding the
   turn is opened (`chainHolding`). The day view's pan and zoom are kept in
   the store when it closes (`dayViewport`), so Esc returns to the same day,
   turn and view; a fresh fit brings a kept selection into view.
-- **Into the day from a chat.** `showInDay(day, target)` is the way back the
-  other direction: a list card's ◷ (`{ provider, sessions }`: the family and
-  its forks, on the day of `activeAt`) or the tree toolbar's
-  (`{ provider, ref: refOf(selected) }`, on the day the turn started). It
-  closes an open tree, drops the kept viewport and that day's old turns,
-  and leaves the target pending (`dayTarget`) until a load of that day
-  arrives — whichever load does, since the gate may coalesce it with the
-  view's own. `resolveTarget` (`src/day.ts`) picks the turn by `locateBy`,
-  or the sessions' latest-ending turn by `endOf`; a target for a day the
-  user has left meanwhile is dropped. A target the filters would hide clears
-  them: the chat was asked for by name. The fresh fit then reveals it.
+- **Into the day from a chat.** `showInDay(day, want)` is the way back the
+  other direction: a list card's ◷ (`familyWant`: the family and its forks,
+  no ref, so its latest-ending turn by `endOf`; `day` is a first guess from
+  `activeAt`), the tree toolbar's (the selected turn's ref and holders, on
+  the day it started) and an empty day's "go to the latest turn" (the
+  latest-active conversation the filters let through). It closes an open
+  tree, drops the kept viewport and that day's old turns, and leaves the
+  target pending (`dayTarget`) until a load of that day arrives — whichever
+  load does, since the gate may coalesce it with the view's own. The
+  worker resolves it as above. A turn found starting on another day moves
+  the view there once and is selected: `activeAt` names the day the
+  activity ended, a turn the day it started, and they differ for a turn
+  that worked past midnight
+  ([round 3](archive/day-view/review-findings-day-view-round-3.md#dv3-4)).
+  A target for a day the user has left meanwhile is dropped. A target the
+  filters would hide clears them: the chat was asked for by name. The fresh
+  fit then reveals it.
 - **Layout** (`src/day-layout.ts`, fuzzed like the tree's): families in order
   of their first turn of the day, a root's lane first. Inside a lane, tracks
   as in a git log: a turn continues the track its parent ends, anything else
@@ -1058,12 +1090,17 @@ build; nothing about parsing, stitching or identity is specific to it.
   stamped the same instant parent first — Codex writes a prompt and its reply
   in one second): steps follow the clock (6 px/min, capped at 120 px), never
   closer than 16 px within a track, and a pause of 20 minutes or more becomes
-  a fixed 56 px break labelled with its length. A pause is time with nothing
-  running: from the latest `endedAt` (or start) of every earlier turn, in any
-  lane, to the next start — an hour-long reply followed by a prompt a minute
-  later is one idle minute, not a break. `running` turns seed that end, so
-  a reply that ran past midnight keeps the next morning busy until it
-  ended. Time labels: the first turn,
+  a fixed 56 px break labelled with its length. A pause is time with no
+  recorded activity: from the latest `activeEndOf` (end, or the activity
+  under it) of every earlier turn, in any lane, to the next start — an
+  hour-long reply, or one message followed by an hour of tool calls, then a
+  prompt a minute later, is one idle minute, not a break. `running` turns
+  seed that end, so work that ran past midnight keeps the next morning busy
+  until it stopped. Display spans alone didn't establish this: Copilot's
+  `assistant.turn_end` and trailing tool events never reached the layout
+  ([round 3, finding 3](archive/day-view/review-findings-day-view-round-3.md#dv3-3)).
+  A harness that writes nothing while it works still reads as idle.
+  Time labels: the first turn,
   each turn after a break, and local hours interpolated between turns.
   Edges into a fork or a prompt edit, or across lanes, are dashed like the
   tree's; a parent outside the day (or the filters) gets a short dotted
@@ -1084,14 +1121,21 @@ build; nothing about parsing, stitching or identity is specific to it.
   to `ty + y` (`screen` in `DayView.tsx`), instead of scaling the drawing:
   a lane keeps its pixel height, so a chat's name can be shown whole. A
   lane is as tall as its tracks or its wrapped name (`labelLines`, an
-  estimate from character counts — nothing can be measured before it is
-  drawn — generous like the tree's `nodeWidth`, with tracks centred). With
+  estimate from character widths — nothing can be measured before it is
+  drawn — generous like the tree's `nodeWidth`, with tracks centred: 7 px a
+  character, a whole 12 px em for CJK, Hangul, fullwidth forms and emoji,
+  which the first estimate clipped). Under All conversations the lane also
+  names its directory's last folder at the bottom right, on a line the
+  layout keeps for it (`dirs`); the side card's chat list shows no paths,
+  and the selected chat's card shows the full one. With
   x alone scaled, turns close up as the view zooms out, so dots shrink
   (`dotRadius`: a track's turns stay clear down to k ≈ 0.375, then 2px).
   Time labels are drawn at a fixed size in a strip pinned along the top,
   and which fit is decided at the current zoom (`visibleTicks`: 64px
   apart, an hour yielding to a first turn or a resume); the layout returns
   them all. The side card's chat list wraps names beside their agent chip.
+  Scrollbars, there and in every pane, are the app's own slim thumb
+  (`::-webkit-scrollbar`, tokens `--scroll-thumb*`), not the platform's.
 - **Wheel.** Both canvases, tree and day, take the wheel through
   `useCanvasWheel` (`src/wheel.ts`): a native non-passive listener on the
   SVG. React's `onWheel` is passive, so its `preventDefault` couldn't stop
@@ -1414,21 +1458,33 @@ dangling parent, one root per path), not session counts.
   agent is never asked; a Codex rename and a Claude record rewritten under
   the same uuid and time change only their families' revisions, and the day
   re-reads exactly those two; a Copilot reply running past midnight stays on
-  its first day and is the next day's `running`. `src/day-layout.test.ts`:
-  tracks, breaks measured from the latest end (a long reply, or one running
-  in from the day before, isn't idle), a chat landing on its latest-ending
-  turn, lanes as tall as their wrapped names (fuzzed too), dots that shrink
+  its first day and is the next day's `running`. `test/day-find.test.ts`
+  (its own home): a Copilot family re-rooted onto its quiet fork is found
+  through the fork, never in an unrelated chat with the same opening text;
+  a Claude end split past the window is found there, not as its shorter
+  head; a conversation's latest-ending turn; and `activeUntil` from Copilot
+  tool runs and `turn_end`, a Codex command within its turn, and a run past
+  midnight as `running`. `test/endpoints.test.ts`: Claude tool results and
+  tool-only replies count for the reply, the next prompt doesn't.
+  `src/day-layout.test.ts`: tracks, breaks measured from the latest
+  activity (a long reply, a tool run, or one running in from the day
+  before, isn't idle), a chat landing on its latest-ending turn, lanes as
+  tall as their wrapped names and folders (fuzzed too; wide scripts and
+  emoji counted wide), dots that shrink
   with zoom without touching, time labels kept apart at any zoom, ticks,
   fork/edit/lead edges, same-instant ordering, navigation, and 300 random
   days with no overlapping turns and x in time order. `src/day.test.ts`:
-  local day bounds across DST and month ends, and the filters. The store
-  and welcome tests cover a turn opened from the day view (chain opened,
-  member focused, the drawn end kept after its group split, the focused
-  chat's family asked first), a day refresh keeping the drawn range across
-  a split and a re-root, `showInDay` from a tree (the tree closes, the turn
-  is found as drawn, hiding filters give way, a target for a day left
-  meanwhile is dropped), `resolveTarget`, stale day results, and the day
-  markup (directories only under All conversations, the ◷ card button).
+  local day bounds across DST and month ends, the filters, and the wants
+  (`wantOf`, `familyWant`, `foundKey`). The store and welcome tests cover a
+  turn opened from the day view (chain opened, member focused, the drawn
+  end kept after its group split, the focused chat's family asked first),
+  a day refresh sending the drawn turn and its holders and following what
+  the worker found (re-rooted; on another day, deselected; a turn picked
+  meanwhile stands), `showInDay` from a tree (the tree closes, hiding
+  filters give way, a target for a day left meanwhile is dropped) and from
+  a card whose latest turn started the day before, stale day results, and
+  the day markup (lane folders only under All conversations, no paths in
+  the chat list, the ◷ card button, the empty day's latest turn).
   **Registry:** with `AGENTREE_READ_ONLY_STORES` a fork is refused before
   any provider is asked, and hand-offs are refused. Focus, the kept
   viewport, the narrow, short layout, wheel cancellation and Settings'

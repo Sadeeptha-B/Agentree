@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store.ts";
-import { span, tilde } from "../format.ts";
+import { folderOf, span, tilde } from "../format.ts";
 import { useCanvasWheel } from "../wheel.ts";
 import { endOf } from "../../shared/render.ts";
-import { chatName, clock, dayTitle, filterDay, isDayKey, latestActiveDay, shiftDay, todayKey } from "../day.ts";
+import { chatName, clock, dayKeyOf, dayTitle, familyWant, filterDay, isDayKey, latestActive, shiftDay, todayKey } from "../day.ts";
+import { filterSessions } from "../list.ts";
 import {
   buildDayLayout, dotRadius, LABEL_W, laneLatest, PAD, stepInLane, stepLane, visibleTicks,
   type DayDot, type DayEdge, type DayLane, type DayLayout,
@@ -49,7 +50,7 @@ function edgePath(e: DayEdge, s: Screen, r: number): string {
 export function DayView() {
   const {
     day, dayActivity, dayLoading, daySelected, sessions, filter, cwdFilter, providerFilter, settingsRev,
-    setDay, loadDay, set, openSession,
+    setDay, loadDay, set, openSession, showInDay,
   } = useStore();
 
   useEffect(() => {
@@ -60,7 +61,13 @@ export function DayView() {
     () => (dayActivity ? filterDay(dayActivity, { query: filter, cwd: cwdFilter, provider: providerFilter }) : null),
     [dayActivity, filter, cwdFilter, providerFilter],
   );
-  const layout = useMemo(() => (shown ? buildDayLayout(shown.turns, shown.chats, shown.running) : null), [shown]);
+  // Under "All conversations" each lane names its folder; with a directory
+  // picked in the rail, every lane is in it.
+  const dirs = !cwdFilter;
+  const layout = useMemo(
+    () => (shown ? buildDayLayout(shown.turns, shown.chats, shown.running, { dirs }) : null),
+    [shown, dirs],
+  );
   const selected = (daySelected && layout?.byKey.get(daySelected)) || null;
   const select = (key: string | null) => set({ daySelected: key });
   const open = (d: DayDot) =>
@@ -204,7 +211,10 @@ export function DayView() {
   };
 
   const today = todayKey();
-  const latest = latestActiveDay(sessions);
+  // The conversation the filters let through that was active last: an empty
+  // day offers its latest turn, on the day that turn started (it can be the
+  // day before its last activity, for a turn that worked past midnight).
+  const latest = latestActive(filterSessions(sessions, { query: filter, cwd: cwdFilter, provider: providerFilter }));
   const providersShown = PROVIDERS.filter((p) => shown?.chats.some((c) => c.provider === p));
   const hasCross = !!layout?.edges.some((e) => e.cross);
 
@@ -248,9 +258,13 @@ export function DayView() {
                     ? `Nothing on ${dayTitle(day)} matches the filters.`
                     : `No activity on ${dayTitle(day)}.`}
                 </p>
-                {latest && latest !== day && (
-                  <button className="ghost bordered" onClick={() => setDay(latest)}>
-                    go to the latest activity · {dayTitle(latest)}
+                {latest && (
+                  <button
+                    className="ghost bordered"
+                    title={`“${latest.title}”: its latest turn, among every chat of its day`}
+                    onClick={() => void showInDay(dayKeyOf(latest.activeAt), familyWant(latest))}
+                  >
+                    go to the latest turn
                   </button>
                 )}
               </div>
@@ -332,6 +346,7 @@ export function DayView() {
               lanes={layout.lanes}
               view={view}
               selectedLane={selected?.lane ?? null}
+              showDirs={dirs}
               onPick={(lane) => pick(laneLatest(layout, lane)?.key ?? null)}
               onHover={setHoverLane}
             />
@@ -360,7 +375,7 @@ export function DayView() {
                   <i className="lg-cross" /> fork / edited branch
                 </span>
               )}
-              <span title="A pause of 20 minutes or more, drawn short">
+              <span title="20 minutes or more with no recorded activity (messages, tool calls and results), drawn short">
                 <i className="lg-break" /> idle
               </span>
             </div>
@@ -370,7 +385,7 @@ export function DayView() {
         <DayCard
           layout={layout}
           selected={selected}
-          showPaths={!cwdFilter}
+          showPaths={dirs}
           onPick={pick}
           onOpen={open}
         />
@@ -499,18 +514,21 @@ function Dot({
 
 /**
  * Chat names, pinned at the left edge, wrapped whole: they follow the
- * vertical pan only. Each lane is as tall as its name needs (`labelLines`).
+ * vertical pan only. Each lane is as tall as its name needs (`labelLines`),
+ * plus a line for its folder (bottom right) with `showDirs`.
  */
 function LaneLabels({
   lanes,
   view,
   selectedLane,
+  showDirs,
   onPick,
   onHover,
 }: {
   lanes: DayLane[];
   view: View;
   selectedLane: number | null;
+  showDirs: boolean;
   onPick: (lane: DayLane) => void;
   onHover: (lane: number | null) => void;
 }) {
@@ -534,6 +552,7 @@ ${l.turns.length} turns this day — click for the latest`}
             {fork && <span className="fork-glyph">⑂</span>}
             <span className="day-label-name">{chatName(l.chat)}</span>
             <span className="dir-count">{l.turns.length}</span>
+            {showDirs && l.chat.cwd && <span className="day-label-dir">{folderOf(l.chat.cwd)}</span>}
           </button>
         );
       })}
@@ -555,8 +574,9 @@ function DayCard({
   layout: DayLayout | null;
   selected: DayDot | null;
   /**
-   * Each chat's directory. Only under "All conversations": with a directory
-   * picked in the rail every chat shown is in it (as the list's cards).
+   * The selected chat's directory. Only under "All conversations": with a
+   * directory picked in the rail every chat shown is in it (as the list's
+   * cards). The chat list leaves it to the lanes, which name each folder.
    */
   showPaths: boolean;
   onPick: (key: string | null) => void;
@@ -578,9 +598,6 @@ function DayCard({
                     {chatName(l.chat)}
                   </span>
                 </span>
-                {showPaths && (
-                  <code className="path day-chat-path">{l.chat.cwd ? tilde(l.chat.cwd) : "(unknown directory)"}</code>
-                )}
                 <span className="muted small">
                   {l.turns.length} turns · {clock(layout.byKey.get(l.turns[0])!.turn.timestamp)}–
                   {clock(endOf(laneLatest(layout, l)!.turn))}
@@ -618,6 +635,7 @@ function DayCard({
         {" · "}
         {clock(t.timestamp)}
         {t.endedAt ? `–${clock(t.endedAt)}` : ""}
+        {t.activeUntil ? ` · working until ${clock(t.activeUntil)}` : ""}
         {t.branchKind === "fork" ? " · starts the fork" : t.branchKind === "edit" ? " · edited prompt" : ""}
         {t.isSidechain ? " · subagent" : ""}
       </div>

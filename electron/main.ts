@@ -8,7 +8,7 @@ import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { watchLater, type Watcher } from "./watch.ts";
 import { CH } from "./ipc.ts";
-import type { ActionResult, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../shared/types.ts";
+import type { ActionResult, DayWant, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../shared/types.ts";
 
 /**
  * App root. Using Electron's own resolver rather than __dirname/import.meta
@@ -94,7 +94,7 @@ ipcMain.handle(CH.listSessions, () => backend.listSessions());
 
 ipcMain.handle(CH.getSession, (_e, id: string) => backend.getSession(id));
 
-ipcMain.handle(CH.getDay, (_e, start: number, end: number) => backend.getDay(start, end));
+ipcMain.handle(CH.getDay, (_e, start: number, end: number, want?: DayWant) => backend.getDay(start, end, want));
 
 ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: NodeMeta) =>
   backend.patchNode(sessionId, nodeId, patch),

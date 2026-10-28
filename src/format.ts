@@ -33,6 +33,12 @@ export function tilde(p: string): string {
   return m ? "~" + (m[1] ?? "") : p;
 }
 
+/** A path's last folder: `C:\src\Agentree\` → `Agentree`. A bare root stays as it is. */
+export function folderOf(p: string): string {
+  const parts = p.trim().split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? p.trim();
+}
+
 /** "1h 40m", "25m", "45s": a stretch of time, coarsely. */
 export function span(ms: number): string {
   const m = Math.round(ms / 60_000);
