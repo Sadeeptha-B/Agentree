@@ -5,6 +5,7 @@ import { Welcome } from "./components/Welcome.tsx";
 import { Toolbar } from "./components/Toolbar.tsx";
 import { TreeCanvas } from "./components/TreeCanvas.tsx";
 import { NodePanel } from "./components/NodePanel.tsx";
+import { ErrorBanner } from "./components/ErrorBanner.tsx";
 
 export function App() {
   const { session, boot, error, set, close, reloadSession, refreshSessions, settingsRev } = useStore();
@@ -40,11 +41,7 @@ export function App() {
   return (
     <div className="app">
       <Toolbar />
-      {error && (
-        <div className="banner error" onClick={() => set({ error: null })}>
-          {error} <span className="muted small">(click to dismiss)</span>
-        </div>
-      )}
+      <ErrorBanner message={error} onDismiss={() => set({ error: null })} />
       <div className="split">
         <TreeCanvas />
         <NodePanel />

@@ -26,17 +26,37 @@ export const hostPlatform = (): Platform => (process.platform === "win32" ? "win
 /** Single-quote a word for the target shell; ids and flags pass through bare. */
 export function quote(word: string, platform: Platform = hostPlatform()): string {
   if (/^[A-Za-z0-9_\-=.:/@]+$/.test(word)) return word;
+  return literal(word, platform);
+}
+
+/** Always single-quoted: a value assigned to a variable is never a bare word in PowerShell. */
+function literal(word: string, platform: Platform): string {
+  return platform === "win32" ? `'${word.replace(/'/g, "''")}'` : `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Environment a command needs, variable → value. */
+export type Env = Record<string, string>;
+
+/**
+ * `argv` as one command, preceded by the variables it needs. POSIX scopes them
+ * to the command (`X='…' cmd`); PowerShell 5.1 has no such prefix, so they are
+ * set for the rest of that shell session (`$env:X = '…'; cmd`).
+ */
+export function commandLine(argv: string[], env: Env = {}, platform: Platform = hostPlatform()): string {
+  const cmd = argv.map((a) => quote(a, platform)).join(" ");
+  const vars = Object.entries(env);
+  if (!vars.length) return cmd;
   return platform === "win32"
-    ? `'${word.replace(/'/g, "''")}'`
-    : `'${word.replace(/'/g, `'\\''`)}'`;
+    ? `${vars.map(([k, v]) => `$env:${k} = ${literal(v, platform)}`).join("; ")}; ${cmd}`
+    : `${vars.map(([k, v]) => `${k}=${literal(v, platform)}`).join(" ")} ${cmd}`;
 }
 
 export function resumeCommand(
   cwd: string,
   argv: string[],
-  platform: Platform = hostPlatform(),
+  { env = {}, platform = hostPlatform() }: { env?: Env; platform?: Platform } = {},
 ): string {
-  const cmd = argv.map((a) => quote(a, platform)).join(" ");
+  const cmd = commandLine(argv, env, platform);
   if (!cwd) return cmd;
   return platform === "win32"
     ? `Set-Location -LiteralPath ${quote(cwd, platform)}; ${cmd}`

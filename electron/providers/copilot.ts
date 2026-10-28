@@ -16,7 +16,7 @@ import { applyAnnotations } from "../meta.ts";
 import { HealthScan } from "../health.ts";
 import { readLineage, recordLineage } from "../lineage.ts";
 import { copilotState } from "../paths.ts";
-import { RESUME_ARGV, resumeCommand } from "../shell.ts";
+import { resumeCommandFor } from "../launch.ts";
 import { assignStableIds, foldedTextKey, textKey } from "../identity.ts";
 import { stitchFamily, type FamilyMember } from "./stitch.ts";
 
@@ -246,7 +246,7 @@ function stitched(fam: Family): TurnNode[] {
     // A fork rewrites event ids, so identity is the text chain — the same in
     // the copied prefix. (Copies: the parse is cached.)
     const nodes = p.nodes.map((n) => ({ ...n }));
-    assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, legacyKey: foldedTextKey(n) }));
+    assignStableIds(nodes, (n) => ({ key: textKey(n), strong: false, earlier: [foldedTextKey(n)] }));
     members.push({
       sessionId: m.ws.id,
       parentSessionId: m.ws.id === fam.rootId ? null : m.ws.forkedFrom,
@@ -256,8 +256,7 @@ function stitched(fam: Family): TurnNode[] {
   return mergeSameRoleRuns(stitchFamily(members));
 }
 
-export const copilotResumeArgv = RESUME_ARGV.copilot;
-const resumeCmd = (id: string, cwd: string) => resumeCommand(cwd, copilotResumeArgv(id));
+const resumeCmd = (id: string, cwd: string) => resumeCommandFor("copilot", id, cwd);
 
 function metaFor(fam: Family): SessionMeta | null {
   const rootMember = fam.members.find((m) => m.ws.id === fam.rootId);

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store.ts";
 import { api } from "../api.ts";
+import { ErrorBanner } from "./ErrorBanner.tsx";
 import type { ProviderId, SettingsPaths } from "../../shared/types.ts";
 
 const AGENTS: { id: ProviderId; name: string }[] = [
@@ -21,15 +22,23 @@ const PATHS: { key: keyof SettingsPaths; label: string; env: string; placeholder
   },
 ];
 
-/** A path field: saved on blur or Enter, cleared when emptied. */
+/**
+ * A path field: saved on blur or Enter, cleared when emptied. A save that
+ * fails keeps what was typed, marked as not saved, until a retry succeeds.
+ */
 function PathField({ k, value, env }: { k: keyof SettingsPaths; value: string; env?: string }) {
   const { saveSettings } = useStore();
   const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
+  const [unsaved, setUnsaved] = useState(false);
+  useEffect(() => {
+    setDraft(value);
+    setUnsaved(false);
+  }, [value]);
   const def = PATHS.find((p) => p.key === k)!;
-  const commit = () => {
+  const commit = async () => {
     const v = draft.trim();
-    if (v !== value) void saveSettings({ paths: { [k]: v || null } });
+    if (v === value) return setUnsaved(false);
+    setUnsaved(!(await saveSettings({ paths: { [k]: v || null } })));
   };
   return (
     <label className="settings-path">
@@ -40,14 +49,19 @@ function PathField({ k, value, env }: { k: keyof SettingsPaths; value: string; e
         placeholder={def.placeholder}
         spellCheck={false}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={() => void commit()}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-          if (e.key === "Escape") setDraft(value);
+          if (e.key === "Escape") {
+            setDraft(value);
+            setUnsaved(false);
+          }
         }}
       />
       {env ? (
         <span className="muted small">Set by {def.env}, which wins over this setting.</span>
+      ) : unsaved ? (
+        <span className="error-text small">Not saved — still {value || "the default"}. Press Enter to retry.</span>
       ) : (
         draft.trim() && !/^([a-zA-Z]:[\\/]|[\\/])/.test(draft.trim()) && (
           <span className="error-text small">Use an absolute path; a relative one is ignored.</span>
@@ -62,7 +76,7 @@ function PathField({ k, value, env }: { k: keyof SettingsPaths; value: string; e
  * lives; none changes how a transcript is read. Saved as you change them.
  */
 export function Settings() {
-  const { settings: state, saveSettings, set } = useStore();
+  const { settings: state, saveSettings, set, settingsError } = useStore();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && set({ settingsOpen: false });
     window.addEventListener("keydown", onKey);
@@ -81,6 +95,10 @@ export function Settings() {
             ✕
           </button>
         </div>
+        <ErrorBanner
+          message={settingsError && `Not saved: ${settingsError}`}
+          onDismiss={() => set({ settingsError: null })}
+        />
 
         <section>
           <h3>Conversation list</h3>
