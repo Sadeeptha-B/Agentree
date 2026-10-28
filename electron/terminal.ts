@@ -3,15 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ActionResult } from "../shared/types.ts";
-import { commandLine, resumeCommand, type Env } from "./shell.ts";
+import { resumeCommand, type Env } from "./shell.ts";
 
 /**
  * Open a NEW OS terminal window running a resume command — the desktop app's
  * counterpart to VS Code's integrated terminal.
  *
- * - Windows: PowerShell in a new console window via `cmd /c start /D <cwd>`
- *   (`-NoExit` keeps it open after the agent quits), so the command itself
- *   is just the argv.
+ * - Windows: PowerShell in a new console window via `cmd /c start`
+ *   (`-NoExit` keeps it open after the agent quits), running the same
+ *   `Set-Location …; <argv>` script as the copied command, encoded.
  * - macOS: Terminal.app via `osascript … do script`.
  * - Linux: the first terminal emulator on PATH, running a login bash that
  *   stays open afterwards.
@@ -51,14 +51,16 @@ export function terminalLaunch(
   if (platform === "win32") {
     // `start` is what gives the shell a NEW console window: Node's `detached`
     // maps to DETACHED_PROCESS on Windows, i.e. no console at all, and a
-    // console program spawned that way never shows up (verified). Quoting is
-    // done here, verbatim: Windows paths can't contain `"`, and the PowerShell
-    // command uses single quotes only, so double-quoting both is safe even
-    // for paths with `&` or `^` in them.
-    const ps = commandLine(argv, env, "win32");
+    // console program spawned that way never shows up (verified). But cmd
+    // expands `%NAME%` anywhere in its command line, quotes or not, so no
+    // path may pass through it: the directory change and the command travel
+    // as one PowerShell script, base64 (`-EncodedCommand`, UTF-16LE), which
+    // has nothing for cmd to expand or split.
+    const ps = resumeCommand(cwd, argv, { env, platform: "win32" });
+    const encoded = Buffer.from(ps, "utf16le").toString("base64");
     return {
       cmd: "cmd.exe",
-      args: ["/d", "/c", `start "" /D "${cwd}" powershell.exe -NoExit -Command "${ps}"`],
+      args: ["/d", "/c", `start "" powershell.exe -NoExit -EncodedCommand ${encoded}`],
       verbatim: true,
     };
   }

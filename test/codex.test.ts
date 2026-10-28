@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { childIndex, pathToRoot, toNodeMap } from "../shared/render.ts";
+import { childIndex, forkPointOf, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
 
 const forkThread = vi.fn();
@@ -25,6 +25,7 @@ const T11 = "01900000-0000-7000-8000-00000000000b";
 const T12 = "01900000-0000-7000-8000-00000000000c";
 const G = "01900000-0000-7000-8000-000000000009";
 const L = "01800000-0000-7000-8000-000000000001";
+const LX = "01800000-0000-7000-8000-000000000003";
 const turn = (n: number) => `01900000-0000-7000-8000-0000000a${String(n).padStart(4, "0")}`;
 let home: string;
 
@@ -50,7 +51,7 @@ describe("Codex paginated rollouts", () => {
   it("lists families, hides guardian threads, names from session_index", () => {
     const list = listCodexSessions();
     const ids = list.map((s) => s.id).sort();
-    expect(ids).toEqual([L, T1, T4, T5, T8, T11, T12].sort());
+    expect(ids).toEqual([L, LX, T1, T4, T5, T8, T11, T12].sort());
     expect(ids).not.toContain(G);
     expect(ids).not.toContain(T7); // unparseable, so nothing to list
     const fam = list.find((s) => s.id === T1)!;
@@ -148,6 +149,21 @@ describe("Codex paginated rollouts", () => {
     expect(kidsOf(legacy, find(legacy, "Legacy hi."))).toEqual(["Legacy fork continues", "Legacy parent continues"]);
   });
 
+  it("reads a legacy rollout's prose though it also holds a completed item (observed, 0.164)", () => {
+    const d = loadCodexSession(LX)!;
+    expect(d.nodes.map((n) => [n.text, n.parentId && d.nodes.find((p) => p.id === n.parentId)!.text])).toEqual([
+      ["Mixed question", null],
+      ["Mixed answer.", "Mixed question"],
+      ["Mixed follow-up", "Mixed answer."],
+      ["Mixed second answer.", "Mixed follow-up"],
+    ]);
+    // Still a legacy page: no turn ids to fork at, and the member holds it all.
+    for (const n of d.nodes) expect(n.heldBy).toEqual([LX]);
+    expect(find(d, "Mixed second answer.").forkBlocked).toMatch(/predates/);
+    expect(listCodexSessions().find((s) => s.id === LX)).toMatchObject({ nodeCount: 4 });
+    expect(codexHealth().failed).toBe(1); // only T7's untaught vocabulary
+  });
+
   it("picks up a rename in session_index without any rollout changing", () => {
     expect(listCodexSessions().find((s) => s.id === T5)!.title).toBe("Copy me");
     fs.appendFileSync(path.join(home, "session_index.jsonl"), JSON.stringify({ id: T5, thread_name: "Renamed" }) + "\n");
@@ -168,7 +184,7 @@ describe("Codex fork anchors", () => {
 
   it("refuses a node inside a turn without calling app-server", async () => {
     const d = loadCodexSession(T1)!;
-    const res = await forkCodexAt(T1, find(d, "What is X?").id);
+    const res = await forkCodexAt(T1, forkPointOf(find(d, "What is X?")));
     expect(res.ok).toBe(false);
     expect(forkThread).not.toHaveBeenCalled();
   });
@@ -176,7 +192,7 @@ describe("Codex fork anchors", () => {
   it("forks by thread when the turn is on the thread's current history", async () => {
     forkThread.mockResolvedValueOnce({ ok: true, threadId: "new-thread-1", cwd: "C:\\work\\codex-demo" });
     const d = loadCodexSession(T1)!;
-    const res = await forkCodexAt(T1, find(d, "Different detail.").id);
+    const res = await forkCodexAt(T1, forkPointOf(find(d, "Different detail.")));
     expect(forkThread).toHaveBeenLastCalledWith({ threadId: T1, lastTurnId: turn(3) });
     expect(res).toMatchObject({ ok: true, id: "new-thread-1", open: { provider: "codex", sessionId: "new-thread-1" } });
   });
@@ -185,7 +201,7 @@ describe("Codex fork anchors", () => {
     const d = loadCodexSession(T1)!;
     const old = find(d, "More detail.");
     expect(old.forkBlocked).toMatch(/prompt edit replaced/);
-    const res = await forkCodexAt(T1, old.id);
+    const res = await forkCodexAt(T1, forkPointOf(old));
     expect(res).toEqual({ ok: false, error: old.forkBlocked });
     expect(forkThread).not.toHaveBeenCalled();
   });
@@ -196,7 +212,7 @@ describe("Codex fork anchors", () => {
     const x2 = find(d, "X2 answer.");
     expect(x2.sourceSessionId).toBe(T8);
     expect(x2.forkBlocked).toBeUndefined();
-    const res = await forkCodexAt(T8, x2.id);
+    const res = await forkCodexAt(T8, forkPointOf(x2));
     expect(forkThread).toHaveBeenLastCalledWith({ threadId: T9, lastTurnId: turn(12) });
     expect(res.ok && res.note).toMatch(/through a fork/);
   });
@@ -211,7 +227,7 @@ describe("Codex fork anchors", () => {
     expect(cancelled.forkBlocked).toBeUndefined();
     expect(replacement.forkBlocked).toMatch(/whole turns/);
     forkThread.mockResolvedValueOnce({ ok: true, threadId: "new-thread-4", cwd: "" });
-    await forkCodexAt(T11, find(d, "Replacement answer.").id);
+    await forkCodexAt(T11, forkPointOf(find(d, "Replacement answer.")));
     expect(forkThread).toHaveBeenLastCalledWith({ threadId: T11, lastTurnId: turn(17) });
   });
 
@@ -237,7 +253,7 @@ describe("Codex fork anchors", () => {
 
   it("refuses legacy rollouts, which have no turn ids", async () => {
     const d = loadCodexSession(L)!;
-    const res = await forkCodexAt(L, d.nodes[0].id);
+    const res = await forkCodexAt(L, forkPointOf(d.nodes[0]));
     expect(res.ok).toBe(false);
     expect(forkThread).not.toHaveBeenCalled();
   });

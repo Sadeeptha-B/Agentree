@@ -1,4 +1,4 @@
-import type { ForkSummary, MemberInfo, NodeId, SessionDetail, SessionId, SessionRef, TurnNode, UsageSnapshot } from "./types.ts";
+import type { ForkPoint, ForkSummary, MemberInfo, NodeId, SessionDetail, SessionId, SessionRef, TurnNode, UsageSnapshot } from "./types.ts";
 
 export type NodeMap = Map<NodeId, TurnNode>;
 export const ROOT_KEY = "\0root";
@@ -126,6 +126,32 @@ export function actionTarget(
   };
   return { member, ref: { provider: meta.provider, sessionId: member.id, cwd: member.cwd } };
 }
+
+/** The cut a drawn node stands for: where its last part ends (`ForkPoint`). */
+export const forkPointOf = (n: TurnNode): ForkPoint => ({
+  nodeId: n.id,
+  sessionId: n.sourceSessionId,
+  endId: n.lastRawId ?? n.id,
+});
+
+const endsAt = (n: TurnNode, p: ForkPoint) => n.sourceSessionId === p.sessionId && (n.lastRawId ?? n.id) === p.endId;
+
+/**
+ * The node of a newer snapshot that ends where `p` did: the same node while
+ * it still ends there, else the one node that now does (its group split
+ * under the same head). Null when none does — the cut was folded into a
+ * longer node, or its record is gone — or more than one does.
+ */
+export function resolveForkPoint(nodes: TurnNode[], p: ForkPoint): TurnNode | null {
+  const same = nodes.find((n) => n.id === p.nodeId);
+  if (same && endsAt(same, p)) return same;
+  const hits = nodes.filter((n) => endsAt(n, p));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/** Why a fork whose point no longer resolves was refused. */
+export const FORK_POINT_GONE =
+  "That turn changed on disk after it was drawn, or is gone. Select it again once the tree has refreshed, then fork.";
 
 /** A family's members as the welcome list shows them: every one but the root, newest first. */
 export function forkSummaries(members: MemberInfo[], rootId: string): ForkSummary[] {

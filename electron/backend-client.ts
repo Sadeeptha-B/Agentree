@@ -6,6 +6,25 @@ export type Backend = {
   [K in MethodName]: (...args: Parameters<Methods[K]>) => Promise<Awaited<ReturnType<Methods[K]>>>;
 } & { dispose(): void };
 
+/**
+ * The worker's method names, for building the proxy. The host may import
+ * `backend.ts` for its types only (a runtime import would bundle the
+ * providers into the host), so the names are restated here — as a record
+ * over `MethodName`, which the compiler checks for completeness: a method
+ * added to the worker and not here is a type error, not a missing function.
+ */
+const METHOD_NAMES = {
+  listSessions: true,
+  getSession: true,
+  patchNode: true,
+  forkAt: true,
+  providerHealth: true,
+  watchTargets: true,
+  resumeLaunch: true,
+  getSettings: true,
+  setSettings: true,
+} satisfies Record<MethodName, true>;
+
 type Pending = Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
 
 /**
@@ -69,16 +88,7 @@ export function startBackend(workerFile: string): Backend {
     });
 
   const proxy = {} as Record<MethodName, (...a: unknown[]) => Promise<unknown>>;
-  for (const m of [
-    "listSessions",
-    "getSession",
-    "patchNode",
-    "forkAt",
-    "providerHealth",
-    "watchTargets",
-    "getSettings",
-    "setSettings",
-  ] satisfies MethodName[]) {
+  for (const m of Object.keys(METHOD_NAMES) as MethodName[]) {
     proxy[m] = (...args) => call(m, args);
   }
 

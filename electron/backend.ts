@@ -1,4 +1,4 @@
-import type { NodeMeta, ProviderId, SessionId, SettingsPatch } from "../shared/types.ts";
+import type { ForkPoint, NodeMeta, ProviderId, SessionId, SettingsPatch } from "../shared/types.ts";
 import { resumeLaunch } from "./launch.ts";
 import { allHealth, annotate, forkAnyAt, listAllSessions, loadAnySession, watchTargets } from "./registry.ts";
 import { settingsState, writeSettings } from "./settings.ts";
@@ -20,7 +20,7 @@ export const methods = {
   listSessions: () => listAllSessions(),
   getSession: (id: SessionId) => loadAnySession(id),
   patchNode: (familyId: SessionId, nodeId: string, patch: NodeMeta) => annotate(familyId, nodeId, patch),
-  forkAt: (sessionId: SessionId, nodeId: string) => forkAnyAt(sessionId, nodeId),
+  forkAt: (sessionId: SessionId, point: ForkPoint) => forkAnyAt(sessionId, point),
   providerHealth: () => allHealth(),
   watchTargets: (sessionId: SessionId | null) => watchTargets(sessionId),
   // What a host runs to resume a session: argv plus the store's environment.

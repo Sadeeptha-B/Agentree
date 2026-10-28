@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ForkResult, SessionId, TurnNode } from "../../shared/types.ts";
+import { FORK_POINT_GONE, resolveForkPoint } from "../../shared/render.ts";
+import type { ForkPoint, ForkResult, SessionId, TurnNode } from "../../shared/types.ts";
 import { recordLineage } from "../lineage.ts";
 import { resumeCommandFor } from "../launch.ts";
 import {
@@ -55,10 +56,11 @@ import {
  * undocumented reducer behaviour, needed a POSIX shell, and couldn't be
  * driven from the VS Code chat panel at all.
  */
-export function forkClaudeAt(familyId: SessionId, nodeId: string): ForkResult {
+export function forkClaudeAt(familyId: SessionId, point: ForkPoint): ForkResult {
   const family = loadSession(familyId);
-  const node = family?.nodes.find((n) => n.id === nodeId);
-  if (!family || !node) return { ok: false, error: "That turn is not in this conversation any more." };
+  // The node that still ends where the user's selection did when drawn.
+  const node = family && resolveForkPoint(family.nodes, point);
+  if (!family || !node) return { ok: false, error: FORK_POINT_GONE };
 
   // The provider decided at parse time which turns can anchor a fork; the
   // panel showed the same reason.

@@ -7,7 +7,7 @@ import { openTerminal } from "./terminal.ts";
 import { checkForUpdate } from "./update.ts";
 import { watchLater, type Watcher } from "./watch.ts";
 import { CH } from "./ipc.ts";
-import type { ActionResult, NodeMeta, SessionRef, SettingsPatch } from "../shared/types.ts";
+import type { ActionResult, ForkPoint, NodeMeta, SessionRef, SettingsPatch } from "../shared/types.ts";
 
 /**
  * App root. Using Electron's own resolver rather than __dirname/import.meta
@@ -97,9 +97,7 @@ ipcMain.handle(CH.patchNode, (_e, sessionId: string, nodeId: string, patch: Node
   backend.patchNode(sessionId, nodeId, patch),
 );
 
-ipcMain.handle(CH.forkAt, (_e, sessionId: string, nodeId: string) =>
-  backend.forkAt(sessionId, nodeId),
-);
+ipcMain.handle(CH.forkAt, (_e, sessionId: string, point: ForkPoint) => backend.forkAt(sessionId, point));
 
 ipcMain.handle(CH.providerHealth, () => backend.providerHealth());
 
