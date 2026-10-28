@@ -2,7 +2,7 @@
 
 Current implementation context, consolidated on 2026-10-27 from the engineering material formerly in `AGENTS.md` and updated for the round 3 resolution. This document preserves provider research, observed behavior, rationale and earlier failed approaches. Working commands and ownership boundaries live in [AGENTS.md](../AGENTS.md); user workflows, settings and limitations live in the [user guide](user-guide.md).
 
-> **Round 3 review:** all eight findings of the [round 3 review](archive/2026-10-modernize/review-findings-round-3.md) were resolved on 2026-10-27; its [resolution](archive/2026-10-modernize/review-findings-round-3.md#resolution) maps each to its fix and regression test. The contracts they established are described below: [membership and focus](#membership-focus-and-family-lifecycle), the [identity scheme](#identity-scheme-and-compatibility), [metadata across copies](#one-session-several-folders), [settings isolation](#settings) and [annotation reconciliation](#annotations).
+> **Reviews:** the findings of the [round 3](archive/2026-10-modernize/review-findings-round-3.md#resolution) and [round 4](archive/2026-10-modernize/review-findings-round-4.md#resolution) reviews are resolved; each report maps its findings to fixes and regression tests. The contracts they established are described below: [membership and focus](#membership-focus-and-family-lifecycle) (with a node's [start and end](#a-node-starts-and-ends)), the [identity scheme](#identity-scheme-and-compatibility), [metadata across copies](#one-session-several-folders), [settings isolation and launch environment](#settings), [annotation ownership and reconciliation](#annotations) and the [live view](#live-view).
 
 ## Contents
 
@@ -53,6 +53,7 @@ electron/registry.ts           Provider interface; routes by "who owns this id";
 electron/paths.ts              every root, lazily: environment variable > settings > default
 electron/settings.ts           ~/.agentree/settings.json: validated per field, cached by stat
 electron/shell.ts              resume argv per harness + commands in the host shell's syntax (PowerShell / POSIX)
+electron/launch.ts             a session's resume launch (argv + store environment), resolved in the worker
 electron/native.ts             vscode:// deep links into the Claude Code / Codex extensions
 electron/terminal.ts           desktop "resume in terminal": a new OS terminal window
 electron/update.ts             desktop launch-time update check against the build's own origin
@@ -154,7 +155,7 @@ keep them apart, because each answers a different question:
 
 | Layer | Field | Answers |
 |---|---|---|
-| **message** (semantic) | `stableIds` (`legacyIds`) | which message is this, in every copy? Claude `m:<message.id>` / `u:<promptId>|<digest>`, Codex `<turnId>:<itemId>`; text-only evidence (no prompt id, Copilot, legacy Codex) is qualified by its parent's identity ([scheme](#identity-scheme-and-compatibility)). Keys annotations, carries a selection across a re-rooted reload |
+| **message** (semantic) | `stableIds` (`legacyIds`) | which message is this, in every copy? Claude `m:<message.id>` / `p:<promptId>|<digest>`, Codex `<turnId>:<itemId>`; text-only evidence (no prompt id, Copilot, legacy Codex) is qualified by its parent's identity ([scheme](#identity-scheme-and-compatibility)). Keys annotations, carries a selection across a re-rooted reload |
 | **occurrence** (physical) | `sourceSessionId`, `occurrences` | which session supplies the drawn message, and which other members have copies under their own raw ids? |
 | **membership** | `heldBy` | which member sessions' history holds ALL of this node — the sessions that open or resume onto it? |
 | **vendor turn** | `turnId` | which unit of work can a fork cut after? (Codex turn; Claude records are each an anchor) |
@@ -190,8 +191,8 @@ Canonical display ownership, member history and action intent are separate:
   which is exact because the merge never crosses an endpoint. Codex: the
   threads whose current page/base history holds the turn — an inherited turn
   need not be copied into a thread's files, so occurrences can't say it.
-- `MemberInfo.tipId` is the newest leaf among the nodes that list the member
-  in `heldBy` (`assignTips`), the same rule for every provider.
+- `MemberInfo.tipId` is the latest-ending leaf among the nodes that list the
+  member in `heldBy` (`assignTips`), the same rule for every provider.
 - **Focus is view state** (`State.focus` in the renderer store). Opening a
   member by name (`openSession(id, {focus})`) selects its tip and focuses it.
   Open/Resume act on the focused member wherever the selected node lists it
@@ -205,23 +206,39 @@ Canonical display ownership, member history and action intent are separate:
   counts as a member and appears in the list's fork names, but creates no
   distinct drawn suffix.
 - Families can gain members, lose their original root, or split if the
-  evidence linking them disappears. Reload tries surviving known members
-  (the focused member among the first) and carries selection by `stableIds`;
-  it cannot reconstruct an identity or relationship for which no surviving
-  evidence exists. Annotations are reconciled as membership grows (see
-  [Annotations](#annotations)).
+  evidence linking them disappears — a deleted member that alone shared
+  history with two others leaves two families. Any member's id loads the
+  family it is in now, so reload asks first for the focused member, then
+  for the sessions holding the selected node, and only then for the old root
+  and the other members; the first that loads is adopted, and selection is
+  carried by `stableIds`. The old root still loading proves only that it
+  survived, not that the user's member is still with it ([round 4 finding 4](archive/2026-10-modernize/review-findings-round-4.md#r4-4)).
+  Nothing reconstructs a relationship for which no evidence survives.
+  Annotations are reconciled as membership grows (see [Annotations](#annotations)).
+
+### A node starts and ends
+
+`timestamp` is when a node **starts** (its first record or part): it is what
+the panel shows and how siblings are ordered. `endedAt` is when its **last**
+part was written, where that is later — a reply streamed as several records,
+a same-role run, Codex commentary followed by a final answer. Which branch was
+active last is always read from the end (`endOf`): `newestLeaf` (the family's
+tip and "following") and `heldTip` (each member's tip). Ranked by start, a run
+continued after a sibling branch was written looked older than it, and
+focusing its member landed on the sibling ([round 4 finding 3](archive/2026-10-modernize/review-findings-round-4.md#r4-3)).
+The list's sort setting doesn't touch this: it orders sessions, not leaves.
 
 ### Identity scheme and compatibility
 
 Stable keys are a persistence contract: annotations are saved under them.
-`electron/identity.ts` owns the scheme; this is **scheme 3**.
+`electron/identity.ts` owns the scheme; this is **scheme 4**.
 
 - Text is digested **exactly as parsed** — the first 20 hex characters of
   SHA-1 over the whole text, whitespace included. Indentation and line breaks
   are meaning in code, and every copy-fork preserves text byte for byte.
   (Scheme 2 folded whitespace runs, so two prompts differing only in an
   indented line collided: [finding 1](archive/2026-10-modernize/review-findings-round-3.md#r3-1).)
-- A **strong** key stands alone: `m:<message.id>`, `u:<promptId>|<digest>`,
+- A **strong** key stands alone: `m:<message.id>`, `p:<promptId>|<digest>`,
   Codex `<turnId>:<itemId>`.
 - A **weak** key (text only: a Claude prompt with no prompt id, Copilot,
   legacy Codex) is qualified by its parent's identity at a fixed size:
@@ -236,13 +253,21 @@ Earlier keys stay readable (`meta.ts`, see [Annotations](#annotations)):
 | Scheme | Form | Found by |
 |---|---|---|
 | 1 | Raw per-file uuids | The node's own, absorbed and occurrence ids |
-| 2 | Strong keys with a whitespace-folded digest; weak keys as `k_n@…@k_1@base` literals | `legacyIds`: each part's scheme-2 identity where it differs, computed with the same bounded hash over the folded keys. A saved literal is converted to that form by folding it from its base (`scheme2Fingerprint`), so the quadratic string is never rebuilt |
-| 3 | As above | `stableIds` |
+| 2 | Prompt keys `u:<promptId>\|<folded digest>`; weak keys as `k_n@…@k_1@base` literals | `legacyIds`: each part's scheme-2 identity where it differs, computed with the same bounded hash over the folded keys. A saved literal is converted to that form by folding it from its base (`scheme2Fingerprint`), so the quadratic string is never rebuilt |
+| 3 | Prompt keys `u:<promptId>\|<exact digest>`; `w:` weak keys | `legacyIds`: each part's scheme-3 identity where it differs (a weak key under a prompt-id parent changed with that parent) |
+| 4 | Prompt keys `p:<promptId>\|<exact digest>`; `w:` weak keys | `stableIds` |
 
-There is no version field: the forms don't collide (scheme-2 weak keys
-contain `@`, scheme-3 weak keys start `w:`). A scheme-2 key that two nodes of
-the family now claim — the folded-whitespace collision itself — is given to
-neither; it stays on disk, unmigrated.
+Why scheme 4: schemes 2 and 3 saved prompt keys in the **same form**, `u:…`,
+so a saved `u:` key can't say which scheme wrote it — and for two prompts
+sharing a prompt id and differing only in whitespace, scheme 2's key for one
+is scheme 3's for the other. Writing to one then patched the other's label
+as its "old" key ([round 4 finding 1](archive/2026-10-modernize/review-findings-round-4.md#r4-1)).
+Current keys now have forms no earlier scheme saved with another meaning:
+`p:` is new, `m:` and Codex keys never changed meaning, and a `w:` key
+means the same in schemes 3 and 4 unless its parent chain changed — then
+the scheme-3 one is a legacy id. There is still no version field. An older
+key is used only under the [ownership rule](#annotations): one that two
+nodes of the family answer to is given to neither, and left on disk as it is.
 
 ## Harnesses, one tree model
 
@@ -352,7 +377,11 @@ Verified on 286 rollouts / 25 cuts.
 short-lived `codex app-server` (newline JSON-RPC: `initialize` →
 `initialized` → request). `lastTurnId` is **inclusive of the whole turn**:
 Codex cannot cut inside one. Verified: the new thread has `forkedFromId` and
-exactly the prefix turns.
+exactly the prefix turns. The server is started with `CODEX_HOME` set to the
+home Agentree reads whenever that isn't Codex's default (`harnessEnv`), also
+when only a saved setting names it: a fork must go to the store the tree came
+from, not to `~/.codex` ([round 4 finding 2](archive/2026-10-modernize/review-findings-round-4.md#r4-2);
+tested against the fake server, not a real fork in a relocated home).
 
 What can be forked, and through which thread, is decided when the tree is
 built, not on click:
@@ -509,7 +538,8 @@ fork's own suffix, re-parented onto the last shared turn and marked
 parent that grew after the fork just keeps its extra turns.
 
 - Keys: Claude uses `m:<message.id>` for replies and
-  `u:<promptId>|<digest of the whole text>` for prompts. Never the
+  `p:<promptId>|<digest of the whole text>` for prompts (`u:|<digest>`,
+  qualified by the parent, without a prompt id). Never the
   timestamp, which a fork re-stamps on its last record; never an opening
   gist, which merged two prompts sharing a long preamble and hung one's
   answer under the other; never whitespace-folded text, which merged two
@@ -823,12 +853,22 @@ The tree follows the transcripts on disk.
   failing provider leaves the others' targets. A disabled provider's
   discovery is never invoked. (Before, opening any tree first scanned Claude's
   folders, enabled or not: [round 3 finding 6](archive/2026-10-modernize/review-findings-round-3.md#r3-6).)
+- A root that doesn't exist when the watch starts (a harness not installed
+  yet, a home just configured) is stat-checked every second; once it
+  appears it gets the normal watch and fires one change. Before, it was never
+  watched until the view re-subscribed ([round 4 finding 6](archive/2026-10-modernize/review-findings-round-4.md#r4-6),
+  inherited from the original code).
+- Directories are watched by their real, long path: on Windows a recursive
+  `fs.watch` on an 8.3 short path (`C:\Users\JOHNSM~1\…`, as a temp dir can
+  be) receives long-form event names and libuv aborts the process.
 - The renderer drops results for a view that's gone: every open/close bumps a
   view generation, and a reload that resolves after a close is discarded.
-- A family can lose its root (its transcript deleted) while a fork survives.
-  The reload then asks for the selected turn's session and every other
-  member it knew, adopts whichever now roots the family, and carries the
-  selection over by `stableIds`. Closing a tree refreshes the list.
+- A family can lose its root (its transcript deleted) while a fork survives,
+  or split in two. The reload asks for the focused member, the sessions
+  holding the selected turn, then the root and every other member it knew,
+  adopts the first family that loads, and carries the selection over by
+  `stableIds` (see [membership](#membership-focus-and-family-lifecycle)).
+  Closing a tree refreshes the list.
 - Codex and Copilot roots (`sessions/` and `archived_sessions/`) are also
   **stat-polled** every second, and so is Codex's `session_index.jsonl`
   (renames). Codex appends were verified invisible to
@@ -852,7 +892,7 @@ The tree follows the transcripts on disk.
   choice).
 - Clicking a fork name, or opening a card whose search hit only a fork,
   opens the tree **focused** on that member: the selection lands on
-  `MemberInfo.tipId`, the newest leaf among the nodes the member holds
+  `MemberInfo.tipId`, the latest-ending leaf among the nodes the member holds
   (`heldBy`), and Open/Resume act on that member over its whole history,
   shared prefix included. A fork with no turn of its own lands on the turn
   it was forked at, showing nothing past it. See
@@ -913,7 +953,25 @@ parsers, stitching, fork rules or health thresholds.
   dropped ([finding 8](archive/2026-10-modernize/review-findings-round-3.md#r3-8)).
 - The file is validated field by field, so a hand-broken file falls back
   per field, and cached by (mtime, size), so a write from the other host's
-  worker is picked up. Writes are atomic per file, like the sidecars.
+  worker is picked up. Writes are atomic per file, like the sidecars. A write
+  that fails is shown where settings are edited (`settingsError`: in the
+  dialog, and on the welcome screen once it is closed), a path field that
+  didn't save says so and keeps what was typed, and the next save that
+  succeeds clears it. (Before, the error landed in a banner only the tree
+  view draws: [round 4 finding 5](archive/2026-10-modernize/review-findings-round-4.md#r4-5).)
+- **Store paths reach the harness's own processes.** A path setting
+  relocates where Agentree reads; the harness's processes must use the same
+  store. The worker resolves it (`harnessEnv` in `paths.ts`: the harness's
+  variable whenever its root isn't the default), and it travels with every
+  launch: the Codex fork server's environment, the copyable resume
+  commands, and terminal resume, which hosts start from the worker's
+  `resumeLaunch` (argv + environment; `launch.ts`) without resolving any
+  root themselves. VS Code passes it as the terminal's environment; the
+  desktop app writes it into the command (`$env:X = '…';` / `X='…'`),
+  because a macOS or Linux terminal window's shell needn't inherit the
+  launcher's. A chat-panel hand-off can't carry it — the vendor extension
+  reads its own configuration — so the panel says so when they may differ
+  ([round 4 finding 2](archive/2026-10-modernize/review-findings-round-4.md#r4-2)).
 - A change refreshes the list, reloads an open tree, and bumps
   `settingsRev`, which re-subscribes every watch: watch targets are resolved
   once, so a moved root needs a new watch. The parse caches are keyed by
@@ -951,13 +1009,25 @@ by the turn's **semantic identity** (`stableIds`), not by a uuid:
 
 - **writing** (`registry.annotate` → `writeAnnotation`) loads the family and
   writes the patch into **every member's** file under the node's stable ids:
-  one atomic replacement per sidecar, however many ids. Any older-scheme
-  entry for the node in that file gets the same patch, so a cleared label
-  can't resurface through it;
+  one atomic replacement per sidecar, however many ids. An older-scheme
+  entry the node owns gets the same patch, so a cleared label can't
+  resurface through it;
 - **reading** (`applyAnnotations`) checks every member's file, in member
   order, for any of the node's current keys; without a hit, for the keys an
   [earlier identity scheme](#identity-scheme-and-compatibility) saved it
-  under (scheme 2, then scheme 1's raw uuids, usually in the root's file only).
+  under (schemes 2–3, then scheme 1's raw uuids, usually in the root's file
+  only) that it owns.
+
+**Ownership.** Reads and writes apply one rule to every older-scheme key: it
+belongs to a node only if that node is the **only** one in the family that
+answers to it (`ownership` in `meta.ts`, over every node's current, legacy
+and raw keys). A key two nodes answer to is shown on neither, carried
+forward for neither, and not patched by a write to either — it stays on
+disk as it was. Current keys need no such check: their forms are never an
+earlier scheme's ([why scheme 4](#identity-scheme-and-compatibility)), so a
+current key always means its own node. Before, writes patched older keys
+without this check, and a label on one prompt overwrote its whitespace
+twin's ([round 4 finding 1](archive/2026-10-modernize/review-findings-round-4.md#r4-1)).
 
 **Reconciliation.** What is shown is made durable: every member's sidecar
 that holds no entry for the node under its current keys gets the shown entry
@@ -971,7 +1041,8 @@ Rules that keep this from going wrong:
   by a read, and once the family's sidecars agree a load writes nothing;
 - a cleared annotation is an absent entry, and absence is never copied, so
   reconciliation can't undo a clear made through `writeAnnotation`;
-- older-scheme entries are read, never rewritten or deleted.
+- older-scheme entries are never rewritten or deleted by a read, and only an
+  owned one is patched by a write.
 
 Not covered: a clear can only reach the sidecars of the members known when
 it is made (there are no tombstones), so a stale entry in a sidecar that
@@ -1014,7 +1085,10 @@ provider-qualified ID or different hash cannot simply replace existing keys.
 
 - Resume commands are emitted in the host shell's syntax by `shell.ts`:
   `Set-Location -LiteralPath '<cwd>'; claude --resume <id>` on win32
-  (PowerShell 5.1 has no `&&`), and `cd '<cwd>' && …` elsewhere.
+  (PowerShell 5.1 has no `&&`), and `cd '<cwd>' && …` elsewhere. A
+  relocated store adds `$env:CLAUDE_CONFIG_DIR = '…';` — which PowerShell
+  keeps for the rest of that session; it has no per-command prefix — or a
+  POSIX `CLAUDE_CONFIG_DIR='…'` prefix scoped to the command.
 - **`ELECTRON_RUN_AS_NODE=1` leaks into shells started from inside VS Code**
   (its extension host sets it, and agent tools' shells inherit it). Under it,
   `electron.exe` runs as plain Node and the app dies on `ipcMain` being
@@ -1047,9 +1121,10 @@ provider-qualified ID or different hash cannot simply replace existing keys.
 
 ## Tests
 
-After the [round 3 resolution](archive/2026-10-modernize/review-findings-round-3.md#resolution):
-101 tests in 12 files, typecheck and both production builds pass. Each round 3
-finding has a regression test that failed on the pre-fix code. The examples
+After the [round 4 resolution](archive/2026-10-modernize/review-findings-round-4.md#resolution):
+114 tests in 16 files, typecheck and both production builds pass. Each round 3
+and round 4 finding has a regression test that failed on the code before its
+fix (round 4's documentation finding excepted). The examples
 below describe coverage, not a promise that every possible member endpoint
 or native resume was checked. Working commands and safe probe rules are
 maintained in [AGENTS.md](../AGENTS.md#commands-and-verification).
@@ -1074,10 +1149,11 @@ dangling parent, one root per path), not session counts.
   `promptId` as the endpoint, pre-compact refusal). Round 3: prompts that
   differ only in indentation; quiet forks ending between two assistant and
   between two user records (exact `heldBy`, tips, the fork at that endpoint,
-  and the focused member's action target); annotations saved under scheme 2
-  (folded and literal-chain keys, an ambiguous one, clearing them); a label
-  made before its fork existed outliving the original; a rename in a
-  contained copy and in a diverged copy before its first new record.
+  and the focused member's action target); annotations saved under schemes
+  2 and 3 (folded, literal-chain and `u:` keys, an ambiguous one, clearing
+  them); a label made before its fork existed outliving the original; a
+  rename in a contained copy and in a diverged copy before its first new
+  record. Round 4: a family split by deleting its bridging member.
 - **Codex:** a `.zst` edit page, a fork through an archived thread, a
   guardian thread, a missing base, a copied-prefix fork in the item
   vocabulary, early usage, a rename in the index, an unknown item vocabulary
@@ -1085,8 +1161,9 @@ dangling parent, one root per path), not session counts.
   (whole turns only, refusal of cut-away turns, routing through a fork that
   still holds the turn), with app-server mocked.
 - **Pipeline invariants:** every enabled Claude fork in every fixture family
-  is made and checked (the fork alone draws exactly the selected path; the
-  family gains no node or root); every enabled Codex node ends its own turn.
+  is made and checked (the fork alone draws exactly the selected path, its
+  text compared exactly, whitespace and all; the family gains no node or
+  root); every enabled Codex node ends its own turn.
   Plus a merged node ending in a mid-turn attachment, two prompts sharing a
   long preamble, a renamed grandchild with intact creation order, a fork of a
   compacted fork, an aborted Codex prompt, and a pre-upgrade annotation that
@@ -1098,13 +1175,28 @@ dangling parent, one root per path), not session counts.
   a reload resolving after close, a family whose root was deleted, cleared
   fields sent as `null`, the focused member's Open/Resume payload across
   selection and reload, disabling remembered view inside the save debounce,
-  and an older settings response arriving last.
+  an older settings response arriving last, and reload after a family split
+  (focused member, else the selected turn's side). `src/welcome.test.tsx`
+  renders the welcome screen and settings dialog to check a failed save is
+  shown, then cleared by a successful retry.
+- **Annotations** (`test/annotations.test.ts`): two prompts sharing a prompt
+  id and differing only in whitespace keep independent labels, and an older
+  key both answer to is shown on neither and never rewritten.
+- **Endpoints** (`test/endpoints.test.ts`): the latest-ending branch is the
+  tip, across a same-role run and across one reply streamed as several
+  records.
+- **Watch** (`test/watch.test.ts`): roots that appear after the watch
+  started, polled and not, are picked up.
 - **Identity** (`test/identity.test.ts`): text-keyed identity size grows
   linearly, copies agree, the same text under another parent and
   whitespace-only differences stay distinct, scheme-2 literals are
   recognised; text-keyed stitching keeps indentation variants apart.
 - **Registry**: no duplicate list entries; watch discovery never invokes a
   disabled provider. **Settings**: no view kept while remembering is off.
+- **Launch environment:** the fake app-server reports the `CODEX_HOME` it
+  was started with — unset by default, the saved home when only a setting
+  names it, the variable when that is set; resume commands and terminal
+  launches carry the store variable, quoted, on both platforms.
 - **App-server client:** the real client against `test/fake-codex` — the
   request shape, a JSON-RPC error, a server exiting mid-request, and on
   Windows a `.cmd` override with a space in its path. The synthetic rollouts

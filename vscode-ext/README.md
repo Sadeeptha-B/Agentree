@@ -28,10 +28,8 @@ history needs).
 | **OpenAI Codex** (extension or CLI) | Plain/compressed rollout pages, forks and prompt edits | official `thread/fork`, whole turns only |
 | **GitHub Copilot CLI** | Session event logs | copy-truncated session; resume command |
 
-VS Code Copilot Chat is not supported. The current modernization has
-[unresolved round 3 findings](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/archive/2026-10-modernize/review-findings-round-3.md),
-including distinct-prompt merging and quiet-fork endpoint/action defects.
-See the [guide's current limitations](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/user-guide.md#limitations-and-open-review).
+VS Code Copilot Chat is not supported. See the
+[guide's limitations](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/user-guide.md#limitations).
 
 ## Use
 
@@ -39,18 +37,22 @@ Install a built `.vsix` with **Extensions: Install from VSIX**, reload if
 prompted, then run **Agentree: Open Conversation Trees** from the Command Palette.
 
 - **Welcome screen:** agent/directory filters, fork-name search, activity sort
-  and health rows. The gear opens settings shared with the desktop app.
+  and health rows. The gear opens settings shared with the desktop app; a
+  history location set there is also used for forks and terminal resume.
 - **Tree:** drag to pan, wheel to zoom, click a dotted `n` chain to expand it.
   Long-dashed edges enter a fork or an edited branch.
-- **Panel:** for the selected turn's session you get **open in Claude Code /
-  Codex** and **resume in terminal** (both continue the session's current
-  path), **⑂ fork after this turn** (opens the fork in the chat panel; the way
-  to continue any other branch), and star / label / dead-end annotations. A
-  turn that can't be forked says why.
+- **Panel:** for the session shown in its Session block you get **open in
+  Claude Code / Codex** and **resume in terminal** (both continue the
+  session's current path), **⑂ fork after this turn** (opens the fork in the
+  chat panel; the way to continue any other branch), and star / label /
+  dead-end annotations. A turn that can't be forked says why.
 
-On shared history, check the panel's Session before Open/Resume: focusing a
-quiet member currently does not preserve its action context. Native opening
-after a fork is configurable. The
+Shared history belongs to every session that copied it. Open a fork by its
+name in the list and the panel acts on that fork across all of its history,
+shared turns included; on a shared turn, a drop-down picks which session to
+act on. Resume in terminal uses the history location set in Agentree's
+settings; the chat panel uses its own extension's. Native opening after a
+fork is configurable. The
 [user guide](https://github.com/Sadeeptha-B/Agentree/blob/main/docs/user-guide.md)
 owns workflows, settings, paths and troubleshooting.
 

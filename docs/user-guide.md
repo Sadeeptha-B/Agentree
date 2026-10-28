@@ -228,7 +228,8 @@ Select a turn on the branch you want, then:
 
 - **open in Claude Code / Codex** to continue in the agent's own chat panel; or
 - **resume in terminal** to run `claude --resume …` / `codex resume …` in the
-  right folder.
+  right folder — pointed at the history location Agentree reads, if you set
+  one in its settings (see [data locations](#settings-and-data-locations)).
 
 These act on the **session shown in the panel's Session block** (see "Which
 session?" above); check its title and id before handing off. Within one
@@ -354,7 +355,10 @@ fall back independently; a malformed JSON file falls back to defaults.
 | Desktop update check / `updateCheck` | `true` | Check at the next desktop launch; the extension uses VS Code's extension-update mechanism |
 
 Checkboxes/radios save immediately. A path saves on blur or Enter; clearing
-it removes the override. Enter **absolute paths**: `~` is a shorthand in this
+it removes the override. If a change can't be saved (a read-only or full
+disk, say), the dialog says why, the path field shows "Not saved" with the
+value still in force, and the message stays on the welcome screen until a
+save succeeds. Enter **absolute paths**: `~` is a shorthand in this
 guide and the placeholders, not expanded in settings. For example, use
 `C:\Users\you\.codex` or `/home/you/.codex`. Invalid relative paths are ignored.
 An environment-overridden path is shown read-only with the variable name.
@@ -371,6 +375,14 @@ the settings file.
 | `AGENTREE_HOME` | None | `~/.agentree`; settings, annotations and fork lineage |
 | `AGENTREE_CODEX_BIN` | `paths.codexBin` | Newest matching Codex VS Code extension's bundled binary, then `codex` on `PATH`; used for forks |
 | `AGENTREE_NO_UPDATE_CHECK` | Overrides `updateCheck` | Unset by default; any nonempty value disables the desktop check. Use `1` to disable, unset to re-enable (`0` also disables) |
+
+A Claude, Codex or Copilot location you set applies to the agent too, not
+just to what Agentree shows: Codex forks are made in that Codex home, and
+**resume in terminal** and the **copy resume command** text set the agent's
+variable (`CODEX_HOME` and so on) for the command. In PowerShell the copied
+command sets it for the rest of that terminal session. **open in Claude Code /
+Codex** can't pass it on: the chat panel uses its own extension's
+configuration, and the panel reminds you when the two may differ.
 
 Use full paths in environment overrides too. The VS Code extension inherits
 the environment VS Code started with; restart it from the intended environment
@@ -408,8 +420,9 @@ and is not a Windows installer. The manual README steps work on Windows.
 
 ## Limitations
 
-The [round 3 review](archive/2026-10-modernize/review-findings-round-3.md)'s
-eight findings are resolved. Supported-scope restrictions and evidence limits:
+The [round 3](archive/2026-10-modernize/review-findings-round-3.md) and
+[round 4](archive/2026-10-modernize/review-findings-round-4.md) reviews'
+findings are resolved. Supported-scope restrictions and evidence limits:
 
 - Open/Resume continue the panel session's **current vendor path**, which can
   differ from the displayed newest branch. Fork a valid endpoint to continue
@@ -424,6 +437,8 @@ eight findings are resolved. Supported-scope restrictions and evidence limits:
   source-based evidence but incomplete native/visual verification. Use terminal
   resume if chat-panel hand-off fails. macOS/Linux terminal launch and some
   VS Code webview interactions also await direct checks.
+- With a relocated history location, **open in Claude Code / Codex** works
+  only if that extension uses the same location; terminal resume always does.
 - A new Claude fork written in an entirely different, previously unwatched
   project directory can wait until another member event or reopen to join an
   already open tree. The welcome list scans all configured project directories.
@@ -431,9 +446,10 @@ eight findings are resolved. Supported-scope restrictions and evidence limits:
   with renamed titles. The “probably forked from” label is intentional.
 - Concurrent desktop/extension sidecar writes can lose changes. An annotation
   whose original transcript is deleted before any tree holding that turn is
-  opened again can't be mapped. One saved by a version before 2026-10-27 on a
-  prompt that only differs in whitespace from a sibling prompt can't be told
-  apart, and is shown on neither.
+  opened again can't be mapped. One saved by an earlier version on a prompt
+  that only differs in whitespace from a sibling prompt can't be told apart:
+  it is shown on neither, and left as it was. Annotations made now on such
+  prompts are independent.
 - A session stored in two project folders takes its title from the copy
   written last, by file modification time; copying folders around can change
   that order.
