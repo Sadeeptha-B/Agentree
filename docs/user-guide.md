@@ -559,7 +559,7 @@ findings are resolved. Supported-scope restrictions and evidence limits:
 | Open/resume offers the original conversation instead of a fork | On a shared turn, pick the fork in the Session block's drop-down, or open the tree by the fork's name in the list |
 | "open in Claude Code" does nothing | The session may belong to a folder other than the one open in VS Code. Use **resume in terminal** instead. |
 | `npm start` fails with `ipcMain` undefined | Use the current `npm start` launcher rather than bare `electron .`; it clears `ELECTRON_RUN_AS_NODE`. Rebuild if running stale output |
-| The desktop app has no Electron | Run `npm approve-scripts electron`, then `node node_modules/electron/install.js`. |
+| The desktop app has no Electron | The first launch downloads it. If that failed, run `node node_modules/electron/install.js`. |
 | A compressed Codex file fails | Check the health row and runtime: local builds/tests need Node 22.15+, while the extension needs VS Code 1.101+ regardless of system Node |
 
 ---

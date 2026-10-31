@@ -1395,8 +1395,10 @@ provider-qualified ID or different hash cannot simply replace existing keys.
   host shell's syntax.
 - `scripts/install.sh` is POSIX-only. `bin/agentree.cjs` is plain Node and
   works anywhere `npm link` does.
-- npm's allow-scripts policy can block Electron's binary download. Run
-  `npm approve-scripts electron` and then `node node_modules/electron/install.js`.
+- Electron 45 has no install script: `require("electron")`, which every
+  launcher does, downloads the binary when it's missing. So `npm install`
+  no longer fetches it, and the first launch needs the network. If that
+  failed, run `node node_modules/electron/install.js`.
 - With `core.autocrlf=true`, test fixtures are protected by
   `test/fixtures/.gitattributes` (`-text`).
 
