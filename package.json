@@ -41,7 +41,7 @@
     "electron": "^43.2.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^26.6.5",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@types/vscode": "^1.125.0",
