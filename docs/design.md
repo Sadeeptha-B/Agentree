@@ -183,6 +183,9 @@ sessions that held the part before it. So whoever holds a copy of any part
 of a merged node holds all of it, and a quiet fork's selected endpoint shows
 only what it contains. (Before, a quiet fork that copied one reply was drawn
 ending on that reply merged with its parent's next one — [round 3 finding 2](archive/2026-10-modernize/review-findings-round-3.md#r3-2).)
+Nor does grouping take a cut away: a run doesn't continue from a part a fork
+can cut after into one it can't, so a prompt followed by a mid-turn message
+stays forkable.
 Physical file locators live on the session
 (`MemberInfo.files`), not on occurrences: a session stored in several files
 is read as one record set, so every anchor resolves whichever file holds
@@ -278,7 +281,7 @@ node's own records, so a copy's re-stamped record is no activity (Claude
 `Parsed.activity`, Copilot `ParsedSession.activity`). A record is its time
 and a key (`ActivityRecord`): the evidence a copy of it keeps. Claude: the
 time, kind, API message id and, per content block, the tool call it makes or
-answers with its length, and an answer's outcome (a fork that re-runs a
+answers, its outcome and a digest of its content (a fork that re-runs a
 copied call answers the same call id), because a copy gets fresh uuids.
 Copilot: the time, kind and payload digest without the session id the fork
 writer rewrites; never the event id. When stitching
@@ -309,7 +312,8 @@ Stable keys are a persistence contract: annotations are saved under them.
   are meaning in code, and every copy-fork preserves text byte for byte.
   (Scheme 2 folded whitespace runs, so two prompts differing only in an
   indented line collided: [finding 1](archive/2026-10-modernize/review-findings-round-3.md#r3-1).)
-- A **strong** key stands alone: `m:<message.id>`, `p:<promptId>|<digest>`,
+- A **strong** key stands alone: `m:<message.id>` (a later [part of a
+  message](#one-turn-is-many-records) is `m:<message.id>#<digest>`), `p:<promptId>|<digest>`,
   Codex `<turnId>:<itemId>`.
 - A **weak** key (text only: a Claude prompt with no prompt id, Copilot,
   legacy Codex) is qualified by its parent's identity at a fixed size:
@@ -336,7 +340,19 @@ as its "old" key ([round 4 finding 1](archive/2026-10-modernize/review-findings-
 Current keys now have forms no earlier scheme saved with another meaning:
 `p:` is new, `m:` and Codex keys never changed meaning, and a `w:` key
 means the same in schemes 3 and 4 unless its parent chain changed — then
-the scheme-3 one is a legacy id. There is still no version field. An older
+the scheme-3 one is a legacy id. There is still no version field.
+
+**What is drawn is part of a weak key**, since the parent qualifying it is the
+drawn one. So changing what is drawn moves keys without any new scheme, and
+the earlier drawing's identities have to stay findable. `parseRecords`
+rebuilds them with the same `assignStableIds` wherever a file holds something
+drawn differently from before (block-prompt mid-turn messages, which weren't;
+a [message of several parts](#one-turn-is-many-records), which was one node; and
+[notes](#claude-codes-own-notes-arent-turns), which were drawn), and keeps them
+as `legacyIds`. Stitching keeps a matched copy's too, because hiding a note can
+make two copies match that had different weak parents, and an annotation saved
+through one is that turn's. A later change to what is drawn extends that one
+definition of the earlier drawing. An older
 key is used only under the [ownership rule](#annotations): one that two
 nodes of the family answer to is given to neither, and left on disk as it is.
 
@@ -630,10 +646,11 @@ parent that grew after the fork just keeps its extra turns.
   whole-text digest; their copied prefixes are byte copies.
 - One whitespace-folded comparison remains, deliberately: matching a queued
   mid-turn message against the records of the same transcript
-  (`spliceInterjections`), where the queue holds the text as typed. It is a
-  dedup inside one file, never an identity.
+  (`spliceInterjections`), where the queue holds the text as typed: against
+  each text block and the prompt as delivered, since a record can split what
+  the queue holds whole. It is a dedup inside one file, never an identity.
 - A copy that merges into an existing node is recorded as an **occurrence**
-  (`{sessionId, id}`), not dropped.
+  (`{sessionId, id}`), not dropped, and its `legacyIds` join the node's.
 - Stitching runs on **unmerged** per-message nodes. The same-role merge runs
   after it, because a merge boundary can differ between a parent (which
   branches mid-run) and its fork (which doesn't).
@@ -712,6 +729,40 @@ text + a tool call becomes three chained `assistant` records sharing one API
 `message.id`. `transcripts.ts` groups by `message.id` and emits one node per
 turn, merging the blocks. Some messages span 27 records.
 
+A message isn't always one line, though. A tool can run while its message is
+still being written, so something drawn can land between its blocks, and a
+block can continue an earlier one on another branch. So a group holds **one
+block of text**, with the tool calls and thinking around it, and a message
+with several is one unmerged node per text. Folding those is the same-role
+merge's job, because it alone has what the decision needs: exactly one child,
+the same holders, a cut that can anchor. Grouping can't decide it. Whether two
+blocks belong together depends on what else the file holds, a branch written
+later included, and a fork of one branch holds neither the other branch nor
+any sign of it, so a choice made here would differ between a session and its
+copy. Each part being its own node makes them the same everywhere: what a
+copy holds of a message are the parts on its path, whole.
+
+A tool call or thinking stays with the group above it, even hanging off an
+earlier block, as parallel tool calls do (4 of 11,921 continuing records on
+the target machine), unless the group's text is not on the way to it: a node
+must end somewhere that holds what it shows. A block the CLI rewrote in place,
+under its uuid, is that same block.
+
+The first drawn part keeps `m:<id>`, so what was saved on the message is found
+there. A later one is `m:<id>#<digest>` of its own first block, which any copy
+of it holds, where a count of parts would differ between a session and a copy
+of one branch. Each record repeats the message's usage, so the first drawn part
+carries the cost, and every later one `lastUsage` alone: one API call, and the
+context each part ended on.
+
+No message on the target machine has more than one text record (of 8,996),
+so all of this is for chains that are valid but unobserved. Its worth is that
+a fork's path can't be wrong by construction, for text prompts as much as block
+ones. Two limits: where a message's first text blocks stand on two branches
+below a block with no text, a copy of the later one calls it `m:<id>` and won't
+match; and two text blocks of one message with identical content share a key,
+under different parents.
+
 ### Record types
 
 Seen on the target machine: `assistant`, `attachment`, `user`,
@@ -719,7 +770,8 @@ Seen on the target machine: `assistant`, `attachment`, `user`,
 `ai-title`, `api-request`, `queue-operation`, `mode`, `file-history-delta`,
 `file-history-snapshot`, `custom-title`, `cost-state`, `pr-link`, `system`,
 `api-request-shape`, `frame-link`, `artifact-*`, `permission-mode`. Only
-`user`/`assistant` (plus `queued_command` attachments) become nodes.
+`user`/`assistant` (plus `queued_command` attachments) become nodes, and not
+every `user` record is the user's ([notes](#claude-codes-own-notes-arent-turns)).
 `api-request-blob` carries `message` content blocks but is **not** a turn.
 The two-pass lineage tolerates any type, and unknown ones are counted in the
 health row, not treated as errors.
@@ -769,6 +821,53 @@ merge. Uncaptioned screenshots are labelled `[image]`. `resolveParent`
 re-links children to the nearest surviving ancestor, so dropping these doesn't
 cost branch structure.
 
+### Claude Code's own notes aren't turns
+
+`type: "user"` is the API role, not who wrote it. Claude Code also writes as
+`user` what it says to the model on its own: a pasted image's source path and
+scale, a skill's body, `/context` output, "Continue from where you left off".
+It marks these `isMeta: true`, and leaves them out of its own transcript view
+unless their `origin` is an inbound channel (**source**: `b2t` and `Ax` in the
+shipped extension, 2.1.314; its `keepMeta` reader and title lookup agree).
+`harnessNote` follows that by the flag, never by the text: an `isMeta` record
+with no `origin` is no turn. One with any origin keeps drawing. The inbound
+kinds are the harness's to change, none has been seen, and a note too many
+beats a message lost. (**Verified** on the target machine: 72 such records of
+8 kinds, 2.1.289–2.1.314, none with an origin. Drawn as if typed until
+2026-10, they had taken a session's title and split agent loops in two.)
+
+A note that follows what the user said is sent with it, so it stays in that
+turn's cut: the node's `lastRawId` is the note, though the node doesn't show
+it. A fork after a pasted image keeps its source path, and one after a slash
+command keeps the skill it ran, as they did when a note was a drawn part of
+the prompt. Elsewhere a note is dropped like a tool result, so the replies
+either side fold as any agent loop does, and a fork can no longer cut between
+them. It still counts as activity (`isActivity`), except one a turn's cut
+carries: that is the turn's own record, like its last block, or a fork ending
+on it, re-stamped, would read as work the fork did.
+
+That also ended a mismatch between the tree and the forks. A reply's API
+message can be written around a tool result and its image caption, since a
+tool runs while the message is streaming: `tool_use → tool_result → caption →
+tool_use`, all but the middle two under one `message.id`. Grouped by id, the
+caption was drawn below the whole reply, yet a fork after the reply copied it
+from the middle of the chain, so the fork drew a turn its path didn't hold.
+Anything still drawn there [stands between two parts of it](#one-turn-is-many-records).
+
+No identity scheme changed: a turn still drawn keeps its keys, as `legacyIds`
+where a note was its weak parent ([what is drawn is part of a weak
+key](#identity-scheme-and-compatibility)), and a note's own key simply stops
+being used. A label saved on a note that stood alone stays in
+the sidecar and no longer shows; one saved on a prompt the note was folded
+into is also under the prompt's key, and does. Before and after on a copy of
+the target machine's store, 72 families (2026-10-31): 1,020 → 987 nodes in 6
+families; 2,576 of 2,582 stable keys of turns still drawn kept, the other 6
+being block-prompt mid-turn messages under a note, unreleased when this was
+done; no ancestry, tip or member changed, 5 branch points and 5 fork edges
+before and after, 880 forkable endpoints kept, 16 now inside a rejoined agent
+loop and 4 that were notes gone. The fork invariant holds on all 883 enabled
+fork points of that copy, up from 915 of 917.
+
 ### Same-role runs fold into one turn
 
 A linear run of consecutive same-role nodes becomes one node: an agent loop
@@ -777,9 +876,10 @@ It only merges where the parent has exactly one child, never across sessions,
 never across vendor turns (`turnId`), never into a fork's first turn, and
 never across a member's endpoint (the next part must be held by the same
 sessions, `copyHolders`). The
-merged node's fork anchor and `forkBlocked` are its **last** part's, so a run
-ending in a mid-turn attachment is unforkable as a whole ("fork the turn
-after it"). Usage is **summed** here, because each part
+merged node's fork anchor and `forkBlocked` are its **last** part's, and a run
+never continues from a part that can anchor into one that can't, so only a
+run of mid-turn messages is unforkable as a whole ("fork the turn after it").
+Usage is **summed** here, because each part
 is a distinct API call. That's the opposite of the per-block merge, where every
 record repeats one message's usage. Absorbed ids are retained so sidecar
 annotations still resolve.
@@ -820,6 +920,41 @@ content), splicing each one **into** the chain, never beside it: an
 interjection must not become a spurious branch point. Reconstructed ones
 (`queued:<sid>:<n>` ids) are drawn hollow and can't be forked from.
 
+On Claude Code 2.1.289 and later a human message's `prompt` is **content
+blocks** (text, sometimes with images), not text. The record has no
+`promptId`, its `source_uuid` names nothing in the file, no `user` record
+repeats its text, and its `enqueue` holds no `content`, so the queue can't
+stand in for it (verified: 126 messages in 35 transcripts on the target
+machine, 2.1.289–2.1.314). The parser used to take a text prompt only, so
+these were in no node and the health row said nothing. The prompt now goes
+through `textOf`, the one reader of message content, as found. A message that
+yields no turn is counted (`unreadMessages`) and warned about, whatever the
+reason: checking the outcome catches a shape nobody has seen yet, where
+checking for known shapes would not.
+
+Drawing one divides what was one reply, and that is the point: the reader
+sees why the agent changed course, and can fork between the two parts. Its
+identity is a weak key under its parent, the same in every copy, because a
+fork copies the attachment. The turns after it are re-parented and keep their
+identities, since a reply (`m:`) and a prompt with an id (`p:`) are strong
+keys whatever their parent, and every prose `user` record in the affected
+transcripts has a prompt id. So this needed no new identity scheme. A record
+without one, below such a message, gets a new `w:` key and keeps the one it had
+([what is drawn is part of a weak key](#identity-scheme-and-compatibility)). As
+with any split ([same-role runs](#same-role-runs-fold-into-one-turn)), a label
+saved on the whole reply shows on both parts.
+
+Checked by a before/after audit of a copy of the target machine's store, 72
+families (2026-10-31): 845 → 1,014 nodes in 33 families; every one of 2,499
+stable and 657 legacy keys kept, no ancestry, leaf or member changed, 5 branch
+points and 5 fork edges before and after, all 838 forkable endpoints kept. No
+Claude annotation exists there, so labels are covered by tests only. The fork
+invariant ran over all 911 enabled fork points of that copy: every fork past
+a message keeps it. **Not verified:** resuming a fork that ends on a reply
+with an unanswered tool call ([fork format](#fork-after-a-turn-claude-forkts)). Dividing a reply makes those more
+reachable, 23 fork points before and 78 of 883 now, the first part of a divided
+reply usually ending on the call the message interrupted.
+
 `/compact` writes `system/compact_boundary` with `parentUuid: null` and the
 real predecessor in `logicalParentUuid`. The parser follows that field, or a
 compacted session shatters into a forest. The resume loader indexes only
@@ -855,7 +990,9 @@ a changed record shape looks like. Keeping it apart from "hidden" is the
 point: before, a wholly malformed file counted as an intentionally empty one
 and raised nothing. The welcome screen shows one row per present provider. It
 warns about any failed file, warns harder when fewer than half of
-parsed + failed succeed, and lists unknown types behind a disclosure. Zero
+parsed + failed succeed, and lists unknown types behind a disclosure. A human
+mid-turn message that yields no turn also warns: a known record in a shape
+not understood is invisible to everything else here. Zero
 failed on the target machine's 358 files. A Claude session stored in several
 project folders raises a warning naming how many, and how many diverged. A provider that throws doesn't take the others down
 (`registry.ts` guards each one), and its row says it crashed. This row would
@@ -1459,8 +1596,11 @@ dangling parent, one root per path), not session counts.
   is made and checked (the fork alone draws exactly the selected path, its
   text compared exactly, whitespace and all; the family gains no node or
   root); every enabled Codex node ends its own turn.
-  Plus a merged node ending in a mid-turn attachment, two prompts sharing a
-  long preamble, a renamed grandchild with intact creation order, a fork of a
+  Plus a prompt keeping its cut before a mid-turn message, block-prompt
+  messages (`c--work-blockq`: ancestry, member endpoints, action targets,
+  identities kept, any prompt shape), Claude Code's own notes
+  (`c--work-notes`: the same, cuts kept through them, a reply written around
+  one), two prompts sharing a long preamble, a renamed grandchild with intact creation order, a fork of a
   compacted fork, an aborted Codex prompt, and a pre-upgrade annotation that
   outlives its root.
 - **Backend client:** a real worker (`test/fake-worker.cjs`) that crashes;

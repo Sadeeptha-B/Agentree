@@ -8,7 +8,7 @@ Agentree reads internal, undocumented stores of three tools that release almost 
 
 Two things make the risk asymmetric:
 
-- **Reads fail quietly.** A record of a known type with a new shape parses without error and simply draws less. The [health row](design.md#fail-loudly) catches unreadable files, unknown record types and conversation records that yield nothing. It can't see a record it skips on purpose, and a field whose shape changed under a known type is skipped exactly like one. The day view's round-6 audit found such a case on this machine: on Claude Code 2.1.289–2.1.311, a human mid-turn message's `queued_command` prompt is content blocks, not text, so 121 such messages in 32 transcripts are drawn nowhere ([roadmap](roadmap.md)). The health row showed nothing.
+- **Reads fail quietly.** A record of a known type with a new shape parses without error and simply draws less. The [health row](design.md#fail-loudly) catches unreadable files, unknown record types and conversation records that yield nothing. It can't see a record it skips on purpose, and a field whose shape changed under a known type is skipped exactly like one. The day view's round-6 audit found such a case on this machine: on Claude Code 2.1.289–2.1.311, a human mid-turn message's `queued_command` prompt is content blocks, not text, so 121 such messages in 32 transcripts were drawn nowhere, and the health row showed nothing. Those are read now, and a message that yields no turn raises a warning ([design notes](design.md#mid-turn-messages-btw-interjections-and-compact)). Every other field keeps the blind spot.
 - **Writes are irreversible.** Claude and Copilot forks write files in the vendor's format, and the vendor's own tools resume them. A format drift there produces a session the agent misreads, not just a wrong picture.
 
 ## What Agentree depends on
@@ -131,4 +131,3 @@ There is no Marketplace or Open VSX publishing, by the owner's decision (2026-10
 - Whether to run the Agent SDK's `forkSession` against fixtures in the watch.
 - Whether to gate forks by verified version.
 - When to revisit Copilot, and whether to publish before then.
-- Drawing block-shaped mid-turn messages ([roadmap](roadmap.md)): it adds turns and re-parents the turns after them, so it needs a fixture and an identity-compatibility check.

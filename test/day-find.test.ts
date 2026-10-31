@@ -172,6 +172,17 @@ const ROOT = vi.hoisted(() => {
     result(SF, "sf-r1", "sf-a1", "1 failed", { is_error: true }),
   ]));
 
+  // Claude: a prompt, the note that came with it, and its reply, to fork at
+  // the prompt: the copy ends on the note, re-stamped.
+  const noteDir = p.join(tmp, "claude", "projects", "c--work-note");
+  fs.mkdirSync(noteDir, { recursive: true });
+  const NP = "e0000000-0000-4000-8000-00000000000c";
+  fs.writeFileSync(p.join(noteDir, `${NP}.jsonl`), jsonl([
+    prompt(NP, "np-u1", null, "2026-10-08T09:00:00.000Z", "Match the mockup"),
+    prompt(NP, "np-n1", "np-u1", "2026-10-08T09:00:01.000Z", "[Image: source: /work/mockup.png]", { isMeta: true }),
+    reply(NP, "np-a1", "np-n1", "2026-10-08T09:01:00.000Z", "msg_note1", "Matching."),
+  ]));
+
   // A Codex turn whose command runs for 48 minutes after the reply, then the next turn.
   const thread = "01900000-0000-7000-8000-0000000c0001";
   const turnA = "01900000-0000-7000-8000-0000000c00a1";
@@ -353,6 +364,19 @@ describe("idle time from recorded activity", () => {
     expect(drawn.heldBy?.length).toBe(1);
     // Copied history, however late it ends, is no work of the fork's.
     expect(a.running.filter((r) => r.familyId === Q)).toEqual([]);
+  });
+
+  it("finds no work in a fresh Claude fork whose copy ends on a note the prompt carries", async () => {
+    const NP = "e0000000-0000-4000-8000-00000000000c";
+    const asked = loadAnySession(NP)!.nodes.find((n) => n.text === "Match the mockup")!;
+    expect(asked.lastRawId).toBe("np-n1");
+    const fork = await forkAnyAt(NP, forkPointOf(asked));
+    expect(fork.ok).toBe(true);
+    // The writer stamps the copy's last record now, so look there.
+    const now = Date.now();
+    const a = dayActivity(now - DAY, now + DAY);
+    expect(a.running.filter((r) => r.familyId === NP)).toEqual([]);
+    expect(a.turns.filter((t) => t.familyId === NP)).toEqual([]);
   });
 
   it("keeps a fork's work that ends at the same instant as different work of its parent's", () => {

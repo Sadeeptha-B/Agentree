@@ -9,7 +9,8 @@ import type { NodeId, TurnNode } from "../shared/types.ts";
  * Current scheme (4), per node:
  *
  *  - a STRONG own key — unique by itself: a Claude API message id
- *    (`m:<id>`), a prompt id with its text (`p:<promptId>|<digest>`), a
+ *    (`m:<id>`, and `m:<id>#<digest>` for a later part of a message of several,
+ *    by its own first block), a prompt id with its text (`p:<promptId>|<digest>`), a
  *    Codex `<turnId>:<itemId>` — is the identity;
  *  - a WEAK own key — text alone (Copilot, legacy Codex, a Claude prompt
  *    with no prompt id) — is qualified by the parent's identity, as a
@@ -75,17 +76,20 @@ const EARLIER = 2;
  * fingerprint `scheme2Fingerprint` computes for its saved literal. `own`
  * returns the node's keys; parents come from `parentId`.
  */
-export function assignStableIds(nodes: TurnNode[], own: (n: TurnNode) => OwnKey): void {
+export function assignStableIds<N extends Pick<TurnNode, "id" | "parentId" | "stableIds" | "legacyIds">>(
+  nodes: N[],
+  own: (n: N) => OwnKey,
+): void {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   /** Per node: [current, scheme 2, scheme 3]. */
   const done = new Map<NodeId, string[]>();
   for (const start of nodes) {
     // Iterative: a text-keyed (Copilot, legacy Codex) chain is as deep as the
     // conversation is long.
-    const path: TurnNode[] = [];
+    const path: N[] = [];
     const onPath = new Set<NodeId>();
     let base: string[] = Array(EARLIER + 1).fill(ROOT);
-    for (let cur: TurnNode | undefined = start; cur; ) {
+    for (let cur: N | undefined = start; cur; ) {
       const hit = done.get(cur.id);
       if (hit) {
         base = hit;

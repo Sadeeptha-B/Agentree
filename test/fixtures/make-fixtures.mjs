@@ -257,8 +257,8 @@ fs.writeFileSync(
 
 // c--work-attach: a prompt, a tools-only reply (no node), then a mid-turn
 // message the user typed (a real queued_command attachment), then the reply.
-// The prompt and the attachment fold into one drawn node; forking it must not
-// fall back to the prompt's anchor and silently drop the message it shows.
+// The prompt stays a cut of its own; the message can't anchor, so it isn't
+// folded into the prompt, which would refuse a fork the prompt allows.
 const AT = "4ccccccc-cccc-4ccc-8ccc-cccccccccccc";
 write(`${CL}/c--work-attach/${AT}.jsonl`, [
   user(AT, "at-u1", null, 0, "at-1", "Run the migration"),
@@ -274,6 +274,157 @@ write(`${CL}/c--work-attach/${AT}.jsonl`, [
     timestamp: ts(3),
   },
   asst(AT, "at-a2", "at-q1", 4, "msg_at2", [text("Backed up, then migrated.")]),
+]);
+
+// c--work-blockq: mid-turn messages as current CLIs write them (seen on
+// 2.1.289–2.1.314). The prompt is content blocks, the record has no promptId,
+// its source_uuid names nothing in the file, and the queue's enqueue holds no
+// text to fall back on.
+//   BQ  a message between two replies; one after a prompt with only a
+//       tools-only reply between them; a screenshot alone followed by a
+//       second message; a prompt in no shape the parser reads; and a task
+//       notification, which is plumbing;
+//   BN  the extension's fork after "Kept both parsers.": it copies the message;
+//   BE  the extension's fork after "Reading the importer.", ending before it.
+const BQ = "50000000-0000-4000-8000-000000000016";
+const BN = "50000000-0000-4000-8000-000000000017";
+const BE = "50000000-0000-4000-8000-000000000018";
+const queued = (sid, uuid, parentUuid, min, prompt, extra = { commandMode: "prompt", origin: { kind: "human" }, humanTurn: true }) => ({
+  parentUuid,
+  ...common(sid),
+  type: "attachment",
+  attachment: { type: "queued_command", prompt, source_uuid: `gone-${uuid}`, delivery_id: `dlv-${uuid}`, timestamp: ts(min), ...extra },
+  uuid,
+  timestamp: ts(min),
+});
+const SHOT = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+const bqResult = (sid, uuid, parentUuid, min, promptId, id) =>
+  user(sid, uuid, parentUuid, min, promptId, [{ type: "tool_result", tool_use_id: id, content: "ok" }]);
+const bqStart = (sid, px, last) => [
+  user(sid, `${px}-u1`, null, 0, "bq-1", "Refactor the importer"),
+  asst(sid, `${px}-a1`, `${px}-u1`, last, "msg_bq1", [text("Reading the importer."), { type: "tool_use", id: "tu_bq1", name: "Read", input: { path: "importer" } }]),
+];
+const bqMessage = (sid, px) => [
+  bqResult(sid, `${px}-r1`, `${px}-a1`, 2, "bq-1", "tu_bq1"),
+  { type: "queue-operation", operation: "enqueue", timestamp: ts(2), sessionId: sid },
+  queued(sid, `${px}-q1`, `${px}-r1`, 3, [text("<ide_selection>The user selected lines 1-2.</ide_selection>"), text("keep the old parser too")]),
+  { parentUuid: `${px}-q1`, ...common(sid), type: "attachment", attachment: { type: "total_tokens_reminder", used: 10 }, uuid: `${px}-t1`, timestamp: ts(3) },
+  asst(sid, `${px}-a2`, `${px}-t1`, 4, "msg_bq2", [text("Kept both parsers.")]),
+];
+write(`${CL}/c--work-blockq/${BQ}.jsonl`, [
+  ...bqStart(BQ, "bq", 1),
+  ...bqMessage(BQ, "bq"),
+  user(BQ, "bq-u2", "bq-a2", 5, "bq-2", "Now add tests"),
+  asst(BQ, "bq-a3", "bq-u2", 6, "msg_bq3", [{ type: "tool_use", id: "tu_bq2", name: "Bash", input: { command: "test" } }]),
+  bqResult(BQ, "bq-r2", "bq-a3", 7, "bq-2", "tu_bq2"),
+  queued(BQ, "bq-q2", "bq-r2", 8, [SHOT, text("match this screenshot")]),
+  asst(BQ, "bq-a4", "bq-q2", 9, "msg_bq4", [text("Tests added."), { type: "tool_use", id: "tu_bq3", name: "Bash", input: { command: "test" } }]),
+  bqResult(BQ, "bq-r3", "bq-a4", 10, "bq-2", "tu_bq3"),
+  queued(BQ, "bq-q3", "bq-r3", 11, [SHOT]),
+  queued(BQ, "bq-q4", "bq-q3", 12, [text("and one more")]),
+  asst(BQ, "bq-a5", "bq-q4", 13, "msg_bq5", [text("Done.")]),
+  queued(BQ, "bq-q5", "bq-a5", 14, { parts: ["a shape nobody taught the parser"] }),
+  queued(BQ, "bq-n1", "bq-q5", 14, "Background task finished", { commandMode: "task-notification", origin: { kind: "task-notification" } }),
+  user(BQ, "bq-u3", "bq-n1", 15, "bq-3", "Thanks"),
+  asst(BQ, "bq-a6", "bq-u3", 16, "msg_bq6", [text("You're welcome.")]),
+  title(BQ, "Importer refactor"),
+]);
+write(`${CL}/c--work-blockq/${BN}.jsonl`, [
+  ...bqStart(BN, "bn", 1),
+  ...bqMessage(BN, "bn"),
+  user(BN, "bn-u2", "bn-a2", 30, "bn-2", "Actually, drop the old parser"),
+  asst(BN, "bn-a3", "bn-u2", 31, "msg_bn1", [text("Dropped it.")]),
+  title(BN, "Importer refactor (fork)"),
+]);
+write(`${CL}/c--work-blockq/${BE}.jsonl`, [...bqStart(BE, "be", 20), title(BE, "Importer refactor (early fork)")]);
+
+// c--work-notes: what Claude Code writes as a user record but marks isMeta,
+// none of which the user typed (seen on 2.1.289–2.1.314).
+//   HP  a prompt with a screenshot, then its source note past a bookkeeping
+//       attachment; a reply that is one API message written around a tool
+//       result and that result's image caption, then the rest of the agent
+//       loop; a slash command and the skill body behind it; and a "Continue"
+//       the harness left on a turn that went nowhere, beside the real prompt;
+//   HF  the extension's fork after the agent loop: it copies every note;
+//   HQ  a fork that stops at the first prompt, before its note.
+const HP = "50000000-0000-4000-8000-000000000019";
+const HF = "50000000-0000-4000-8000-00000000001a";
+const HQ = "50000000-0000-4000-8000-00000000001b";
+const note = (sid, uuid, parentUuid, min, promptId, content, extra = { turnCompanion: true }) => ({
+  ...user(sid, uuid, parentUuid, min, promptId, content),
+  isMeta: true,
+  ...extra,
+});
+const hnStart = (sid, px) => [
+  user(sid, `${px}-u1`, null, 0, "hn-1", [text("Match this mockup"), SHOT]),
+  { parentUuid: `${px}-u1`, ...common(sid), type: "attachment", attachment: { type: "deferred_tools_record", tools: [] }, uuid: `${px}-d1`, timestamp: ts(0) },
+  note(sid, `${px}-c1`, `${px}-d1`, 0, "hn-1", [text("[Image: source: C:\\work\\mockup.png]")]),
+];
+const hnLoop = (sid, px) => [
+  asst(sid, `${px}-a1`, `${px}-c1`, 1, "msg_hn1", [text("Checking the layout.")]),
+  asst(sid, `${px}-a1t`, `${px}-a1`, 1, "msg_hn1", [{ type: "tool_use", id: "tu_hn1", name: "Read", input: { path: "mockup" } }]),
+  bqResult(sid, `${px}-r1`, `${px}-a1t`, 2, "hn-1", "tu_hn1"),
+  note(sid, `${px}-c2`, `${px}-r1`, 2, "hn-1", "[Image: original 390x4556, displayed at 171x2000. Multiply coordinates by 2.28 to map to original image.]"),
+  asst(sid, `${px}-a1u`, `${px}-c2`, 3, "msg_hn1", [{ type: "tool_use", id: "tu_hn2", name: "Read", input: { path: "page" } }]),
+  bqResult(sid, `${px}-r2`, `${px}-a1u`, 4, "hn-1", "tu_hn2"),
+  asst(sid, `${px}-a2`, `${px}-r2`, 5, "msg_hn2", [text("The layout matches.")]),
+];
+write(`${CL}/c--work-notes/${HP}.jsonl`, [
+  ...hnStart(HP, "hn"),
+  ...hnLoop(HP, "hn"),
+  user(HP, "hn-u2", "hn-a2", 6, "hn-2", "<command-name>/brief</command-name>"),
+  note(HP, "hn-s1", "hn-u2", 6, "hn-2", [text("Base directory for this skill: C:\\skills\\brief\n\nWrite a one-page brief.")], { turnCompanion: true, sourceToolUseID: "tu_hn0" }),
+  asst(HP, "hn-a3", "hn-s1", 7, "msg_hn3", [text("Brief written.")]),
+  note(HP, "hn-k1", "hn-a3", 20, "hn-k", [text("Continue from where you left off.")], { promptSource: "system", turnOrigin: "system" }),
+  user(HP, "hn-u3", "hn-a3", 21, "hn-3", "Ship it"),
+  asst(HP, "hn-a4", "hn-u3", 22, "msg_hn4", [text("Shipped.")]),
+  title(HP, "Mockup check"),
+]);
+write(`${CL}/c--work-notes/${HF}.jsonl`, [
+  ...hnStart(HF, "hf"),
+  ...hnLoop(HF, "hf"),
+  user(HF, "hf-u2", "hf-a2", 30, "hf-2", "Try a darker theme"),
+  asst(HF, "hf-a3", "hf-u2", 31, "msg_hf1", [text("Darker it is.")]),
+  title(HF, "Mockup check (fork)"),
+]);
+write(`${CL}/c--work-notes/${HQ}.jsonl`, [
+  { ...user(HQ, "hq-u1", null, 40, "hn-1", [text("Match this mockup"), SHOT]), forkedFrom: { sessionId: HP, messageUuid: "hn-u1" } },
+  title(HQ, "Mockup check (early fork)"),
+]);
+
+// c--work-inside: a message delivered inside one API message, whose records
+// stand either side of it (synthetic: the chain is valid, the shape unobserved).
+//   BI  one message between two text blocks; then a message after a block with
+//       no text, so that the only drawn part of that API message follows it;
+//   BJ  the extension's fork after the first block, ending before the message;
+//   BK  one API message on two branches: a prompt below its first block with
+//       a block after that, and a block continuing the first directly.
+const BI = "50000000-0000-4000-8000-00000000001d";
+const BJ = "50000000-0000-4000-8000-00000000001e";
+const BK = "50000000-0000-4000-8000-000000000021";
+const biStart = (sid, px, last) => [
+  user(sid, `${px}-u1`, null, 0, "bi-1", "Build it"),
+  asst(sid, `${px}-a1`, `${px}-u1`, last, "msg_bi1", [text("Starting.")]),
+];
+write(`${CL}/c--work-inside/${BI}.jsonl`, [
+  ...biStart(BI, "bi", 1),
+  queued(BI, "bi-q1", "bi-a1", 2, [text("Also test it")]),
+  asst(BI, "bi-a2", "bi-q1", 3, "msg_bi1", [text("Done.")]),
+  user(BI, "bi-u2", "bi-a2", 4, "bi-2", "Now a smaller one"),
+  asst(BI, "bi-a3", "bi-u2", 5, "msg_bi2", [{ type: "tool_use", id: "tu_bi1", name: "Bash", input: { command: "logs" } }]),
+  bqResult(BI, "bi-r1", "bi-a3", 6, "bi-2", "tu_bi1"),
+  queued(BI, "bi-q2", "bi-r1", 7, [text("and check the logs")]),
+  asst(BI, "bi-a4", "bi-q2", 8, "msg_bi2", [text("Logs are clean.")]),
+  title(BI, "Build"),
+]);
+write(`${CL}/c--work-inside/${BJ}.jsonl`, [...biStart(BJ, "bj", 20), title(BJ, "Build (fork)")]);
+write(`${CL}/c--work-inside/${BK}.jsonl`, [
+  user(BK, "bk-u1", null, 0, "bk-1", "Start"),
+  asst(BK, "bk-a1", "bk-u1", 1, "msg_bk1", [text("First.")]),
+  user(BK, "bk-q1", "bk-a1", 2, "bk-2", "Interrupt"),
+  asst(BK, "bk-a2", "bk-q1", 3, "msg_bk1", [text("After interruption.")]),
+  asst(BK, "bk-a3", "bk-a1", 4, "msg_bk1", [text("Sibling continuation.")]),
+  title(BK, "Branches"),
 ]);
 
 // c--work-preamble: two prompts with no promptId that share a long opening

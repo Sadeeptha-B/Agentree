@@ -4,7 +4,7 @@ import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { actionTarget, childIndex, cwdKey, FORK_POINT_GONE, forkPointOf, pathToRoot, toNodeMap } from "../shared/render.ts";
 import type { SessionDetail, TurnNode } from "../shared/types.ts";
-import { claudeHealth, claudeWatchDirs, listSessions, loadSession, mergeSameRoleRuns, parseFile } from "../electron/transcripts.ts";
+import { claudeHealth, claudeWatchDirs, listSessions, loadSession, mergeSameRoleRuns, parseFile, parseRecords, readRecords } from "../electron/transcripts.ts";
 import { forkClaudeAt } from "../electron/providers/claude-fork.ts";
 import { readLineage } from "../electron/lineage.ts";
 import { annotate } from "../electron/registry.ts";
@@ -49,6 +49,15 @@ const DV = "50000000-0000-4000-8000-000000000012";
 const SP4 = "50000000-0000-4000-8000-000000000013";
 const SB4 = "50000000-0000-4000-8000-000000000014";
 const SF4 = "50000000-0000-4000-8000-000000000015";
+const BQ = "50000000-0000-4000-8000-000000000016";
+const BN = "50000000-0000-4000-8000-000000000017";
+const BE = "50000000-0000-4000-8000-000000000018";
+const HP = "50000000-0000-4000-8000-000000000019";
+const HF = "50000000-0000-4000-8000-00000000001a";
+const HQ = "50000000-0000-4000-8000-00000000001b";
+const BI = "50000000-0000-4000-8000-00000000001d";
+const BJ = "50000000-0000-4000-8000-00000000001e";
+const BK = "50000000-0000-4000-8000-000000000021";
 const GUARD_OUT = "Change it:\n\n```python\nif ready:\n    send()\ncancel()\n```";
 const GUARD_IN = "Change it:\n\n```python\nif ready:\n    send()\n    cancel()\n```";
 const EP_PROMPT = "Summarise the log\n\n  - errors only";
@@ -197,14 +206,16 @@ describe("Claude transcripts", () => {
   it("counts an unparseable transcript as failed, not hidden", () => {
     listSessions();
     const h = claudeHealth();
-    expect(h.filesSeen).toBe(31);
+    expect(h.filesSeen).toBe(40);
     expect(h.failed).toBe(1);
-    expect(h.sessionsParsed).toBe(29);
+    expect(h.sessionsParsed).toBe(38);
     // The moved session's old copy: every record is in the new one.
     expect(h.skipped).toBe(1);
     expect(h.warnings.join(" ")).toMatch(/couldn't be read/);
     expect(h.warnings.join(" ")).toMatch(/2 sessions have copies in more than one project folder.*1 of them diverged/);
     expect(h.unknownRecordTypes).toEqual({});
+    // A message the user typed that became no turn is never silent.
+    expect(h.warnings.join(" ")).toMatch(/1 message typed mid-turn couldn't be read/);
   });
 });
 
@@ -258,18 +269,26 @@ describe("Claude sessions stored in several project folders", () => {
 });
 
 describe("Claude display merge and fork endpoints", () => {
-  it("keeps a merged node unforkable when its last part can't anchor (no silent drop)", () => {
-    // Prompt + (tools-only reply, not drawn) + mid-turn message fold into one
-    // node. Its only anchor would be the prompt, which excludes the message.
+  it("never folds a part that can't anchor into one that can, so grouping takes no cut away", () => {
+    // Prompt, (tools-only reply, not drawn), mid-turn message: the prompt is a
+    // cut, and folding the message in would refuse it.
     const d = loadSession(AT)!;
     expectTree(d);
-    const merged = d.nodes.find((n) => n.role === "user")!;
-    expect(merged.text).toBe("Run the migration\n\nalso back up first");
-    expect(merged.forkBlocked).toMatch(/mid-turn/);
-    expect(forkClaudeAt(AT, forkPointOf(merged))).toMatchObject({ ok: false });
+    const prompt = one(d, "Run the migration");
+    expect(prompt.forkBlocked).toBeUndefined();
+    const message = one(d, "also back up first");
+    expect(message.parentId).toBe(prompt.id);
+    expect(message.midTurn).toBe(true);
+    expect(forkClaudeAt(AT, forkPointOf(message))).toMatchObject({ ok: false });
     // The turn after it is the fork point, and it keeps the message.
     const reply = one(d, "Backed up, then migrated.");
     expect(reply.forkBlocked).toBeUndefined();
+    const fork = forkClaudeAt(AT, forkPointOf(prompt));
+    expect(fork.ok).toBe(true);
+    if (!fork.ok) return;
+    const file = path.join(projectDir("c--work-attach"), `${fork.id}.jsonl`);
+    expect(readJsonl(file).some((r) => r.type === "attachment")).toBe(false);
+    fs.rmSync(file);
   });
 
   it("keeps prompts distinct that share a long opening and lack a promptId", () => {
@@ -296,6 +315,384 @@ describe("Claude prompt identity", () => {
     expect(one(d, "Conditional cancel.").parentId).toBe(inside.id);
     expect(inside).toMatchObject({ branchKind: "fork", sourceSessionId: WF });
     expect(out.stableIds).not.toEqual(inside.stableIds);
+  });
+});
+
+describe("Claude mid-turn messages written as content blocks", () => {
+  const session = () => {
+    const d = loadSession(BQ)!;
+    expectTree(d);
+    return d;
+  };
+  const projectFile = (sid: string) => path.join(projectDir("c--work-blockq"), `${sid}.jsonl`);
+
+  it("draws each one where it was delivered, in one line of history", () => {
+    const d = session();
+    const main = pathToRoot(one(d, "You're welcome.").id, toNodeMap(d.nodes));
+    expect(main.map((n) => n.text)).toEqual([
+      "Refactor the importer",
+      "Reading the importer.",
+      "keep the old parser too",
+      "Kept both parsers.",
+      "Now add tests",
+      "match this screenshot",
+      "Tests added.",
+      "[image]\n\nand one more",
+      "Done.",
+      "Thanks",
+      "You're welcome.",
+    ]);
+    // Nothing else is drawn but the fork's turns, and no message makes a branch.
+    expect(kidsOf(d, one(d, "Reading the importer."))).toEqual(["keep the old parser too"]);
+    expect(kidsOf(d, one(d, "keep the old parser too"))).toEqual(["Kept both parsers."]);
+    expect(d.nodes.map((n) => n.text).sort()).toEqual(
+      [...main.map((n) => n.text), "Actually, drop the old parser", "Dropped it."].sort(),
+    );
+  });
+
+  it("marks only the message itself as mid-turn, and refuses only what can't anchor", () => {
+    const d = session();
+    const message = one(d, "keep the old parser too");
+    expect(message).toMatchObject({ midTurn: true, role: "user" });
+    expect(message.forkBlocked).toMatch(/mid-turn/);
+    expect(message.injected).toBeUndefined();
+    // Two messages in a row are one mid-turn node.
+    expect(one(d, "[image]\n\nand one more")).toMatchObject({ midTurn: true });
+    // A prompt keeps its cut: what follows it can't anchor, so it stays apart.
+    expect(one(d, "Now add tests").forkBlocked).toBeUndefined();
+    expect(one(d, "match this screenshot").midTurn).toBe(true);
+    expect(one(d, "Reading the importer.").forkBlocked).toBeUndefined();
+    expect(one(d, "Kept both parsers.").forkBlocked).toBeUndefined();
+  });
+
+  it("forks either side of a message, keeping it only after it", () => {
+    const d = session();
+    const before = forkClaudeAt(BQ, forkPointOf(one(d, "Reading the importer.")));
+    const after = forkClaudeAt(BQ, forkPointOf(one(d, "Kept both parsers.")));
+    expect(before.ok && after.ok).toBe(true);
+    if (!before.ok || !after.ok) return;
+    const queuedIn = (id: string) =>
+      readJsonl(projectFile(id)).filter((r) => r.attachment?.type === "queued_command").length;
+    expect(queuedIn(before.id)).toBe(0);
+    expect(queuedIn(after.id)).toBe(1);
+    const again = loadSession(BQ)!;
+    expect(again.nodes.length).toBe(d.nodes.length);
+    expect(one(again, "keep the old parser too").heldBy).toContain(after.id);
+    expect(one(again, "keep the old parser too").heldBy).not.toContain(before.id);
+    for (const r of [before, after]) fs.rmSync(projectFile(r.id));
+  });
+
+  it("stitches a copy of the message onto it, and ends a fork that stopped short before it", () => {
+    const d = session();
+    const reading = one(d, "Reading the importer.");
+    const message = one(d, "keep the old parser too");
+    const kept = one(d, "Kept both parsers.");
+    expect(new Set(message.heldBy)).toEqual(new Set([BQ, BN]));
+    expect(new Set(reading.heldBy)).toEqual(new Set([BQ, BN, BE]));
+    expect(d.members.find((m) => m.id === BE)!.tipId).toBe(reading.id);
+    // The fork's own turn branches where the fork was made, not at the message.
+    expect(one(d, "Actually, drop the old parser")).toMatchObject({ parentId: kept.id, branchKind: "fork" });
+    // Open and Resume stay with the focused member while it holds the turn.
+    expect(actionTarget(d, reading, BE).ref.sessionId).toBe(BE);
+    expect(actionTarget(d, message, BE).ref.sessionId).toBe(BQ);
+    expect(actionTarget(d, message, BN).ref.sessionId).toBe(BN);
+  });
+
+  it("keeps every identity a turn had before the message was drawn", () => {
+    const records = readRecords(projectFile(BQ))!;
+    const drawn = (recs: typeof records) => parseRecords(BQ, { records: recs, bad: 0 }).nodes;
+    // An earlier parser skipped these for display and followed their lineage.
+    const unread = records.map((r) =>
+      r.attachment?.type === "queued_command" && Array.isArray(r.attachment.prompt)
+        ? { ...r, attachment: { ...r.attachment, type: "skipped" } }
+        : r,
+    );
+    const earlier = drawn(unread);
+    const now = new Map(drawn(records).map((n) => [n.id, n]));
+    expect(now.size).toBe(earlier.length + 4);
+    for (const n of earlier) expect(now.get(n.id)?.stableIds, n.text).toEqual(n.stableIds);
+  });
+
+  it("draws a message once when the queue holds it whole and the prompt splits it, through a fork", () => {
+    const sid = "50000000-0000-4000-8000-00000000001c";
+    const dir = projectDir("c--work-split-prompt");
+    const file = path.join(dir, `${sid}.jsonl`);
+    const base = { sessionId: sid, cwd: "C:\\work\\split", isSidechain: false };
+    const at = (min: number) => new Date(Date.UTC(2026, 9, 2, 10, min)).toISOString();
+    const records = [
+      { ...base, type: "user", uuid: "s-u1", parentUuid: null, promptId: "s-1", timestamp: at(0), message: { role: "user", content: "Run the migration" } },
+      { ...base, type: "assistant", uuid: "s-a1", parentUuid: "s-u1", timestamp: at(1), message: { id: "msg_s1", role: "assistant", content: [{ type: "text", text: "Migrating." }] } },
+      { type: "queue-operation", operation: "enqueue", sessionId: sid, timestamp: at(2), content: "also back up" },
+      {
+        ...base, type: "attachment", uuid: "s-q1", parentUuid: "s-a1", timestamp: at(3),
+        attachment: { type: "queued_command", prompt: [{ type: "text", text: "also " }, { type: "text", text: "back up" }], commandMode: "prompt", origin: { kind: "human" } },
+      },
+      { ...base, type: "assistant", uuid: "s-a2", parentUuid: "s-q1", timestamp: at(4), message: { id: "msg_s2", role: "assistant", content: [{ type: "text", text: "Backed up." }] } },
+    ];
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    try {
+      const d = loadSession(sid)!;
+      const texts = ["Run the migration", "Migrating.", "also back up", "Backed up."];
+      expect(d.nodes.map((n) => n.text)).toEqual(texts);
+      const fork = forkClaudeAt(sid, forkPointOf(one(d, "Backed up.")));
+      expect(fork.ok).toBe(true);
+      // The fork holds the attachment and no queue: the family must still read as one line.
+      const again = loadSession(sid)!;
+      expectTree(again);
+      expect(again.nodes.map((n) => n.text)).toEqual(texts);
+      expect(again.nodes.some((n) => n.branchKind)).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true });
+    }
+  });
+
+  it("shows a label saved on a run the message now divides on both of its parts", () => {
+    // Saved when the two replies were one node, so under both parts' keys.
+    const d = session();
+    const [first] = one(d, "Reading the importer.").stableIds!;
+    const [second] = one(d, "Kept both parsers.").stableIds!;
+    for (const k of [first, second]) writeMeta(BQ, k, { label: "the refactor" });
+    const after = session();
+    expect(one(after, "Reading the importer.").label).toBe("the refactor");
+    expect(one(after, "Kept both parsers.").label).toBe("the refactor");
+    expect(one(after, "keep the old parser too").label).toBeUndefined();
+    // The load carried it to every member.
+    for (const sid of [BQ, BN, BE]) for (const k of [first, second]) writeMeta(sid, k, { label: undefined });
+  });
+
+  it("gives a copied message the same identity in every session holding it", () => {
+    const message = (sid: string) => parseFile(projectFile(sid)).nodes.find((n) => n.text === "keep the old parser too")!;
+    expect(message(BN).stableIds).toEqual(message(BQ).stableIds);
+    expect(message(BQ).stableIds![0]).toMatch(/^w:/);
+  });
+
+  it("leaves task notifications out, and counts only what the user typed", () => {
+    const parsed = parseFile(projectFile(BQ));
+    expect(parsed.nodes.some((n) => n.text.includes("Background task"))).toBe(false);
+    expect(parsed.unreadMessages).toBe(1);
+    expect(parseFile(projectFile(BN)).unreadMessages).toBe(0);
+  });
+});
+
+describe("Claude Code's own notes (isMeta user records)", () => {
+  const LOOP = "Checking the layout.\n\nThe layout matches.";
+  const session = () => {
+    const d = loadSession(HP)!;
+    expectTree(d);
+    return d;
+  };
+  const file = (sid: string) => path.join(projectDir("c--work-notes"), `${sid}.jsonl`);
+
+  it("draws none of them, and the turns around them as one line of history", () => {
+    const d = session();
+    expect(pathToRoot(one(d, "Shipped.").id, toNodeMap(d.nodes)).map((n) => n.text)).toEqual([
+      "Match this mockup",
+      LOOP,
+      "/brief",
+      "Brief written.",
+      "Ship it",
+      "Shipped.",
+    ]);
+    expect(d.nodes.map((n) => n.text).sort()).toEqual(
+      ["Match this mockup", LOOP, "/brief", "Brief written.", "Ship it", "Shipped.", "Try a darker theme", "Darker it is."].sort(),
+    );
+    // A "Continue" that went nowhere is no branch and no tip.
+    expect(kidsOf(d, one(d, "Brief written."))).toEqual(["Ship it"]);
+  });
+
+  it("keeps a typed turn's cut through the notes that belong to it, though they aren't shown", () => {
+    const d = session();
+    const prompt = one(d, "Match this mockup");
+    expect(prompt.lastRawId).toBe("hn-c1");
+    expect(one(d, "/brief").lastRawId).toBe("hn-s1");
+    const res = forkClaudeAt(HP, forkPointOf(prompt));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const copied = readJsonl(file(res.id)).filter((r) => r.type === "user");
+    expect(copied.map((r) => !!r.isMeta)).toEqual([false, true]);
+    // What the fork draws is what was selected, and nothing is added.
+    expect(mergeSameRoleRuns(parseFile(file(res.id)).nodes).map((n) => n.text)).toEqual(["Match this mockup"]);
+    expect(loadSession(HP)!.nodes.length).toBe(d.nodes.length);
+    fs.rmSync(file(res.id));
+  });
+
+  it("forks a reply written around a note without drawing anything else", () => {
+    // The API message's records stand either side of the tool result and its
+    // caption, so the fork's chain runs through the note.
+    const d = session();
+    const res = forkClaudeAt(HP, forkPointOf(one(d, LOOP)));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(readJsonl(file(res.id)).some((r) => r.isMeta && r.uuid && r.type === "user")).toBe(true);
+    expect(mergeSameRoleRuns(parseFile(file(res.id)).nodes).map((n) => n.text)).toEqual(["Match this mockup", LOOP]);
+    expect(loadSession(HP)!.nodes.length).toBe(d.nodes.length);
+    fs.rmSync(file(res.id));
+  });
+
+  it("stitches copies of them, and ends a fork that stopped before one on the same turn", () => {
+    const d = session();
+    const prompt = one(d, "Match this mockup");
+    const loop = one(d, LOOP);
+    expect(new Set(prompt.heldBy)).toEqual(new Set([HP, HF, HQ]));
+    expect(new Set(loop.heldBy)).toEqual(new Set([HP, HF]));
+    expect(d.members.find((m) => m.id === HQ)!.tipId).toBe(prompt.id);
+    expect(one(d, "Try a darker theme")).toMatchObject({ parentId: loop.id, branchKind: "fork" });
+    expect(actionTarget(d, prompt, HQ).ref.sessionId).toBe(HQ);
+    expect(actionTarget(d, loop, HQ).ref.sessionId).toBe(HP);
+    expect(actionTarget(d, loop, HF).ref.sessionId).toBe(HF);
+  });
+
+  it("changes no identity of a turn still drawn", () => {
+    const records = readRecords(file(HP))!;
+    const earlier = parseRecords(HP, { records: records.map((r) => ({ ...r, isMeta: undefined })), bad: 0 }).nodes;
+    const now = parseRecords(HP, { records, bad: 0 }).nodes;
+    const before = new Map(earlier.map((n) => [n.id, n]));
+    for (const n of now) expect(n.stableIds, n.text).toEqual(before.get(n.id)!.stableIds);
+    // Only the notes leave.
+    expect(earlier.filter((n) => !now.some((x) => x.id === n.id)).map((n) => n.id).sort()).toEqual(
+      ["hn-c1", "hn-c2", "hn-k1", "hn-s1"].sort(),
+    );
+  });
+
+  it("still counts one as activity", () => {
+    const parsed = parseFile(file(HP));
+    const brief = parsed.nodes.find((n) => n.text === "Brief written.")!;
+    expect(brief.activeUntil).toBe(Date.parse("2026-10-01T10:20:00.000Z"));
+  });
+});
+
+describe("A message delivered inside one API message", () => {
+  const session = () => {
+    const d = loadSession(BI)!;
+    expectTree(d);
+    return d;
+  };
+  const texts = ["Build it", "Starting.", "Also test it", "Done.", "Now a smaller one", "and check the logs", "Logs are clean."];
+
+  it("is drawn where it was delivered, between the parts of the reply", () => {
+    const d = session();
+    expect(pathToRoot(one(d, "Logs are clean.").id, toNodeMap(d.nodes)).map((n) => n.text)).toEqual(texts);
+    expect(d.nodes.length).toBe(texts.length);
+    expect(d.members.find((m) => m.id === BI)!.tipId).toBe(one(d, "Logs are clean.").id);
+  });
+
+  it("gives the first drawn part the message's own key and a copy of each part the same", () => {
+    const d = session();
+    expect(one(d, "Starting.").stableIds).toEqual(["m:msg_bi1"]);
+    // Its own content, not its place: a copy of one branch counts differently.
+    expect(one(d, "Done.").stableIds).toEqual([`m:msg_bi1#${digest(JSON.stringify([{ type: "text", text: "Done." }]))}`]);
+    // Nothing of its first block was drawn, so this is the part an earlier
+    // parser keyed: a label saved on it is here.
+    expect(one(d, "Logs are clean.").stableIds).toEqual(["m:msg_bi2"]);
+  });
+
+  it("counts the message's usage once, and every part knows the context it ended on", () => {
+    const d = session();
+    expect(one(d, "Starting.").usage).toBeDefined();
+    expect(one(d, "Done.").usage).toBeUndefined();
+    expect(one(d, "Done.").lastUsage).toEqual(one(d, "Starting.").usage);
+  });
+
+  describe("on two branches", () => {
+    const branched = () => {
+      const d = loadSession(BK)!;
+      expectTree(d);
+      return d;
+    };
+    const pathTo = (d: SessionDetail, text: string) =>
+      pathToRoot(one(d, text).id, toNodeMap(d.nodes)).map((n) => n.text);
+
+    it("draws each continuation under what it continues", () => {
+      const d = branched();
+      expect(pathTo(d, "After interruption.")).toEqual(["Start", "First.", "Interrupt", "After interruption."]);
+      expect(pathTo(d, "Sibling continuation.")).toEqual(["Start", "First.", "Sibling continuation."]);
+      expect(kidsOf(d, one(d, "First."))).toEqual(["Interrupt", "Sibling continuation."]);
+      // Newest of the two: the session's tip is on the branch written last.
+      expect(d.members.find((m) => m.id === BK)!.tipId).toBe(one(d, "Sibling continuation.").id);
+    });
+
+    it("forks each branch to exactly its path, the copy matching its parts", () => {
+      for (const text of ["After interruption.", "Sibling continuation."]) {
+        const d = branched();
+        const res = forkClaudeAt(BK, forkPointOf(one(d, text)));
+        expect(res.ok).toBe(true);
+        if (!res.ok) continue;
+        const file = path.join(projectDir("c--work-inside"), `${res.id}.jsonl`);
+        expect(parseFile(file).nodes.map((n) => n.text)).toEqual(pathTo(d, text));
+        const again = branched();
+        expect(again.nodes.length).toBe(d.nodes.length);
+        expect(new Set(one(again, text).heldBy)).toEqual(new Set([BK, res.id]));
+        expect(one(again, text).stableIds).toEqual(one(d, text).stableIds);
+        expect(one(again, text === "After interruption." ? "Sibling continuation." : "Interrupt").heldBy).toEqual([BK]);
+        fs.rmSync(file);
+      }
+    });
+  });
+
+  it("cuts each part where it ends, and a fork of the first doesn't hold the message", () => {
+    const d = session();
+    const first = one(d, "Starting.");
+    const message = one(d, "Also test it");
+    expect(first.lastRawId).toBe("bi-a1");
+    expect(new Set(first.heldBy)).toEqual(new Set([BI, BJ]));
+    expect(message.heldBy).toEqual([BI]);
+    expect(d.members.find((m) => m.id === BJ)!.tipId).toBe(first.id);
+    expect(actionTarget(d, first, BJ).ref.sessionId).toBe(BJ);
+    expect(actionTarget(d, message, BJ).ref.sessionId).toBe(BI);
+    const res = forkClaudeAt(BI, forkPointOf(first));
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const file = path.join(projectDir("c--work-inside"), `${res.id}.jsonl`);
+    expect(mergeSameRoleRuns(parseFile(file).nodes).map((n) => n.text)).toEqual(["Build it", "Starting."]);
+    fs.rmSync(file);
+  });
+});
+
+describe("A key only a matched copy answers to", () => {
+  const [P, F] = ["50000000-0000-4000-8000-00000000001f", "50000000-0000-4000-8000-000000000020"];
+  const at = (min: number) => new Date(Date.UTC(2026, 9, 3, 10, min)).toISOString();
+  const base = (sid: string) => ({ sessionId: sid, cwd: "C:\\work\\alias", isSidechain: false });
+  const typed = (sid: string, uuid: string, parentUuid: string | null, min: number, text: string, extra = {}) => ({
+    ...base(sid), type: "user", uuid, parentUuid, timestamp: at(min), message: { role: "user", content: text }, ...extra,
+  });
+  const ready = (sid: string, uuid: string, parentUuid: string) => ({
+    ...base(sid), type: "assistant", uuid, parentUuid, timestamp: at(1),
+    message: { id: "msg_alias", role: "assistant", content: [{ type: "text", text: "Ready." }] },
+  });
+  const forkedFrom = { forkedFrom: { sessionId: P, messageUuid: "p-a1" } };
+  const parent = [typed(P, "p-u1", null, 0, "Begin", { promptId: "al-1" }), ready(P, "p-a1", "p-u1"), typed(P, "p-u2", "p-a1", 2, "Next")];
+  const fork = [
+    typed(F, "f-u1", null, 0, "Begin", { promptId: "al-1", ...forkedFrom }),
+    { ...ready(F, "f-a1", "f-u1"), ...forkedFrom },
+    typed(F, "f-n1", "f-a1", 2, "Continue from where you left off.", { isMeta: true, ...forkedFrom }),
+    typed(F, "f-u2", "f-n1", 3, "Next", forkedFrom),
+  ];
+  const dir = () => projectDir("c--work-alias");
+  /** The key the fork's "Next" was saved under, when its note was drawn. */
+  const saved = () =>
+    parseRecords(F, { records: readRecords(path.join(dir(), `${F}.jsonl`))!.map((r) => ({ ...r, isMeta: undefined })), bad: 0 })
+      .nodes.find((n) => n.text === "Next")!.stableIds![0];
+
+  it("reads and clears it across the family, leaving the parse it came from alone", () => {
+    fs.mkdirSync(dir(), { recursive: true });
+    fs.writeFileSync(path.join(dir(), `${P}.jsonl`), parent.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    fs.writeFileSync(path.join(dir(), `${F}.jsonl`), fork.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    try {
+      const key = saved();
+      writeMeta(F, key, { label: "saved", status: "favorite", note: "why" });
+      const d = loadSession(P)!;
+      expectTree(d);
+      expect(new Set(one(d, "Next").heldBy)).toEqual(new Set([P, F]));
+      expect(one(d, "Next")).toMatchObject({ label: "saved", status: "favorite", note: "why" });
+      annotate(P, one(d, "Next").id, { label: undefined, status: undefined, note: undefined });
+      const after = loadSession(P)!;
+      expect(one(after, "Next").label).toBeUndefined();
+      expect(readMeta(F)[key]).toBeUndefined();
+      expect(parseFile(path.join(dir(), `${P}.jsonl`)).nodes.find((n) => n.text === "Next")!.legacyIds ?? []).not.toContain(key);
+    } finally {
+      fs.rmSync(dir(), { recursive: true });
+    }
   });
 });
 

@@ -15,7 +15,7 @@ import { lineageOf, readLineage } from "./lineage.ts";
 import { applyAnnotations } from "./meta.ts";
 import { claudeProjects } from "./paths.ts";
 import { resumeCommandFor } from "./launch.ts";
-import { assignStableIds, digest, foldedDigest } from "./identity.ts";
+import { assignStableIds, digest, foldedDigest, type OwnKey } from "./identity.ts";
 import { overlap, stitchFamily, type ActivityRecord, type FamilyMember } from "./providers/stitch.ts";
 
 function decodeProjectName(dirName: string): string {
@@ -50,6 +50,10 @@ export interface RawRecord {
   entrypoint?: string;
   /** Shared by the prompt record and every tool_result of that prompt. */
   promptId?: string;
+  /** Claude Code's own marker for a `user` record nobody typed (`harnessNote`). */
+  isMeta?: boolean;
+  /** Where a `user` record came from, when it isn't the local user's keyboard alone. */
+  origin?: { kind?: string } | null;
   /**
    * Written by forks made through the Agent SDK's `forkSession` and by
    * Agentree's own fork: the parent session and the message forked after.
@@ -70,8 +74,8 @@ export interface RawRecord {
    */
   attachment?: {
     type?: string;
-    /** Text, or (observed) content blocks. */
-    prompt?: string | unknown[];
+    /** As found: text, or (nearly always on 2.1.289 and later) content blocks. Read by `textOf`. */
+    prompt?: unknown;
     /** "prompt" for the user's own /btw messages, "task-notification" for plumbing. */
     commandMode?: string;
     origin?: { kind?: string } | null;
@@ -258,8 +262,8 @@ function textOf(content: unknown): {
   let media = 0;
   const tools: string[] = [];
   for (const raw of content) {
-    const b = raw as { type?: string; text?: string; thinking?: string; name?: string };
-    switch (b.type) {
+    const b = raw as { type?: string; text?: string; thinking?: string; name?: string } | null;
+    switch (b?.type) {
       case "text":
         text += b.text ?? "";
         break;
@@ -288,6 +292,16 @@ function textOf(content: unknown): {
 }
 
 /**
+ * A `user` record Claude Code wrote for the model, not one the user typed:
+ * the source and scale of a pasted image, a skill's body, "Continue from where
+ * you left off". The role is the API's; the harness says so with `isMeta`, and
+ * leaves these out of its own transcript view. It keeps one back if its origin
+ * is an inbound channel, a list of kinds we don't mirror: one that names any
+ * origin is left to draw, since a note too many beats a message lost.
+ */
+const harnessNote = (rec: RawRecord) => rec.type === "user" && rec.isMeta === true && rec.origin == null;
+
+/**
  * Fold a linear run of consecutive SAME-ROLE turns into one node.
  *
  * Assistant runs: once tool-result records are gone an agent loop is just
@@ -309,6 +323,10 @@ function textOf(content: unknown): {
  * two would draw that fork's endpoint with text it never had, and make its
  * copy of the first reply look like a copy of both. So whoever holds a copy
  * of any part of a merged node holds all of it.
+ *
+ * Nor from a part a fork can cut after into one it can't (a mid-turn
+ * message): the node's verdict is its last part's, so folding them would
+ * take that cut away for the sake of a drawing.
  */
 export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
   const kids = new Map<string, TurnNode[]>();
@@ -336,6 +354,7 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       // them, so a node spanning two could never be forked after all it shows.
       if (cs[0].turnId !== head.turnId) break;
       if (!sameHolders(cur, cs[0])) break;
+      if (cs[0].forkBlocked && !cur.forkBlocked) break;
       cur = cs[0];
       parts.push(cur);
       absorbed.add(cur.id);
@@ -394,9 +413,9 @@ export function mergeSameRoleRuns(nodes: TurnNode[]): TurnNode[] {
       // The fork anchor is the LAST part's, and so is its verdict. "Fork after
       // this turn" must include everything the node shows; falling back to an
       // earlier, anchorable part would silently cut before the later text (a
-      // mid-turn message, a second prompt). A run whose last part can't
-      // anchor (an injected or attachment tail) is unforkable as a whole —
-      // the turn after it is where to fork, and that keeps the message.
+      // mid-turn message, a second prompt). A run of parts that can't anchor
+      // (mid-turn messages in a row) is unforkable as a whole — the turn
+      // after it is where to fork, and that keeps the messages.
       lastRawId: last.lastRawId ?? last.id,
       preCompact: last.preCompact,
       forkBlocked: last.forkBlocked,
@@ -480,9 +499,11 @@ function spliceInterjections(
     const c = r.message?.content;
     if (typeof c === "string") said.add(gist(c));
     else if (Array.isArray(c)) {
-      for (const b of c as { type?: string; text?: string }[]) {
-        if (b.type === "text" && b.text) said.add(gist(b.text));
+      for (const b of c as ({ type?: string; text?: unknown } | null)[]) {
+        if (b?.type === "text" && b.text && typeof b.text === "string") said.add(gist(b.text));
       }
+      // And as delivered: the queue holds one text, however the record split it.
+      said.add(gist(textOf(c).text));
     }
   }
 
@@ -535,7 +556,7 @@ export interface Parsed {
    * which branches mid-run, and its fork, which doesn't).
    */
   nodes: TurnNode[];
-  /** Stitch evidence per node id: `m:<message.id>` / `p:<promptId>|<digest>` / `u:|<digest>`. */
+  /** Stitch evidence per node id: `m:<message.id>[#<part>]` / `p:<promptId>|<digest>` / `u:|<digest>`. */
   keys: Map<NodeId, string>;
   /** The activity records under each node (`markActivity`): what stitching tells copied history from a copy's own work. */
   activity: Map<NodeId, ActivityRecord[]>;
@@ -569,6 +590,8 @@ export interface Parsed {
   /** Explicit lineage stamped by SDK / Agentree forks. */
   forkedFrom?: string;
   unknownTypes: Record<string, number>;
+  /** Mid-turn messages the user typed that yielded no turn: a known record in a shape not understood. */
+  unreadMessages: number;
 }
 
 const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
@@ -584,6 +607,7 @@ const EMPTY = (sessionId: string, problem?: Parsed["problem"]): Parsed => ({
   activeAt: 0,
   cwd: "",
   unknownTypes: {},
+  unreadMessages: 0,
 });
 
 /**
@@ -673,11 +697,10 @@ const isActivity = (rec: RawRecord) =>
  * What a copy keeps of an activity record (`ActivityRecord.key`), bounded as
  * a digest. A copy gives every record a fresh uuid but keeps its time, the
  * API message id and the content, so: the time and kind, the message id, and
- * per content block the call it makes or answers with its length — and an
- * answer's outcome, since a fork that re-runs a copied call answers the same
- * call id. A queued message's prompt the same way. Ids and lengths, not the
- * payload: the key is made for every activity record of every parse. Shapes
- * are as found, never as typed: a prompt can be text or blocks.
+ * per content block the call it makes or answers, with its outcome and a
+ * digest of what it says, since a fork that re-runs a copied call answers the
+ * same call id. A queued message's prompt the same way. Shapes are as found,
+ * never as typed: a prompt can be text or blocks.
  */
 function activityKey(rec: RawRecord): string {
   const parts = [rec.type, rec.subtype, rec.timestamp, rec.message?.id, ...contentKey(rec.message?.content)];
@@ -685,22 +708,16 @@ function activityKey(rec: RawRecord): string {
   return digest(parts.map((p) => p ?? "").join("\u0000"));
 }
 
-/** Text's length, or each block's `blockKey`. */
+/** Text's digest, or each block's `blockKey`. */
 const contentKey = (c: unknown): string[] =>
-  typeof c === "string" ? [String(c.length)] : Array.isArray(c) ? c.map(blockKey) : [];
+  typeof c === "string" ? [digest(c)] : Array.isArray(c) ? c.map(blockKey) : [];
 
-/** A content block's part of `activityKey`: its kind, the call it makes or answers, its outcome and length. */
+/** A content block's part of `activityKey`: its kind, the call it makes or answers, its outcome and a digest of what it says. */
 function blockKey(b: unknown): string {
   if (!b || typeof b !== "object") return "";
   const x = b as { type?: string; id?: string; tool_use_id?: string; is_error?: boolean; text?: unknown; content?: unknown };
-  const body = typeof x.text === "string" ? x.text : x.content;
-  const size =
-    typeof body === "string"
-      ? String(body.length)
-      : Array.isArray(body)
-        ? body.map((p: { type?: string; text?: unknown }) => (typeof p?.text === "string" ? p.text.length : p?.type ?? "")).join(",")
-        : "";
-  return `${x.type ?? ""}:${x.id ?? x.tool_use_id ?? ""}:${x.is_error ? "!" : ""}:${size}`;
+  const body = x.text ?? x.content;
+  return `${x.type ?? ""}:${x.id ?? x.tool_use_id ?? ""}:${x.is_error ? "!" : ""}:${body === undefined ? "" : digest(JSON.stringify(body))}`;
 }
 
 /**
@@ -797,6 +814,15 @@ function sessionCwd(cwds: string[], dirName: string | undefined): string {
     if (!root || cwdKey(c) === cwdKey(root) || !(within(c, root) || within(root, c))) root = c;
   }
   return root;
+}
+
+/** A turn as an earlier drawing had it: enough to give it that drawing's identity. */
+interface EarlierTurn {
+  id: NodeId;
+  parentId: NodeId | null;
+  own: OwnKey;
+  stableIds?: string[];
+  legacyIds?: string[];
 }
 
 /**
@@ -911,7 +937,6 @@ export function parseRecords(
     } else if (
       rec.type === "attachment" &&
       rec.attachment?.type === "queued_command" &&
-      typeof rec.attachment.prompt === "string" &&
       rec.attachment.origin?.kind === "human" &&
       rec.attachment.commandMode !== "task-notification"
     ) {
@@ -919,8 +944,10 @@ export function parseRecords(
       // as a user turn. It has a real uuid at the real delivery point, and —
       // verified against the live CLI — any fork of a LATER turn retains it.
       // (Task notifications ride the same attachment type with
-      // `commandMode: "task-notification"` and a null origin; those are
-      // plumbing and are left out of the tree.)
+      // `commandMode: "task-notification"` and no human origin; those are
+      // plumbing and are left out of the tree.) Whatever shape the prompt
+      // has, it goes through the one reader of message content below, and a
+      // message that yields nothing is counted (`unreadMessages`), not lost.
       records.push({
         type: "user",
         uuid: rec.uuid,
@@ -935,8 +962,9 @@ export function parseRecords(
   }
 
   // Queue-operation reconstruction covers only transcripts old enough to lack
-  // queued_command attachments; spliceInterjections' content dedup (`said`)
-  // sees the attachment-projected user records above and drops duplicates.
+  // queued_command attachments (a block prompt's enqueue holds no text at
+  // all); spliceInterjections' content dedup (`said`) sees the
+  // attachment-projected user records above and drops duplicates.
   spliceInterjections(sessionId, queued, records, parentOf, seq);
 
   // Pass 1b: coalesce each assistant turn back into a single node.
@@ -946,22 +974,48 @@ export function parseRecords(
   // API `message.id`. Drawn naively that's three nodes per turn, two of them
   // with no text. Group by message.id and keep only the first record of each
   // group; `resolveParent` below then re-links children past the absorbed ones.
+  //
+  // A group holds one block of text, with the tool calls and thinking around
+  // it. A message with several is one group per text, and the same-role merge
+  // folds them, where a fork can cut after the whole of what it shows: a block
+  // can stand after something drawn, since a tool can run while its message is
+  // still being written, or continue an earlier block on another branch. Only
+  // the merge sees all of that, and a copy of one branch never would.
+  const conversation = new Map(records.map((r) => [r.uuid!, r]));
   const groups: RawRecord[][] = [];
-  const groupOfKey = new Map<string, RawRecord[]>();
-  const messageIds: string[] = [];
+  const groupOf = new Map<string, RawRecord[]>();
+  const messageIds = new Set<string>();
+  const says = (rec: RawRecord) => !harnessNote(rec) && !!textOf(rec.message?.content).text.trim();
+  /** The group `rec` goes on with: its message's, above it, with nothing drawn between. */
+  const continued = (rec: RawRecord): RawRecord[] | undefined => {
+    const seen = new Set<string>();
+    for (let p = parentOf.get(rec.uuid!); p && !seen.has(p); p = parentOf.get(p)) {
+      seen.add(p);
+      const group = groupOf.get(p);
+      if (group && group[0].message?.id === rec.message!.id) {
+        // Parallel tool calls hang off an earlier block, so that's no branch,
+        // unless the node would end somewhere its text isn't on the way to.
+        const below = group.slice(group.findIndex((r) => r.uuid === p) + 1);
+        return below.some(says) || (says(rec) && group.some(says)) ? undefined : group;
+      }
+      const r = conversation.get(p);
+      if (r && says(r)) return undefined;
+    }
+    return undefined;
+  };
 
   for (const rec of records) {
-    const key =
-      rec.type === "assistant" && rec.message?.id ? `msg:${rec.message.id}` : null;
-    const existing = key ? groupOfKey.get(key) : undefined;
-    if (key && !existing) messageIds.push(rec.message!.id!);
-    if (existing) {
-      existing.push(rec);
+    const id = rec.type === "assistant" ? rec.message?.id : undefined;
+    // A block the CLI rewrote in place, under its uuid, is the same block.
+    let group = id && messageIds.has(id) ? (groupOf.get(rec.uuid!) ?? continued(rec)) : undefined;
+    if (id) messageIds.add(id);
+    if (group) {
+      group.push(rec);
     } else {
-      const group = [rec];
+      group = [rec];
       groups.push(group);
-      if (key) groupOfKey.set(key, group);
     }
+    groupOf.set(rec.uuid!, group);
   }
 
   // Pass 1c: merge each group's blocks, then keep only turns that actually
@@ -1003,15 +1057,12 @@ export function parseRecords(
     };
   });
 
-  const visible = drafts.filter((d) => d.text.trim().length > 0);
-  const kept = new Set(visible.map((d) => d.head.uuid!));
-
-  /** Nearest ancestor that survives the display filter. */
-  const resolveParent = (uuid: string): string | null => {
+  /** Nearest ancestor among `among`. */
+  const nearest = (uuid: string, among: { has(id: string): boolean }): string | null => {
     const seen = new Set<string>([uuid]);
     let p = parentOf.get(uuid) ?? null;
     while (p !== null) {
-      if (kept.has(p)) return p;
+      if (among.has(p)) return p;
       if (seen.has(p)) return null; // malformed transcript; don't loop
       seen.add(p);
       p = parentOf.get(p) ?? null;
@@ -1019,17 +1070,90 @@ export function parseRecords(
     return null;
   };
 
+  // Notes aren't turns (`harnessNote`). One that follows what the user said
+  // is still sent with it, so it stays in that turn's cut: a fork after a
+  // pasted image keeps the image's source, and one after a slash command
+  // keeps the skill it ran. Elsewhere it is dropped like a tool result, and
+  // the turns around it fold as any agent loop does.
+  const turns: Draft[] = [];
+  const carried: string[] = [];
+  for (const d of drafts) {
+    if (!harnessNote(d.head)) {
+      turns.push(d);
+      continue;
+    }
+    const before = turns[turns.length - 1];
+    if (
+      d.text &&
+      before?.head.type === "user" &&
+      before.text.trim() &&
+      nearest(d.head.uuid!, conversation) === before.last.uuid
+    ) {
+      before.last = d.head;
+      carried.push(d.head.uuid!);
+    }
+  }
+
+  const visible = turns.filter((d) => d.text.trim().length > 0);
+  const kept = new Set(visible.map((d) => d.head.uuid!));
+  const unreadMessages = drafts.filter((d) => d.head.agentreeMidTurn && !kept.has(d.head.uuid!)).length;
+
+  /** Nearest ancestor that survives the display filter. */
+  const resolveParent = (uuid: string) => nearest(uuid, kept);
+
+  // Stitch evidence a copy-fork preserves verbatim (uuids are NOT preserved):
+  // the API message id for replies, the prompt id plus the WHOLE text (as a
+  // digest) for prompts. NOT the timestamp: a fork re-stamps its last copied
+  // record, so a fork ending on a prompt without a promptId (older
+  // transcripts) would no longer match its own source. Stitching only
+  // matches under an already matched parent, so without a promptId two
+  // prompts merge only if they are the same text, whitespace and all, in
+  // the same place.
+  // A prompt with a prompt id is keyed `p:` (strong); one without keeps
+  // the `u:` form as the input its parent's identity qualifies. `earlier` is
+  // a prompt's key under identity schemes 2 and 3, for old annotations.
+  //
+  // A message of several parts is one node per part. The first drawn keeps
+  // the message's key, so what was saved on the message is found; a later one
+  // is `m:<id>#<digest>` of its own first block, which every copy of it holds
+  // whatever else that copy holds of the message.
+  const laterPart = new Set<RawRecord>();
+  const seenMessages = new Set<string>();
+  for (const { head } of visible) {
+    const id = head.type === "assistant" ? head.message?.id : undefined;
+    if (!id) continue;
+    if (seenMessages.has(id)) laterPart.add(head);
+    seenMessages.add(id);
+  }
+  const ownKey = (head: RawRecord, text: string): OwnKey => {
+    if (head.type === "assistant" && head.message?.id) {
+      const part = laterPart.has(head) ? `#${digest(JSON.stringify(head.message.content))}` : "";
+      return { key: `m:${head.message.id}${part}`, strong: true };
+    }
+    const pid = head.promptId ?? "";
+    return {
+      key: `${pid ? "p" : "u"}:${pid}|${digest(text)}`,
+      strong: !!pid,
+      earlier: [`u:${pid}|${foldedDigest(text)}`, `u:${pid}|${digest(text)}`],
+    };
+  };
+
   // Pass 2: project the surviving turns.
   const nodes: TurnNode[] = [];
   const keys = new Map<NodeId, string>();
-  /** A prompt's key under identity schemes 2 and 3 (identity.ts), for old annotations. */
-  const earlierKeys = new Map<NodeId, [string, string]>();
-  const strongKeys = new Set<NodeId>();
+  const owned = new Map<NodeId, OwnKey>();
   for (const { head, last, text, thinking, tools } of visible) {
     // Every record in a group repeats the same message-level usage, so take one
     // rather than summing — summing would multiply a turn's cost by its block
-    // count and wreck the overlays.
+    // count and wreck the overlays. So a message's later parts cost nothing
+    // more, while each still ends on that call's context (`lastUsage`).
     const u = last.message?.usage ?? head.message?.usage;
+    const usage = u && {
+      input_tokens: u.input_tokens ?? 0,
+      output_tokens: u.output_tokens ?? 0,
+      cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+      cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+    };
     const id = head.uuid!;
     const injected = id.startsWith(INJECTED_PREFIX);
     const midTurn = !!head.agentreeMidTurn;
@@ -1067,48 +1191,52 @@ export function parseRecords(
       timestamp: head.timestamp ? Date.parse(head.timestamp) : 0,
       // A reply streamed as several records ends with its last one.
       endedAt: last !== head && last.timestamp ? Date.parse(last.timestamp) : undefined,
-      usage: u
-        ? {
-            input_tokens: u.input_tokens ?? 0,
-            output_tokens: u.output_tokens ?? 0,
-            cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
-            cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
-          }
-        : undefined,
+      usage: laterPart.has(head) ? undefined : usage,
+      lastUsage: laterPart.has(head) ? usage : undefined,
     });
 
-    // Stitch evidence a copy-fork preserves verbatim (uuids are NOT preserved):
-    // the API message id for replies, the prompt id plus the WHOLE text (as a
-    // digest) for prompts. NOT the timestamp: a fork re-stamps its last copied
-    // record, so a fork ending on a prompt without a promptId (older
-    // transcripts) would no longer match its own source. Stitching only
-    // matches under an already matched parent, so without a promptId two
-    // prompts merge only if they are the same text, whitespace and all, in
-    // the same place.
-    // A prompt with a prompt id is keyed `p:` (strong); one without keeps
-    // the `u:` form as the input its parent's identity qualifies.
-    const strong = head.type === "assistant" && !!head.message?.id;
-    if (strong) {
-      keys.set(id, `m:${head.message!.id}`);
-    } else {
-      const pid = head.promptId ?? "";
-      keys.set(id, `${pid ? "p" : "u"}:${pid}|${digest(text)}`);
-      earlierKeys.set(id, [`u:${pid}|${foldedDigest(text)}`, `u:${pid}|${digest(text)}`]);
-    }
-    if (strong || head.promptId) strongKeys.add(id);
+    const own = ownKey(head, text);
+    owned.set(id, own);
+    keys.set(id, own.key);
   }
-  const own = new Set(groups.filter((g) => kept.has(g[0].uuid!)).flatMap((g) => g.map((r) => r.uuid!)));
+  const own = new Set([...groups.filter((g) => kept.has(g[0].uuid!)).flatMap((g) => g.map((r) => r.uuid!)), ...carried]);
   const activity = markActivity(nodes, all, kept, own, parentOf);
   // Identity for annotations and selection: the key itself where it's unique
   // (a message id, a prompt id), else qualified by the parent's identity.
-  assignStableIds(nodes, (n) => ({
-    key: keys.get(n.id)!,
-    strong: strongKeys.has(n.id),
-    earlier: earlierKeys.get(n.id),
-  }));
+  assignStableIds(nodes, (n) => owned.get(n.id)!);
+
+  // A weak key is qualified by the drawn parent, so what is drawn is part of
+  // it: annotations saved before a turn's parent appeared or went are under
+  // another key. Block-prompt mid-turn messages weren't drawn, a message wasn't
+  // divided, and notes were drawn. Where a file holds any of these, the
+  // identities of that drawing are kept as the turns' `legacyIds`, each usable
+  // only by the one node that owns it.
+  const wasDrawn = drafts.filter(
+    (d) =>
+      d.text.trim() &&
+      !laterPart.has(d.head) &&
+      !(d.head.agentreeMidTurn && typeof d.head.message?.content !== "string"),
+  );
+  if (wasDrawn.length !== visible.length || wasDrawn.some((d, i) => d !== visible[i])) {
+    const ids = new Set(wasDrawn.map((d) => d.head.uuid!));
+    const earlier: EarlierTurn[] = wasDrawn.map((d) => ({
+      id: d.head.uuid!,
+      parentId: nearest(d.head.uuid!, ids),
+      own: ownKey(d.head, d.text),
+    }));
+    assignStableIds(earlier, (n) => n.own);
+    const was = new Map(earlier.map((n) => [n.id, n]));
+    for (const n of nodes) {
+      const e = was.get(n.id);
+      const kept = [...(e?.stableIds ?? []), ...(e?.legacyIds ?? [])].filter(
+        (k) => k !== n.stableIds![0] && !n.legacyIds?.includes(k),
+      );
+      if (kept.length) n.legacyIds = [...(n.legacyIds ?? []), ...kept];
+    }
+  }
   // Conversation records that produced nothing is what a changed record shape
   // looks like — as opposed to a file of pure bookkeeping, which has none.
-  const problem = nodes.length === 0 && records.some((r) => r.type === "user" || r.type === "assistant")
+  const problem = nodes.length === 0 && records.some((r) => (r.type === "user" && !harnessNote(r)) || r.type === "assistant")
     ? "unrecognized"
     : nodes.length === 0 && read.bad > all.length
       ? "malformed"
@@ -1122,7 +1250,7 @@ export function parseRecords(
     nodes,
     keys,
     activity,
-    messageIds,
+    messageIds: [...messageIds],
     problem,
     // A name the user chose with `/rename` beats the CLI's generated title,
     // which beats anything inferred from the first prompt.
@@ -1138,6 +1266,7 @@ export function parseRecords(
     version,
     forkedFrom,
     unknownTypes,
+    unreadMessages,
   };
 }
 
@@ -1214,6 +1343,7 @@ interface FileSummary {
   forkedFrom?: string;
   problem?: Parsed["problem"];
   unknownTypes: Record<string, number>;
+  unreadMessages: number;
 }
 
 const summaries = new Map<string, FileSummary>();
@@ -1265,6 +1395,7 @@ function summaryOf(
     forkedFrom: parsed.forkedFrom,
     problem: parsed.problem,
     unknownTypes: parsed.unknownTypes,
+    unreadMessages: parsed.unreadMessages,
   };
 }
 
@@ -1738,6 +1869,7 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
   const shadows = new Set<string>();
   let copied = 0;
   let diverged = 0;
+  let unread = 0;
   for (const s of sources) {
     if (s.copies.length < 2) continue;
     copied++;
@@ -1751,6 +1883,12 @@ export function listSessions(opts: { limit?: number } = {}): SessionMeta[] {
     else health.parsed();
     health.version(f.version ? `claude ${minorVersion(f.version)}` : undefined);
     health.unknown(f.unknownTypes);
+    unread += f.unreadMessages;
+  }
+  if (unread) {
+    health.warn(
+      `${unread} message${unread === 1 ? "" : "s"} typed mid-turn couldn't be read and ${unread === 1 ? "isn't" : "aren't"} drawn — the transcript format may have changed.`,
+    );
   }
   if (copied) {
     health.warn(
