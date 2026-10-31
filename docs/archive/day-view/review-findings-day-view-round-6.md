@@ -34,6 +34,14 @@
 > and re-parents the turns after them, which stitching and weak identities
 > both follow, so it needs its own fixture and an identity-compatibility check.
 >
+> **That follow-up, resolved 2026-10-31.** The messages are drawn, and a human
+> message that yields no turn now warns in the health row. No new identity
+> scheme was needed. The audit it called for also found what the measurements
+> above had missed: 25 of the messages folded into the prompt before them, and
+> the merged node's verdict took away the prompt's fork, so a run no longer
+> continues from a part that can anchor into one that can't. Evidence is in the
+> [design notes](../../design.md#mid-turn-messages-btw-interjections-and-compact).
+>
 > Verification: 196 tests in 20 files, `npm run typecheck`, `npm run build`
 > and `npm run build:vscode` pass on Node 26.3.0, Windows. No desktop check:
 > worker-side provider and stitching changes only.

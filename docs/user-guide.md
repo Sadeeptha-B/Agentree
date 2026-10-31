@@ -88,9 +88,12 @@ There are three kinds of line:
 
 Other marks:
 
-- A **hollow dot** is an older mid-turn message reconstructed without its own
-  transcript anchor. Current Claude attachment-backed mid-turn messages also
-  cannot be forked directly; the panel explains the restriction.
+- A **hollow dot** is a message you sent while the agent was working. It
+  can't be forked directly; the panel explains the restriction. The turns on
+  either side of it can.
+- What Claude Code writes to the model itself, such as an image's source path
+  or a skill's body, isn't drawn. A fork after the prompt it belongs to still
+  carries it.
 - A **pulsing ring** marks the newest displayed leaf in the family, which can
   differ from the vendor's active path. Reduced-motion preferences make it static.
 - A fork's first own turn has a **name tag**. An uninformative default title

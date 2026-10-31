@@ -172,6 +172,8 @@ export function stitchFamily(members: FamilyMember[]): TurnNode[] {
             { sessionId: m.sessionId, id: n.id, ...(work ?? {}) },
             ...(n.occurrences ?? []),
           ];
+          // What was saved through this copy is still this turn's.
+          if (n.legacyIds?.length) kept.legacyIds = [...new Set([...(kept.legacyIds ?? []), ...n.legacyIds])];
         }
       } else {
         // COPIES, never the originals: callers keep parsed node arrays in

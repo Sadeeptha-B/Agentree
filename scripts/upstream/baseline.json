@@ -164,6 +164,7 @@
       "compact_boundary",
       "queued_command",
       "promptId",
+      "isMeta",
       "forkedFrom",
       "neutralizedByFork",
       "custom-title"

@@ -91,7 +91,7 @@ export interface TurnNode {
   /**
    * Semantic identity of the message(s) this node draws: the same in every
    * session holding a copy, whatever uuid each copy got (Claude:
-   * `m:<message.id>` / `p:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
+   * `m:<message.id>[#<part>]` / `p:<promptId>|<digest>`; Codex: `<turnId>:<itemId>`;
    * text-only evidence is qualified by its parent's identity — see
    * electron/identity.ts). The node's own comes first, then any merged-in
    * parts'. Keys annotations, and keeps a selection across a reload that
