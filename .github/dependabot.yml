@@ -8,11 +8,27 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # Packages that only install together share a group, majors included:
+    # apart, each pull request fails on the other's peer range.
     groups:
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+      build:
+        patterns: ["vite", "vitest", "@vitejs/plugin-react"]
       dev:
         dependency-type: development
         update-types: [minor, patch]
-    open-pull-requests-limit: 5
+    # Types describe what the code may call, so they stay at the floors the
+    # code runs on: VS Code 1.101's API and its bundled Node 22. A bump belongs
+    # with the change that raises the floor (docs/upstream.md).
+    ignore:
+      - dependency-name: "@types/vscode"
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # A new compiler, not an update: a decision of its own.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 10
   - package-ecosystem: github-actions
     directory: /
     schedule:
