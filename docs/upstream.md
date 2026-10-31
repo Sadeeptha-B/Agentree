@@ -109,7 +109,7 @@ Two rulesets live in `.github/rulesets/` so they can be reviewed and reapplied. 
 
 What applies is what's live, not these files: check with `gh api repos/Sadeeptha-B/Agentree/rulesets`.
 
-The required check also demands a branch up to date with `main` (`strict_required_status_checks_policy: true`, since 2026-10-31), so two pull requests that pass apart can't fail together on `main`. The cost is that each merge puts every other open pull request behind: update it and wait for CI again before merging, so Dependabot's are merged one at a time. If that wait gets in the way, a merge queue is the better answer.
+The required check also demands a branch up to date with `main` (`strict_required_status_checks_policy: true`, since 2026-10-31), so two pull requests that pass apart can't fail together on `main`. The cost is that each merge puts every other open pull request behind: update it and wait for CI again before merging, so Dependabot's are merged one at a time. Comment `@dependabot rebase` on those: Dependabot stops maintaining a branch anyone else has changed. If that wait gets in the way, a merge queue is the better answer.
 
 There is no Marketplace or Open VSX publishing, by the owner's decision (2026-10-28). Before that changes:
 
@@ -121,7 +121,7 @@ There is no Marketplace or Open VSX publishing, by the owner's decision (2026-10
 
 ## Supply chain and privacy
 
-- Actions are pinned to commit SHAs; Dependabot proposes grouped updates for npm and actions after a seven-day cooldown. Every job's token is read-only unless it needs more (the release: contents and attestations; the watch: issues). A job with release write access runs nothing installed: permissions reach every step of a job, and `id-token: write` puts its request token in each step's environment, so packaging is a read-only job of its own. Checkouts don't keep credentials.
+- Actions are pinned to commit SHAs; Dependabot proposes grouped updates for npm and actions after a seven-day cooldown. Packages that only install together (React; vite, vitest and the React plugin) share a group. `@types/vscode` and `@types/node` stay at the floors the code runs on, VS Code 1.101's API and its bundled Node 22, so a newer API can't typecheck and then crash there; they move with the change that raises the floor. TypeScript majors aren't proposed: a new compiler is a decision of its own. Every job's token is read-only unless it needs more (the release: contents and attestations; the watch: issues). A job with release write access runs nothing installed: permissions reach every step of a job, and `id-token: write` puts its request token in each step's environment, so packaging is a read-only job of its own. Checkouts don't keep credentials.
 - `npm ci` installs from the lockfile, the packager included; CI skips Electron's binary download. The watch fetches vendor packages at run time; none is vendored or redistributed. Running the Agent SDK's own fork writer as a canary in CI would be a stronger Claude contract check. It is not done: it executes vendor code beyond printing a schema, and the SDK is deliberately not part of Agentree. That is the owner's call.
 - No real transcript enters CI, an issue or a report. Audits print counts, types, versions and digests. The link check found committed links pointing at an account path under `C:/Users/…` in two archived reviews; they now point into the repository. The modernization handoff named the same path, and a project folder derived from it, as text; both are now generic.
 
